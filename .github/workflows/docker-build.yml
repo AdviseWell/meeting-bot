@@ -18,6 +18,9 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      meeting_bot_digest: ${{ steps.docker_build.outputs.digest }}
+      meeting_bot_tags: ${{ steps.meta.outputs.tags }}
     permissions:
       contents: write    # Needed for pushing tags
       packages: write
@@ -112,6 +115,7 @@ jobs:
 
       # Build (always), push only on main or develop
       - name: Build and push Docker image
+        id: docker_build
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -123,8 +127,44 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Output Meeting-Bot Image Reference
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+        run: |
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "📦 MEETING-BOT IMAGE BUILT AND PUSHED"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo ""
+          echo "Git SHA: $(git rev-parse --short=8 HEAD)"
+          echo "Branch:  ${{ github.ref_name }}"
+          echo ""
+          echo "Image Digest: ${{ steps.docker_build.outputs.digest }}"
+          echo ""
+          echo "Available Tags:"
+          echo "${{ steps.meta.outputs.tags }}" | while read tag; do
+            if [[ -n "$tag" ]]; then
+              echo "  • $tag"
+            fi
+          done
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "🔗 COPY THIS FOR TERRAFORM/KUBERNETES:"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          FIRST_TAG=$(echo "${{ steps.meta.outputs.tags }}" | head -n1)
+          REGISTRY=$(echo "$FIRST_TAG" | cut -d'/' -f1)
+          REPO=$(echo "$FIRST_TAG" | cut -d':' -f1 | cut -d'/' -f2-)
+          echo ""
+          echo "${REGISTRY}/${REPO}@${{ steps.docker_build.outputs.digest }}"
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo ""
+
+
   build-controller:
     runs-on: ubuntu-latest
+    outputs:
+      controller_digest: ${{ steps.controller_docker_build.outputs.digest }}
+      controller_tags: ${{ steps.controller_meta.outputs.tags }}
     permissions:
       contents: read
       packages: write
@@ -194,6 +234,7 @@ jobs:
 
       # Build controller image (always), push only on main or develop
       - name: Build and push controller Docker image
+        id: controller_docker_build
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -204,3 +245,77 @@ jobs:
           labels: ${{ steps.controller_meta.outputs.labels }}
           cache-from: type=gha,scope=controller
           cache-to: type=gha,mode=max,scope=controller
+
+      - name: Output Controller Image Reference
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+        run: |
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "📦 CONTROLLER IMAGE BUILT AND PUSHED"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo ""
+          echo "Git SHA: $(git rev-parse --short=8 HEAD)"
+          echo "Branch:  ${{ github.ref_name }}"
+          echo ""
+          echo "Image Digest: ${{ steps.controller_docker_build.outputs.digest }}"
+          echo ""
+          echo "Available Tags:"
+          echo "${{ steps.controller_meta.outputs.tags }}" | while read tag; do
+            if [[ -n "$tag" ]]; then
+              echo "  • $tag"
+            fi
+          done
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "🔗 COPY THIS FOR TERRAFORM/KUBERNETES:"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          FIRST_TAG=$(echo "${{ steps.controller_meta.outputs.tags }}" | head -n1)
+          REGISTRY=$(echo "$FIRST_TAG" | cut -d'/' -f1)
+          REPO=$(echo "$FIRST_TAG" | cut -d':' -f1 | cut -d'/' -f2-)
+          echo ""
+          echo "${REGISTRY}/${REPO}@${{ steps.controller_docker_build.outputs.digest }}"
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo ""
+
+  summary:
+    name: Build Summary
+    runs-on: ubuntu-latest
+    needs: [build, build-controller]
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Display Build Summary
+        run: |
+          echo ""
+          echo "╔═══════════════════════════════════════════════════════════════════════════╗"
+          echo "║                    🎉 BUILD COMPLETE - IMAGE SUMMARY                      ║"
+          echo "╚═══════════════════════════════════════════════════════════════════════════╝"
+          echo ""
+          echo "Branch:    ${{ github.ref_name }}"
+          echo "Commit:    $(git rev-parse --short=8 HEAD)"
+          echo "Timestamp: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "📋 COPY THESE REFERENCES FOR TERRAFORM_KEDA_INSTRUCTIONS.md"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo ""
+          echo "controller:"
+          CONTROLLER_TAG=$(echo "${{ needs.build-controller.outputs.controller_tags }}" | head -n1)
+          CONTROLLER_REGISTRY=$(echo "$CONTROLLER_TAG" | cut -d'/' -f1)
+          CONTROLLER_REPO=$(echo "$CONTROLLER_TAG" | cut -d':' -f1 | cut -d'/' -f2-)
+          echo "  ${CONTROLLER_REGISTRY}/${CONTROLLER_REPO}@${{ needs.build-controller.outputs.controller_digest }}"
+          echo ""
+          echo "meeting-bot:"
+          MEETINGBOT_TAG=$(echo "${{ needs.build.outputs.meeting_bot_tags }}" | head -n1)
+          MEETINGBOT_REGISTRY=$(echo "$MEETINGBOT_TAG" | cut -d'/' -f1)
+          MEETINGBOT_REPO=$(echo "$MEETINGBOT_TAG" | cut -d':' -f1 | cut -d'/' -f2-)
+          echo "  ${MEETINGBOT_REGISTRY}/${MEETINGBOT_REPO}@${{ needs.build.outputs.meeting_bot_digest }}"
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo ""
+          echo "✅ Both images built and pushed successfully!"
+          echo ""
+

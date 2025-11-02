@@ -26,11 +26,29 @@ app.get('/isbusy', async (req, res) => {
 
 app.get('/health', async (req, res) => {
   // Simple health check endpoint for Docker
-  return res.status(200).json({ 
-    status: 'healthy', 
+  return res.status(200).json({
+    status: 'healthy',
     timestamp: new Date().toISOString(),
     uptime: process.uptime()
   });
+});
+
+app.post('/shutdown', async (req, res) => {
+  // Endpoint to trigger graceful shutdown
+  // This is called by the controller after all files are uploaded
+  console.log('Shutdown endpoint called - initiating graceful shutdown');
+
+  // Send response immediately
+  res.status(200).json({
+    success: true,
+    message: 'Shutdown initiated'
+  });
+
+  // Trigger shutdown after a short delay to allow response to be sent
+  setTimeout(() => {
+    console.log('Triggering graceful shutdown process');
+    process.kill(process.pid, 'SIGTERM');
+  }, 500);
 });
 
 // Create a Gauge metric for busy status (0 or 1)

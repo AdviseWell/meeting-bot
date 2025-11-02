@@ -147,3 +147,27 @@ class MeetingMonitor:
             # Job still in progress, wait before next check
             logger.debug(f"Job still in progress ({state}), waiting {check_interval}s...")
             time.sleep(check_interval)
+    
+    def shutdown(self) -> bool:
+        """
+        Trigger graceful shutdown of the meeting-bot service
+        
+        Returns:
+            True if shutdown request was successful, False otherwise
+        """
+        try:
+            endpoint = f"{self.api_base_url}/shutdown"
+            
+            logger.info("Triggering meeting-bot shutdown...")
+            response = requests.post(
+                endpoint,
+                timeout=10
+            )
+            
+            response.raise_for_status()
+            logger.info("Shutdown request sent successfully")
+            return True
+            
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Failed to trigger shutdown: {e}")
+            return False

@@ -123,6 +123,15 @@ class MeetingController:
                 
                 # Cleanup local files
                 self.media_converter.cleanup(recording_path, mp4_path, aac_path)
+                
+                # Trigger shutdown of meeting-bot container
+                logger.info("Triggering meeting-bot shutdown...")
+                shutdown_success = self.meeting_monitor.shutdown()
+                if shutdown_success:
+                    logger.info("Meeting-bot shutdown triggered successfully")
+                else:
+                    logger.warning("Failed to trigger meeting-bot shutdown, but processing completed successfully")
+                
                 return True
             else:
                 logger.error("Failed to upload one or more files to GCS")

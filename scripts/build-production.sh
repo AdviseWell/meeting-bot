@@ -1,8 +1,11 @@
 #!/bin/bash
 
 # Build production Docker image locally for testing
+# NOTE: This script is deprecated. Use build-meeting-bot.sh instead for better output.
 set -e
 
+echo "⚠️  Note: Consider using ./scripts/build-meeting-bot.sh for better build output with git SHA tags"
+echo ""
 echo "🏗️  Building production Docker image..."
 
 # Build the production image
