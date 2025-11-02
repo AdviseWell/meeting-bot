@@ -53,7 +53,7 @@ async function launchBrowserWithTimeout(launchFn: () => Promise<Browser>, timeou
         }
       })
       .catch(err => {
-        console.error(`${getCorrelationIdLog(correlationId)} Error launching browser`, err);  
+        console.error(`${getCorrelationIdLog(correlationId)} Error launching browser`, err);
         if (!finished) {
           finished = true;
           clearTimeout(timeoutId);
@@ -77,6 +77,22 @@ async function createBrowserContext(url: string, correlationId: string): Promise
     `--window-size=${size.width},${size.height}`,
     '--auto-accept-this-tab-capture',
     '--enable-features=MediaRecorder',
+    // Performance optimizations
+    '--disable-extensions',
+    '--disable-component-extensions-with-background-pages',
+    '--disable-background-networking',
+    '--disable-sync',
+    '--disable-translate',
+    '--disable-features=TranslateUI',
+    '--no-first-run',
+    '--no-default-browser-check',
+    '--disable-backgrounding-occluded-windows',
+    '--disable-renderer-backgrounding',
+    '--disable-background-timer-throttling',
+    '--disable-hang-monitor',
+    '--disable-prompt-on-repost',
+    '--disable-domain-reliability',
+    '--disable-component-update',
   ];
 
   const browser = await launchBrowserWithTimeout(
@@ -91,7 +107,7 @@ async function createBrowserContext(url: string, correlationId: string): Promise
   );
 
   const linuxX11UserAgent = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36';
-  
+
   const context = await browser.newContext({
     permissions: ['camera', 'microphone'],
     viewport: size,

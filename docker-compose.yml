@@ -5,14 +5,16 @@ services:
       dockerfile: Dockerfile.development
     environment:
       - NODE_ENV=development
+      - MAX_RECORDING_DURATION_MINUTES=180
+      - MEETING_INACTIVITY_MINUTES=15
+      - INACTIVITY_DETECTION_START_DELAY_MINUTES=5
     ports:
-      - "3000:3000"
+      - "5001:3000"
     volumes:
       - .:/usr/src/app
       - ./assets/screenshots:/usr/src/app/assets/screenshots
       - /usr/src/app/node_modules
-    command: ["/bin/bash", "./start.sh"]
-
+    command: [ "/bin/bash", "./start.sh" ]
 
 volumes:
   cache:

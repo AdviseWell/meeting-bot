@@ -47,12 +47,12 @@ export class GoogleMeetBot extends MeetBotBase {
       }
 
       await patchBotStatus({ botId, eventId, provider: 'google', status: _state, token: bearerToken }, this._logger);
-    } catch(error) {
-      if (!_state.includes('finished')) 
+    } catch (error) {
+      if (!_state.includes('finished'))
         _state.push('failed');
 
       await patchBotStatus({ botId, eventId, provider: 'google', status: _state, token: bearerToken }, this._logger);
-      
+
       if (error instanceof WaitingAtLobbyRetryError) {
         await handleWaitingAtLobbyError({ token: bearerToken, botId, eventId, provider: 'google', error }, this._logger);
       }
@@ -71,10 +71,7 @@ export class GoogleMeetBot extends MeetBotBase {
     this.page = await createBrowserContext(url, this._correlationId);
 
     this._logger.info('Navigating to Google Meet URL...');
-    await this.page.goto(url, { waitUntil: 'networkidle' });
-
-    this._logger.info('Waiting for 10 seconds...');
-    await this.page.waitForTimeout(10000);
+    await this.page.goto(url, { waitUntil: 'domcontentloaded' });
 
     const dismissDeviceCheck = async () => {
       try {
@@ -118,7 +115,7 @@ export class GoogleMeetBot extends MeetBotBase {
           return signInPage ? 'SIGN_IN_PAGE' : 'UNSUPPORTED_PAGE';
         }
         return 'GOOGLE_MEET_PAGE';
-      } catch(e) {
+      } catch (e) {
         this._logger.error('Error verifying if Google Meet bot is on the Google Meet page...', { error: e, message: e?.message });
         return null;
       }
@@ -145,16 +142,10 @@ export class GoogleMeetBot extends MeetBotBase {
         await uploadDebugImage(await this.page.screenshot({ type: 'png', fullPage: true }), 'text-input-field-wait', userId, this._logger, botId);
       }
     );
-    
-    this._logger.info('Waiting for 10 seconds...');
-    await this.page.waitForTimeout(10000);
 
     this._logger.info('Filling the input field with the name...');
     await this.page.fill('input[type="text"][aria-label="Your name"]', name ? name : 'ScreenApp Notetaker');
 
-    this._logger.info('Waiting for 10 seconds...');
-    await this.page.waitForTimeout(10000);
-    
     await retryActionWithWait(
       'Clicking the "Ask to join" button',
       async () => {
@@ -176,7 +167,7 @@ export class GoogleMeetBot extends MeetBotBase {
               this._logger.info(`Success clicked using "${text}" action...`);
               break;
             }
-          } catch(err) {
+          } catch (err) {
             this._logger.warn(`Unable to click using "${text}" action...`);
           }
         }
@@ -236,7 +227,7 @@ export class GoogleMeetBot extends MeetBotBase {
 
             try {
               peopleElement = await this.page.waitForSelector('button[aria-label="People"]', { timeout: 5000 });
-            } catch(e) {
+            } catch (e) {
               this._logger.error(
                 'wait error', { error: e }
               );
@@ -245,7 +236,7 @@ export class GoogleMeetBot extends MeetBotBase {
 
             try {
               callButtonElement = await this.page.waitForSelector('button[aria-label="Leave call"]', { timeout: 5000 });
-            } catch(e) {
+            } catch (e) {
               this._logger.error(
                 'wait error', { error: e }
               );
@@ -269,7 +260,7 @@ export class GoogleMeetBot extends MeetBotBase {
                 clearTimeout(waitTimeout);
                 resolveWaiting(true);
                 return;
-              }              
+              }
             }
 
             try {
@@ -278,7 +269,7 @@ export class GoogleMeetBot extends MeetBotBase {
                 botWasDeniedAccess = true;
               }
             }
-            catch(e) {
+            catch (e) {
               //do nothing
             }
             if (botWasDeniedAccess) {
@@ -287,7 +278,7 @@ export class GoogleMeetBot extends MeetBotBase {
               clearTimeout(waitTimeout);
               resolveWaiting(false);
             }
-          } catch(e) {
+          } catch (e) {
             this._logger.error(
               'wait error', { error: e }
             );
@@ -306,7 +297,7 @@ export class GoogleMeetBot extends MeetBotBase {
 
         throw new WaitingAtLobbyRetryError('Google Meet bot could not enter the meeting...', bodyText ?? '', !userDenied, 2);
       }
-    } catch(lobbyError) {
+    } catch (lobbyError) {
       this._logger.info('Closing the browser on error...', lobbyError);
       await this.page.context().browser()?.close();
 
@@ -330,13 +321,13 @@ export class GoogleMeetBot extends MeetBotBase {
         const visibleButtons = await this.page.locator('button:visible', {
           hasText: 'Got it',
         }).all();
-      
+
         const currentButtonCount = visibleButtons.length;
-        
+
         if (currentButtonCount === 0) {
           break;
         }
-        
+
         // Check if button count hasn't changed (indicating we might be stuck)
         if (currentButtonCount === previousButtonCount) {
           consecutiveNoChangeCount++;
@@ -347,7 +338,7 @@ export class GoogleMeetBot extends MeetBotBase {
         } else {
           consecutiveNoChangeCount = 0;
         }
-        
+
         previousButtonCount = currentButtonCount;
 
         for (const btn of visibleButtons) {
@@ -355,13 +346,13 @@ export class GoogleMeetBot extends MeetBotBase {
             await btn.click({ timeout: 5000 });
             gotItButtonsClicked++;
             this._logger.info(`Clicked a "Got it" button #${gotItButtonsClicked}`);
-            
+
             await this.page.waitForTimeout(2000);
           } catch (err) {
             this._logger.warn('Click failed, possibly already dismissed', { error: err });
           }
         }
-      
+
         await this.page.waitForTimeout(2000);
       }
     } catch (error) {
@@ -377,8 +368,8 @@ export class GoogleMeetBot extends MeetBotBase {
   }
 
   private async recordMeetingPage(
-    { teamId, userId, eventId, botId, uploader }: 
-    { teamId: string, userId: string, eventId?: string, botId?: string, uploader: IUploader }
+    { teamId, userId, eventId, botId, uploader }:
+      { teamId: string, userId: string, eventId?: string, botId?: string, uploader: IUploader }
   ): Promise<void> {
     const duration = config.maxRecordingDuration * 60 * 1000;
     const inactivityLimit = config.inactivityLimit * 60 * 1000;
@@ -387,7 +378,7 @@ export class GoogleMeetBot extends MeetBotBase {
     this.page?.on('console', async msg => {
       try {
         await browserLogCaptureCallback(this._logger, msg);
-      } catch(err) {
+      } catch (err) {
         this._logger.info('Playwright chrome logger: Failed to log browser messages...', err?.message);
       }
     });
@@ -411,8 +402,8 @@ export class GoogleMeetBot extends MeetBotBase {
 
     // Inject the MediaRecorder code into the browser context using page.evaluate
     await this.page.evaluate(
-      async ({ teamId, duration, inactivityLimit, userId, slightlySecretId, activateInactivityDetectionAfter, activateInactivityDetectionAfterMinutes, primaryMimeType, secondaryMimeType }: 
-      { teamId:string, userId: string, duration: number, inactivityLimit: number, slightlySecretId: string, activateInactivityDetectionAfter: string, activateInactivityDetectionAfterMinutes: number, primaryMimeType: string, secondaryMimeType: string }) => {
+      async ({ teamId, duration, inactivityLimit, userId, slightlySecretId, activateInactivityDetectionAfter, activateInactivityDetectionAfterMinutes, primaryMimeType, secondaryMimeType }:
+        { teamId: string, userId: string, duration: number, inactivityLimit: number, slightlySecretId: string, activateInactivityDetectionAfter: string, activateInactivityDetectionAfterMinutes: number, primaryMimeType: string, secondaryMimeType: string }) => {
         let timeoutId: NodeJS.Timeout;
         let inactivityParticipantDetectionTimeout: NodeJS.Timeout;
         let inactivitySilenceDetectionTimeout: NodeJS.Timeout;
@@ -439,7 +430,7 @@ export class GoogleMeetBot extends MeetBotBase {
             console.error('MediaDevices or getDisplayMedia not supported in this browser.');
             return;
           }
-          
+
           const stream: MediaStream = await (navigator.mediaDevices as any).getDisplayMedia({
             video: true,
             audio: {
@@ -455,19 +446,27 @@ export class GoogleMeetBot extends MeetBotBase {
           // Check if we actually got audio tracks
           const audioTracks = stream.getAudioTracks();
           const hasAudioTracks = audioTracks.length > 0;
-          
+
           if (!hasAudioTracks) {
             console.warn('No audio tracks available for silence detection. Will rely only on presence detection.');
           }
 
           let options: MediaRecorderOptions = {};
           if (MediaRecorder.isTypeSupported(primaryMimeType)) {
-            console.log(`Media Recorder will use ${primaryMimeType} codecs...`);
-            options = { mimeType: primaryMimeType };
+            console.log(`Media Recorder will use ${primaryMimeType} codecs with ultra quality...`);
+            options = {
+              mimeType: primaryMimeType,
+              videoBitsPerSecond: 5000000,  // 5 Mbps for high quality video
+              audioBitsPerSecond: 256000     // 256 kbps for high quality audio
+            };
           }
           else {
             console.warn(`Media Recorder did not find primary mime type codecs ${primaryMimeType}, Using fallback codecs ${secondaryMimeType}`);
-            options = { mimeType: secondaryMimeType };
+            options = {
+              mimeType: secondaryMimeType,
+              videoBitsPerSecond: 5000000,  // 5 Mbps for high quality video
+              audioBitsPerSecond: 256000     // 256 kbps for high quality audio
+            };
           }
 
           const mediaRecorder = new MediaRecorder(stream, { ...options });
@@ -533,18 +532,18 @@ export class GoogleMeetBot extends MeetBotBase {
 
           function detectLoneParticipantResilient(): void {
             const re = /^[0-9]+$/;
-          
+
             function getContributorsCount(): number | undefined {
               function findPeopleButton() {
                 try {
                   // 1. Try to locate using attribute "starts with"
                   let btn: Element | null | undefined = document.querySelector('button[aria-label^="People -"]');
                   if (btn) return btn;
-                
+
                   // 2. Try to locate using attribute "contains"
                   btn = document.querySelector('button[aria-label*="People"]');
                   if (btn) return btn;
-                
+
                   // 3. Try via regex on aria-label (for more complex patterns)
                   const allBtns = Array.from(document.querySelectorAll('button[aria-label]'));
                   btn = allBtns.find(b => {
@@ -552,7 +551,7 @@ export class GoogleMeetBot extends MeetBotBase {
                     return label && /^People - \d+ joined$/.test(label);
                   });
                   if (btn) return btn;
-                
+
                   // 4. Fallback: Look for button with a child icon containing "people"
                   btn = allBtns.find(b =>
                     Array.from(b.querySelectorAll('i')).some(i =>
@@ -560,7 +559,7 @@ export class GoogleMeetBot extends MeetBotBase {
                     )
                   );
                   if (btn) return btn;
-                
+
                   // 5. Not found
                   return null;
                 } catch (error) {
@@ -583,10 +582,10 @@ export class GoogleMeetBot extends MeetBotBase {
               } catch {
                 console.log('1 Error getting contributors count:', { root: document.body.innerText });
               }
-          
+
               return undefined;
             }
-          
+
             function retryWithBackoff(): void {
               loneTest = setTimeout(function check() {
                 if (!loneTestDetectionActive) {
@@ -625,7 +624,7 @@ export class GoogleMeetBot extends MeetBotBase {
                 retryWithBackoff();
               }, 5000);
             }
-          
+
             retryWithBackoff();
           }
 
@@ -651,7 +650,7 @@ export class GoogleMeetBot extends MeetBotBase {
               mediaSource.connect(analyser);
 
               const dataArray = new Uint8Array(analyser.frequencyBinCount);
-              
+
               // Sliding silence period
               let silenceDuration = 0;
               let totalChecks = 0;
@@ -673,10 +672,10 @@ export class GoogleMeetBot extends MeetBotBase {
                   if (audioActivity < silenceThreshold) {
                     silenceDuration += 100; // Check every 100ms
                     if (silenceDuration >= inactivityLimit) {
-                        console.warn('Detected silence in Google Meet and ending the recording on team:', userId, teamId);
-                        console.log('Silence detection stats - Avg audio activity:', (audioActivitySum / totalChecks).toFixed(2), 'Checks performed:', totalChecks);
-                        monitor = false;
-                        stopTheRecording();
+                      console.warn('Detected silence in Google Meet and ending the recording on team:', userId, teamId);
+                      console.log('Silence detection stats - Avg audio activity:', (audioActivitySum / totalChecks).toFixed(2), 'Checks performed:', totalChecks);
+                      monitor = false;
+                      stopTheRecording();
                     }
                   } else {
                     silenceDuration = 0;
@@ -724,7 +723,7 @@ export class GoogleMeetBot extends MeetBotBase {
                   console.log('Found "Got it" button, clicking it...', dismissButtons[0]);
                   dismissButtons[0].click();
                 }
-              } catch(error) {
+              } catch (error) {
                 lastDimissError = error;
                 dismissModalErrorCount += 1;
                 if (dismissModalErrorCount > maxDismissModalErrorCount) {
@@ -759,7 +758,7 @@ export class GoogleMeetBot extends MeetBotBase {
 
                 // Check for basic Google Meet UI elements
                 const hasMeetElements = document.querySelector('button[aria-label="People"]') !== null ||
-                                      document.querySelector('button[aria-label="Leave call"]') !== null;
+                  document.querySelector('button[aria-label="Leave call"]') !== null;
 
                 if (!hasMeetElements) {
                   console.warn('Google Meet UI elements not found - page may have changed state');
@@ -786,7 +785,7 @@ export class GoogleMeetBot extends MeetBotBase {
           detectModalsAndDismiss();
 
           detectMeetingIsOnAValidPage();
-          
+
           // Cancel this timeout when stopping the recording
           // Stop recording after `duration` minutes upper limit
           timeoutId = setTimeout(async () => {
@@ -797,7 +796,7 @@ export class GoogleMeetBot extends MeetBotBase {
         // Start the recording
         await startRecording();
       },
-      { 
+      {
         teamId,
         duration,
         inactivityLimit,
@@ -809,7 +808,7 @@ export class GoogleMeetBot extends MeetBotBase {
         secondaryMimeType: vp9MimeType
       }
     );
-  
+
     this._logger.info('Waiting for recording duration', config.maxRecordingDuration, 'minutes...');
     const processingTime = 0.2 * 60 * 1000;
     const waitingPromise: WaitPromise = getWaitingPromise(processingTime + duration);

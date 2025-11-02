@@ -40,13 +40,13 @@ export class MicrosoftTeamsBot extends MeetBotBase {
 
       // Finish the upload from the temp video
       await handleUpload();
-    } catch(error) {
-      if (!_state.includes('finished')) 
+    } catch (error) {
+      if (!_state.includes('finished'))
         _state.push('failed');
 
       await patchBotStatus({ botId, eventId, provider: 'microsoft', status: _state, token: bearerToken }, this._logger);
-      
-      if (error instanceof WaitingAtLobbyRetryError) 
+
+      if (error instanceof WaitingAtLobbyRetryError)
         await handleWaitingAtLobbyError({ token: bearerToken, botId, eventId, provider: 'microsoft', error }, this._logger);
 
       throw error;
@@ -58,13 +58,8 @@ export class MicrosoftTeamsBot extends MeetBotBase {
 
     this.page = await createBrowserContext(url, this._correlationId);
 
-    await this.page.waitForTimeout(1000);
-
     this._logger.info('Navigating to Microsoft Teams Meeting URL...');
-    await this.page.goto(url, { waitUntil: 'networkidle' });
-
-    this._logger.info('Waiting for 10 seconds...');
-    await this.page.waitForTimeout(10000);
+    await this.page.goto(url, { waitUntil: 'domcontentloaded' });
 
     let joinFromBrowserButtonFound = false;
 
@@ -75,9 +70,6 @@ export class MicrosoftTeamsBot extends MeetBotBase {
         async () => {
           await this.page.waitForSelector('button[aria-label="Join meeting from this browser"]', { timeout: 60000 });
           joinFromBrowserButtonFound = true;
-
-          this._logger.info('Waiting for 10 seconds...');
-          await this.page.waitForTimeout(10000);
         },
         this._logger,
         1,
@@ -123,17 +115,11 @@ export class MicrosoftTeamsBot extends MeetBotBase {
         await uploadDebugImage(await this.page.screenshot({ type: 'png', fullPage: true }), 'input-field-visible', userId, this._logger, botId);
       }
     );
-    
-    await dismissDeviceCheck();
 
-    this._logger.info('Waiting for 10 seconds...');
-    await this.page.waitForTimeout(10000);
+    await dismissDeviceCheck();
 
     this._logger.info('Filling the input field with the name...');
     await this.page.fill('input[type="text"]', name ? name : 'ScreenApp Notetaker');
-
-    this._logger.info('Waiting for 5 seconds...');
-    await this.page.waitForTimeout(5000);
 
     this._logger.info('Clicking the "Join now" button...');
     await retryActionWithWait(
@@ -165,7 +151,7 @@ export class MicrosoftTeamsBot extends MeetBotBase {
 
       this._logger.error('Closing the browser on error...', error);
       await this.page.context().browser()?.close();
-      
+
       throw new WaitingAtLobbyRetryError('Microsoft Teams Meeting bot could not enter the meeting...', bodyText ?? '', !userDenied, 2);
     }
 
@@ -188,23 +174,23 @@ export class MicrosoftTeamsBot extends MeetBotBase {
         try {
           this._logger.info('Waiting for the "Close" button...');
           await this.page.waitForSelector('button[title="Close"]', { timeout: 5000 });
-    
+
           this._logger.info('Going to click all visible "Close" buttons...');
-    
+
           let closeButtonsClicked = 0;
           let previousButtonCount = -1;
           let consecutiveNoChangeCount = 0;
           const maxConsecutiveNoChange = 2; // Stop if button count doesn't change for 2 consecutive iterations
-    
+
           while (true) {
             const visibleButtons = await this.page.locator('button[title="Close"]:visible').all();
-          
+
             const currentButtonCount = visibleButtons.length;
-            
+
             if (currentButtonCount === 0) {
               break;
             }
-            
+
             // Check if button count hasn't changed (indicating we might be stuck)
             if (currentButtonCount === previousButtonCount) {
               consecutiveNoChangeCount++;
@@ -215,21 +201,21 @@ export class MicrosoftTeamsBot extends MeetBotBase {
             } else {
               consecutiveNoChangeCount = 0;
             }
-            
+
             previousButtonCount = currentButtonCount;
-    
+
             for (const btn of visibleButtons) {
               try {
                 await btn.click({ timeout: 5000 });
                 closeButtonsClicked++;
                 this._logger.info(`Clicked a "Close" button #${closeButtonsClicked}`);
-                
+
                 await this.page.waitForTimeout(2000);
               } catch (err) {
                 this._logger.warn('Click failed, possibly already dismissed', { error: err });
               }
             }
-          
+
             await this.page.waitForTimeout(2000);
           }
         } catch (error) {
@@ -247,13 +233,13 @@ export class MicrosoftTeamsBot extends MeetBotBase {
     // Recording the meeting page
     this._logger.info('Begin recording...');
     await this.recordMeetingPage({ teamId, userId, eventId, botId, uploader });
-    
+
     pushState('finished');
   }
 
   private async recordMeetingPage(
-    { teamId, userId, eventId, botId, uploader }: 
-    { teamId: string, userId: string, eventId?: string, botId?: string, uploader: IUploader }
+    { teamId, userId, eventId, botId, uploader }:
+      { teamId: string, userId: string, eventId?: string, botId?: string, uploader: IUploader }
   ): Promise<void> {
     const duration = config.maxRecordingDuration * 60 * 1000;
     const inactivityLimit = config.inactivityLimit * 60 * 1000;
@@ -262,7 +248,7 @@ export class MicrosoftTeamsBot extends MeetBotBase {
     this.page?.on('console', async msg => {
       try {
         await browserLogCaptureCallback(this._logger, msg);
-      } catch(err) {
+      } catch (err) {
         this._logger.info('Failed to log browser messages...', err?.message);
       }
     });
@@ -287,8 +273,8 @@ export class MicrosoftTeamsBot extends MeetBotBase {
 
     // Inject the MediaRecorder code into the browser context using page.evaluate
     await this.page.evaluate(
-      async ({ teamId, duration, inactivityLimit, userId, slightlySecretId, activateInactivityDetectionAfter, activateInactivityDetectionAfterMinutes, primaryMimeType, secondaryMimeType }: 
-      { teamId: string, duration: number, inactivityLimit: number, userId: string, slightlySecretId: string, activateInactivityDetectionAfter: string, activateInactivityDetectionAfterMinutes: number, primaryMimeType: string, secondaryMimeType: string }) => {
+      async ({ teamId, duration, inactivityLimit, userId, slightlySecretId, activateInactivityDetectionAfter, activateInactivityDetectionAfterMinutes, primaryMimeType, secondaryMimeType }:
+        { teamId: string, duration: number, inactivityLimit: number, userId: string, slightlySecretId: string, activateInactivityDetectionAfter: string, activateInactivityDetectionAfterMinutes: number, primaryMimeType: string, secondaryMimeType: string }) => {
         let timeoutId: NodeJS.Timeout;
         let inactivityDetectionTimeout: NodeJS.Timeout;
 
@@ -318,7 +304,7 @@ export class MicrosoftTeamsBot extends MeetBotBase {
             console.error('MediaDevices or getDisplayMedia not supported in this browser.');
             return;
           }
-          
+
           const stream: MediaStream = await (navigator.mediaDevices as any).getDisplayMedia({
             video: true,
             audio: {
@@ -333,12 +319,20 @@ export class MicrosoftTeamsBot extends MeetBotBase {
 
           let options: MediaRecorderOptions = {};
           if (MediaRecorder.isTypeSupported(primaryMimeType)) {
-            console.log(`Media Recorder will use ${primaryMimeType} codecs...`);
-            options = { mimeType: primaryMimeType };
+            console.log(`Media Recorder will use ${primaryMimeType} codecs with ultra quality...`);
+            options = {
+              mimeType: primaryMimeType,
+              videoBitsPerSecond: 5000000,  // 5 Mbps for high quality video
+              audioBitsPerSecond: 256000     // 256 kbps for high quality audio
+            };
           }
           else {
             console.warn(`Media Recorder did not find primary mime type codecs ${primaryMimeType}, Using fallback codecs ${secondaryMimeType}`);
-            options = { mimeType: secondaryMimeType };
+            options = {
+              mimeType: secondaryMimeType,
+              videoBitsPerSecond: 5000000,  // 5 Mbps for high quality video
+              audioBitsPerSecond: 256000     // 256 kbps for high quality audio
+            };
           }
 
           const mediaRecorder = new MediaRecorder(stream, { ...options });
@@ -412,7 +406,7 @@ export class MicrosoftTeamsBot extends MeetBotBase {
             mediaSource.connect(analyser);
 
             const dataArray = new Uint8Array(analyser.frequencyBinCount);
-            
+
             // Sliding silence period
             let silenceDuration = 0;
 
@@ -429,9 +423,9 @@ export class MicrosoftTeamsBot extends MeetBotBase {
               if (audioActivity < silenceThreshold) {
                 silenceDuration += 100; // Check every 100ms
                 if (silenceDuration >= inactivityLimit) {
-                    console.warn('Detected silence in Microsoft Teams Meeting and ending the recording on team:', userId, teamId);
-                    monitor = false;
-                    stopTheRecording();
+                  console.warn('Detected silence in Microsoft Teams Meeting and ending the recording on team:', userId, teamId);
+                  monitor = false;
+                  stopTheRecording();
                 }
               } else {
                 silenceDuration = 0;
@@ -465,11 +459,11 @@ export class MicrosoftTeamsBot extends MeetBotBase {
         // Start the recording
         await startRecording();
       },
-      { 
-        teamId, 
-        duration, 
-        inactivityLimit, 
-        userId, 
+      {
+        teamId,
+        duration,
+        inactivityLimit,
+        userId,
         slightlySecretId: this.slightlySecretId,
         activateInactivityDetectionAfterMinutes: config.activateInactivityDetectionAfter,
         activateInactivityDetectionAfter: new Date(new Date().getTime() + config.activateInactivityDetectionAfter * 60 * 1000).toISOString(),
@@ -477,7 +471,7 @@ export class MicrosoftTeamsBot extends MeetBotBase {
         secondaryMimeType: vp9MimeType
       }
     );
-  
+
     this._logger.info('Waiting for recording duration', config.maxRecordingDuration, 'minutes...');
     const processingTime = 0.2 * 60 * 1000;
     const waitingPromise: WaitPromise = getWaitingPromise(processingTime + duration);
