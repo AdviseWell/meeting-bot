@@ -451,23 +451,6 @@ export class GoogleMeetBot extends MeetBotBase {
           const audioTracks = stream.getAudioTracks();
           const hasAudioTracks = audioTracks.length > 0;
 
-          // Diagnostic logging for audio capture
-          console.log('=== AUDIO CAPTURE DIAGNOSTIC ===');
-          console.log('Audio tracks count:', audioTracks.length);
-          console.log('Video tracks count:', stream.getVideoTracks().length);
-          if (audioTracks.length > 0) {
-            const audioSettings = audioTracks[0].getSettings();
-            console.log('Audio track settings:', JSON.stringify(audioSettings));
-            console.log('Audio track state:', audioTracks[0].readyState);
-            console.log('Audio track enabled:', audioTracks[0].enabled);
-            console.log('Audio track muted:', audioTracks[0].muted);
-          } else {
-            console.error('❌ CRITICAL: No audio tracks captured by getDisplayMedia!');
-            console.error('This will result in silent recording and sample/placeholder text from transcription');
-            console.error('Check Chrome flags: --use-fake-ui-for-media-stream, --autoplay-policy');
-          }
-          console.log('=== END DIAGNOSTIC ===');
-
           if (!hasAudioTracks) {
             console.warn('No audio tracks available for silence detection. Will rely only on presence detection.');
           }
