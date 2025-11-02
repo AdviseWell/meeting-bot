@@ -124,14 +124,6 @@ class MeetingController:
                 # Cleanup local files
                 self.media_converter.cleanup(recording_path, mp4_path, aac_path)
                 
-                # Trigger shutdown of meeting-bot container
-                logger.info("Triggering meeting-bot shutdown...")
-                shutdown_success = self.meeting_monitor.shutdown()
-                if shutdown_success:
-                    logger.info("Meeting-bot shutdown triggered successfully")
-                else:
-                    logger.warning("Failed to trigger meeting-bot shutdown, but processing completed successfully")
-                
                 return True
             else:
                 logger.error("Failed to upload one or more files to GCS")
@@ -152,37 +144,63 @@ class MeetingController:
         logger.info(f"Meeting Bot API: {self.meeting_bot_api}")
         logger.info("=" * 50)
         
-        # Pull one message from Pub/Sub
-        message_data = self.pubsub_client.pull_one_message()
+        exit_code = 0
         
-        if not message_data:
-            logger.info("No messages available. Exiting successfully.")
-            return 0
+        try:
+            # Pull one message from Pub/Sub
+            message_data = self.pubsub_client.pull_one_message()
+            
+            if not message_data:
+                logger.info("No messages available. Shutting down meeting-bot.")
+                return 0
+            
+            # Process the message
+            success = self.process_message(message_data)
+            
+            if success:
+                logger.info("=" * 50)
+                logger.info("Processing completed successfully")
+                logger.info("=" * 50)
+                exit_code = 0
+            else:
+                logger.error("=" * 50)
+                logger.error("Processing failed")
+                logger.error("=" * 50)
+                exit_code = 1
         
-        # Process the message
-        success = self.process_message(message_data)
+        finally:
+            # ALWAYS trigger shutdown of meeting-bot, regardless of success or failure
+            logger.info("Triggering meeting-bot shutdown...")
+            shutdown_success = self.meeting_monitor.shutdown()
+            if shutdown_success:
+                logger.info("Meeting-bot shutdown triggered successfully")
+            else:
+                logger.warning("Failed to trigger meeting-bot shutdown")
         
-        if success:
-            logger.info("=" * 50)
-            logger.info("Processing completed successfully")
-            logger.info("=" * 50)
-            return 0
-        else:
-            logger.error("=" * 50)
-            logger.error("Processing failed")
-            logger.error("=" * 50)
-            return 1
+        return exit_code
 
 
 def main():
     """Entry point"""
+    controller = None
+    exit_code = 1
+    
     try:
         controller = MeetingController()
         exit_code = controller.run()
-        sys.exit(exit_code)
     except Exception as e:
-        logger.exception(f"Fatal error: {e}")
-        sys.exit(1)
+        logger.exception(f"Fatal error during initialization: {e}")
+        exit_code = 1
+        
+        # Try to shutdown even if initialization failed partway through
+        if controller and hasattr(controller, 'meeting_monitor'):
+            try:
+                logger.info("Attempting meeting-bot shutdown after fatal error...")
+                controller.meeting_monitor.shutdown()
+            except Exception as shutdown_error:
+                logger.error(f"Error during shutdown after fatal error: {shutdown_error}")
+    
+    sys.exit(exit_code)
 
 
 if __name__ == '__main__':
