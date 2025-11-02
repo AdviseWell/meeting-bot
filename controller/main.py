@@ -23,7 +23,7 @@ from storage_client import StorageClient
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,  # Changed to DEBUG for more detailed logs
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(sys.stdout)
@@ -31,6 +31,11 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+
+# Reduce noise from some verbose libraries
+logging.getLogger('google.auth').setLevel(logging.WARNING)
+logging.getLogger('urllib3').setLevel(logging.WARNING)
+logging.getLogger('google.cloud').setLevel(logging.INFO)
 
 
 class MeetingController:
@@ -143,6 +148,10 @@ class MeetingController:
         logger.info(f"GCS Bucket: {self.gcs_bucket}")
         logger.info(f"Meeting Bot API: {self.meeting_bot_api}")
         logger.info("=" * 50)
+        
+        # Run diagnostic check on subscription
+        logger.info("Running Pub/Sub subscription diagnostic check...")
+        self.pubsub_client.check_subscription_status()
         
         exit_code = 0
         
