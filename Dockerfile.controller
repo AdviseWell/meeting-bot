@@ -7,7 +7,9 @@ FROM python:3.11-slim
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     curl \
-    && rm -rf /var/lib/apt/lists/*
+    procps \
+    && rm -rf /var/lib/apt/lists/* \
+    && ffmpeg -version > /dev/null 2>&1 || echo "Warning: ffmpeg installation may have issues"
 
 # Set working directory
 WORKDIR /app

@@ -16,19 +16,44 @@ class MediaConverter:
     def __init__(self):
         """Initialize media converter"""
         # Verify ffmpeg is available
+        # Use a simple which/command check instead of running ffmpeg -version
+        # which can hang in some Docker environments
         try:
+            # First, check if ffmpeg exists in PATH using 'which'
             result = subprocess.run(
-                ['ffmpeg', '-version'],
+                ['which', 'ffmpeg'],
                 capture_output=True,
                 text=True,
-                timeout=5
+                timeout=2
             )
             if result.returncode == 0:
-                logger.info("ffmpeg is available")
+                logger.info(f"ffmpeg found at: {result.stdout.strip()}")
             else:
-                logger.warning("ffmpeg check returned non-zero exit code")
+                logger.warning("ffmpeg not found in PATH")
+                raise RuntimeError("ffmpeg is required but not available")
+        except subprocess.TimeoutExpired:
+            logger.error("Timeout while checking for ffmpeg")
+            raise RuntimeError("ffmpeg check timed out")
+        except FileNotFoundError:
+            # 'which' command not available, try direct ffmpeg check with shorter timeout
+            try:
+                result = subprocess.run(
+                    ['ffmpeg', '-version'],
+                    capture_output=True,
+                    text=True,
+                    timeout=2,
+                    stdin=subprocess.DEVNULL  # Prevent ffmpeg from waiting for input
+                )
+                if result.returncode == 0:
+                    logger.info("ffmpeg is available")
+                else:
+                    logger.warning("ffmpeg check returned non-zero exit code")
+                    raise RuntimeError("ffmpeg is required but not available")
+            except Exception as e:
+                logger.error(f"ffmpeg not found or not working: {e}")
+                raise RuntimeError("ffmpeg is required but not available")
         except Exception as e:
-            logger.error(f"ffmpeg not found or not working: {e}")
+            logger.error(f"Error checking for ffmpeg: {e}")
             raise RuntimeError("ffmpeg is required but not available")
     
     def convert(self, input_path: str) -> Tuple[Optional[str], Optional[str]]:
@@ -95,7 +120,8 @@ class MediaConverter:
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=3600  # 1 hour timeout
+                timeout=3600,  # 1 hour timeout
+                stdin=subprocess.DEVNULL  # Prevent ffmpeg from waiting for input
             )
             
             if result.returncode == 0:
@@ -141,7 +167,8 @@ class MediaConverter:
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=1800  # 30 minute timeout
+                timeout=1800,  # 30 minute timeout
+                stdin=subprocess.DEVNULL  # Prevent ffmpeg from waiting for input
             )
             
             if result.returncode == 0:

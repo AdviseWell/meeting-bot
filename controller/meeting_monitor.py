@@ -91,7 +91,7 @@ class MeetingMonitor:
         self,
         job_id: str,
         check_interval: int = 10,
-        max_wait_time: int = 28800  # 8 hours default
+        max_wait_time: int = 14400  # 4 hours default
     ) -> Optional[str]:
         """
         Monitor a meeting job until it completes
