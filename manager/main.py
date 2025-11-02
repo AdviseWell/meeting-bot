@@ -108,6 +108,12 @@ class MeetingManager:
             logger.info(f"Meeting URL: {self.meeting_url}")
             logger.info(f"Target GCS path: {self.gcs_path}")
             
+            # Step 0: Wait for meeting-bot API to be ready
+            logger.info("Step 0: Waiting for meeting-bot API to become ready...")
+            if not self.meeting_monitor.wait_for_api_ready():
+                logger.error("Meeting-bot API did not become ready in time")
+                return False
+            
             # Step 1: Join the meeting
             logger.info("Step 1: Joining meeting...")
             job_id = self.meeting_monitor.join_meeting(self.meeting_url, self.metadata)

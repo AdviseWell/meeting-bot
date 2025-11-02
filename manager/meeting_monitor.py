@@ -13,15 +13,57 @@ logger = logging.getLogger(__name__)
 class MeetingMonitor:
     """Monitor and control meetings via the meeting-bot API"""
     
-    def __init__(self, api_base_url: str):
+    def __init__(self, api_base_url: str, startup_timeout: int = 60):
         """
         Initialize meeting monitor
         
         Args:
             api_base_url: Base URL of the meeting-bot API
+            startup_timeout: Maximum seconds to wait for API to become ready
         """
         self.api_base_url = api_base_url.rstrip('/')
+        self.startup_timeout = startup_timeout
         logger.info(f"Initialized MeetingMonitor with API: {self.api_base_url}")
+    
+    def wait_for_api_ready(self) -> bool:
+        """
+        Wait for the meeting-bot API to become ready
+        
+        Returns:
+            True if API is ready, False if timeout exceeded
+        """
+        logger.info(f"Waiting for meeting-bot API to become ready (timeout: {self.startup_timeout}s)...")
+        
+        start_time = time.time()
+        retry_count = 0
+        
+        while time.time() - start_time < self.startup_timeout:
+            try:
+                # Try health check endpoint first
+                endpoint = f"{self.api_base_url}/health"
+                response = requests.get(endpoint, timeout=2)
+                
+                if response.status_code == 200:
+                    logger.info(f"✅ Meeting-bot API is ready (took {time.time() - start_time:.1f}s)")
+                    return True
+                    
+            except requests.exceptions.ConnectionError:
+                # Connection refused - service not ready yet
+                pass
+            except requests.exceptions.RequestException as e:
+                logger.debug(f"Health check failed: {e}")
+            
+            retry_count += 1
+            wait_time = min(2 ** min(retry_count - 1, 4), 5)  # Exponential backoff, max 5s
+            
+            if retry_count % 5 == 0:  # Log every 5 attempts
+                elapsed = time.time() - start_time
+                logger.info(f"Still waiting for API... ({elapsed:.1f}s elapsed)")
+            
+            time.sleep(wait_time)
+        
+        logger.error(f"❌ Meeting-bot API did not become ready within {self.startup_timeout}s")
+        return False
     
     def join_meeting(self, meeting_url: str, metadata: Dict) -> Optional[str]:
         """
