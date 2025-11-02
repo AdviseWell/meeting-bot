@@ -1,4 +1,5 @@
 services:
+  # Main meeting bot service (NodeJS)
   meeting-bot:
     build:
       context: .
@@ -15,6 +16,40 @@ services:
       - ./assets/screenshots:/usr/src/app/assets/screenshots
       - /usr/src/app/node_modules
     command: [ "/bin/bash", "./start.sh" ]
+
+  # Controller service (Python) - monitors Pub/Sub and creates K8s jobs
+  controller:
+    build:
+      context: .
+      dockerfile: Dockerfile.controller
+    environment:
+      - GCP_PROJECT_ID=${GCP_PROJECT_ID}
+      - PUBSUB_SUBSCRIPTION=${PUBSUB_SUBSCRIPTION}
+      - MANAGER_IMAGE=${MANAGER_IMAGE:-gcr.io/your-project/meeting-manager:latest}
+      - K8S_NAMESPACE=${K8S_NAMESPACE:-default}
+      - GCS_BUCKET=${GCS_BUCKET}
+      - MEETING_BOT_API_URL=http://meeting-bot:3000
+      - POLL_INTERVAL=10
+    depends_on:
+      - meeting-bot
+    # Note: In production, this should run in Kubernetes with proper RBAC
+
+    # Manager service (Python) - processes individual meetings
+    # This is typically run as K8s Jobs, but can be tested standalone
+  manager:
+    build:
+      context: .
+      dockerfile: Dockerfile.manager
+    environment:
+      - MEETING_URL=${MEETING_URL}
+      - MEETING_ID=${MEETING_ID}
+      - GCS_PATH=${GCS_PATH}
+      - GCS_BUCKET=${GCS_BUCKET}
+      - MEETING_BOT_API_URL=http://meeting-bot:3000
+    depends_on:
+      - meeting-bot
+    profiles:
+      - test-manager # Only run when explicitly requested
 
 volumes:
   cache:

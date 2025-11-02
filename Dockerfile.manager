@@ -1,30 +1,36 @@
-# Meeting Bot Controller
-# Python 3.11 - Creates Kubernetes Jobs to process meetings
+# Meeting Bot Manager
+# Python 3.11 with ffmpeg for media conversion
+# Processes individual meeting recordings with media conversion and upload
 
 FROM python:3.11-slim
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
+    ffmpeg \
     curl \
     procps \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && ffmpeg -version > /dev/null 2>&1 || echo "Warning: ffmpeg installation may have issues"
 
 # Set working directory
 WORKDIR /app
 
 # Copy requirements first for better caching
-COPY controller/requirements.txt .
+COPY manager/requirements.txt .
 
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy controller application
-COPY controller/ .
+# Copy manager application
+COPY manager/ .
+
+# Create directory for temporary recordings
+RUN mkdir -p /tmp/recordings
 
 # Run as non-root user for security
-RUN useradd -m -u 1000 controller && \
-    chown -R controller:controller /app
-USER controller
+RUN useradd -m -u 1000 manager && \
+    chown -R manager:manager /app /tmp/recordings
+USER manager
 
 # Set Python to run in unbuffered mode for better logging
 ENV PYTHONUNBUFFERED=1
@@ -33,5 +39,5 @@ ENV PYTHONUNBUFFERED=1
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD python -c "import sys; sys.exit(0)"
 
-# Run the controller
+# Run the manager
 CMD ["python", "-u", "main.py"]

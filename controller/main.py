@@ -1,29 +1,32 @@
 #!/usr/bin/env python3
 """
-Meeting Bot Controller - Main Entry Point
+Meeting Bot Controller - Kubernetes Job Orchestrator
 
-This controller manages the lifecycle of meeting recordings:
-1. Pulls messages from GCP Pub/Sub
-2. Initiates meeting join via meeting-bot API
-3. Monitors meeting status
-4. Converts recordings (MP4 + AAC)
-5. Uploads to GCS
+This controller monitors GCP Pub/Sub for meeting requests and spawns
+Kubernetes Jobs to process each meeting via the manager.
+
+Workflow:
+1. Pull messages from GCP Pub/Sub (batch of up to 10)
+2. ACK messages immediately
+3. Create a Kubernetes Job with the manager image for each message
+4. Pass all meeting details as environment variables to the job
+5. Continue monitoring for new messages
 """
 
 import os
 import sys
 import time
 import logging
-from typing import Optional
+import json
+from typing import Optional, Dict
 
-from pubsub_client import PubSubClient
-from meeting_monitor import MeetingMonitor
-from media_converter import MediaConverter
-from storage_client import StorageClient
+from google.cloud import pubsub_v1
+from kubernetes import client, config
+from kubernetes.client.rest import ApiException
 
 # Configure logging
 logging.basicConfig(
-    level=logging.DEBUG,  # Changed to DEBUG for more detailed logs
+    level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(sys.stdout)
@@ -36,31 +39,100 @@ logger = logging.getLogger(__name__)
 logging.getLogger('google.auth').setLevel(logging.WARNING)
 logging.getLogger('urllib3').setLevel(logging.WARNING)
 logging.getLogger('google.cloud').setLevel(logging.INFO)
+logging.getLogger('kubernetes').setLevel(logging.INFO)
+
+
+class HealthCheckServer:
+    """Simple HTTP server for health checks"""
+    def __init__(self, port: int = 8080):
+        from http.server import HTTPServer, BaseHTTPRequestHandler
+        
+        class HealthHandler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path == '/health':
+                    self.send_response(200)
+                    self.send_header('Content-type', 'text/plain')
+                    self.end_headers()
+                    self.wfile.write(b'OK')
+                elif self.path == '/ready':
+                    self.send_response(200)
+                    self.send_header('Content-type', 'text/plain')
+                    self.end_headers()
+                    self.wfile.write(b'READY')
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+            
+            def log_message(self, format, *args):
+                pass  # Suppress default logging
+        
+        self.server = HTTPServer(('0.0.0.0', port), HealthHandler)
+    
+    def start(self):
+        import threading
+        thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        thread.start()
+        logger.info(f"Health check server started on port 8080")
 
 
 class MeetingController:
-    """Main controller for managing meeting recording lifecycle"""
+    """Controller that creates Kubernetes Jobs for meeting processing"""
     
     def __init__(self):
-        self.project_id = os.environ.get('GCP_PROJECT_ID')
-        self.subscription_name = os.environ.get('PUBSUB_SUBSCRIPTION')
-        self.gcs_bucket = os.environ.get('GCS_BUCKET')
-        self.meeting_bot_api = os.environ.get('MEETING_BOT_API_URL', 'http://localhost:3000')
+        # Required environment variables
+        self.project_id = os.getenv('GCP_PROJECT_ID')
+        self.subscription_name = os.getenv('PUBSUB_SUBSCRIPTION')
+        self.gcs_bucket = os.getenv('GCS_BUCKET')
+        self.manager_image = os.getenv('MANAGER_IMAGE')
+        self.meeting_bot_image = os.getenv('MEETING_BOT_IMAGE')
+        
+        # Kubernetes configuration
+        self.k8s_namespace = os.getenv('KUBERNETES_NAMESPACE', 'default')
+        self.job_service_account = os.getenv('JOB_SERVICE_ACCOUNT', 'meeting-bot-job')
+        
+        # Optional configuration
+        self.node_env = os.getenv('NODE_ENV', 'development')
+        self.max_recording_duration = int(os.getenv('MAX_RECORDING_DURATION_MINUTES', '240'))
+        self.meeting_inactivity = int(os.getenv('MEETING_INACTIVITY_MINUTES', '15'))
+        self.inactivity_detection_delay = int(os.getenv('INACTIVITY_DETECTION_START_DELAY_MINUTES', '5'))
+        self.poll_interval = int(os.getenv('POLL_INTERVAL', '10'))
         
         # Validate required environment variables
         self._validate_config()
         
-        # Initialize clients
-        self.pubsub_client = PubSubClient(self.project_id, self.subscription_name)
-        self.meeting_monitor = MeetingMonitor(self.meeting_bot_api)
-        self.media_converter = MediaConverter()
-        self.storage_client = StorageClient(self.gcs_bucket)
+        # Initialize Pub/Sub client
+        self.subscriber = pubsub_v1.SubscriberClient()
+        self.subscription_path = self.subscriber.subscription_path(
+            self.project_id, self.subscription_name
+        )
         
+        # Initialize Kubernetes client
+        try:
+            # Try to load in-cluster config first
+            config.load_incluster_config()
+            logger.info("Loaded in-cluster Kubernetes configuration")
+        except config.ConfigException:
+            # Fall back to kubeconfig for local development
+            config.load_kube_config()
+            logger.info("Loaded kubeconfig configuration")
+        
+        self.batch_v1 = client.BatchV1Api()
+        self.core_v1 = client.CoreV1Api()
+        
+        logger.info(f"Controller initialized:")
+        logger.info(f"  Project: {self.project_id}")
+        logger.info(f"  Subscription: {self.subscription_name}")
+        logger.info(f"  Namespace: {self.k8s_namespace}")
+        logger.info(f"  Manager Image: {self.manager_image}")
+        logger.info(f"  Meeting Bot Image: {self.meeting_bot_image}")
+    
     def _validate_config(self):
         """Validate required environment variables"""
         required_vars = {
             'GCP_PROJECT_ID': self.project_id,
             'PUBSUB_SUBSCRIPTION': self.subscription_name,
+            'MANAGER_IMAGE': self.manager_image,
+            'MEETING_BOT_IMAGE': self.meeting_bot_image,
             'GCS_BUCKET': self.gcs_bucket,
         }
         
@@ -68,148 +140,254 @@ class MeetingController:
         if missing:
             raise ValueError(f"Missing required environment variables: {', '.join(missing)}")
     
-    def process_message(self, message_data: dict) -> bool:
+    def create_manager_job(self, message_data: Dict, message_id: str) -> bool:
         """
-        Process a single meeting message
+        Create a Kubernetes Job to process the meeting
         
         Args:
-            message_data: Decoded message data containing meeting details
+            message_data: Message data containing meeting details
+            message_id: Pub/Sub message ID for unique job naming
             
         Returns:
-            True if processing succeeded, False otherwise
+            True if job created successfully, False otherwise
         """
         try:
+            meeting_id = message_data.get('meeting_id', message_id)
             meeting_url = message_data.get('meeting_url')
-            gcs_path = message_data.get('gcs_path')
-            meeting_id = message_data.get('meeting_id')
+            gcs_path = message_data.get('gcs_path', f"recordings/{meeting_id}")
             
-            if not all([meeting_url, gcs_path, meeting_id]):
-                logger.error(f"Invalid message data: {message_data}")
+            if not meeting_url:
+                logger.error(f"Invalid message data - missing meeting_url: {message_data}")
                 return False
             
-            logger.info(f"Processing meeting {meeting_id}")
-            logger.info(f"Meeting URL: {meeting_url}")
-            logger.info(f"Target GCS path: {gcs_path}")
+            # Generate unique job name (must be DNS-1123 compliant)
+            # K8s names must be lowercase alphanumeric + hyphens
+            timestamp = int(time.time())
+            job_name = f"meeting-{meeting_id.lower()[:50]}-{timestamp}"
+            job_name = job_name.replace('_', '-')[:63]  # K8s name length limit
             
-            # Step 1: Join the meeting
-            logger.info("Step 1: Joining meeting...")
-            job_id = self.meeting_monitor.join_meeting(meeting_url, message_data)
-            if not job_id:
-                logger.error("Failed to join meeting")
-                return False
+            logger.info(f"Creating Kubernetes Job: {job_name}")
             
-            logger.info(f"Successfully joined meeting with job ID: {job_id}")
+            # Build environment variables for the manager
+            env_vars = [
+                client.V1EnvVar(name="MEETING_URL", value=meeting_url),
+                client.V1EnvVar(name="MEETING_ID", value=meeting_id),
+                client.V1EnvVar(name="GCS_PATH", value=gcs_path),
+                client.V1EnvVar(name="GCS_BUCKET", value=self.gcs_bucket),
+                client.V1EnvVar(name="MEETING_BOT_IMAGE", value=self.meeting_bot_image),
+                client.V1EnvVar(name="NODE_ENV", value=self.node_env),
+                client.V1EnvVar(name="MAX_RECORDING_DURATION_MINUTES", value=str(self.max_recording_duration)),
+                client.V1EnvVar(name="MEETING_INACTIVITY_MINUTES", value=str(self.meeting_inactivity)),
+                client.V1EnvVar(name="INACTIVITY_DETECTION_START_DELAY_MINUTES", value=str(self.inactivity_detection_delay)),
+            ]
             
-            # Step 2: Monitor the meeting (check every 10 seconds)
-            logger.info("Step 2: Monitoring meeting status...")
-            recording_path = self.meeting_monitor.monitor_until_complete(job_id, check_interval=10)
-            if not recording_path:
-                logger.error("Meeting monitoring failed or no recording generated")
-                return False
+            # Add optional metadata fields
+            if message_data.get('meeting_title'):
+                env_vars.append(client.V1EnvVar(name="MEETING_TITLE", value=message_data['meeting_title']))
+            if message_data.get('organizer'):
+                env_vars.append(client.V1EnvVar(name="MEETING_ORGANIZER", value=message_data['organizer']))
+            if message_data.get('start_time'):
+                env_vars.append(client.V1EnvVar(name="MEETING_START_TIME", value=message_data['start_time']))
             
-            logger.info(f"Meeting completed. Recording at: {recording_path}")
+            # Container 1: meeting-bot (TypeScript app that joins meetings)
+            meeting_bot_container = client.V1Container(
+                name="meeting-bot",
+                image=self.meeting_bot_image,
+                image_pull_policy="IfNotPresent",
+                env=[
+                    client.V1EnvVar(name="PORT", value="3000"),
+                    client.V1EnvVar(name="NODE_ENV", value=self.node_env),
+                    client.V1EnvVar(name="MAX_RECORDING_DURATION_MINUTES", value=str(self.max_recording_duration)),
+                    client.V1EnvVar(name="MEETING_INACTIVITY_MINUTES", value=str(self.meeting_inactivity)),
+                    client.V1EnvVar(name="INACTIVITY_DETECTION_START_DELAY_MINUTES", value=str(self.inactivity_detection_delay)),
+                ],
+                resources=client.V1ResourceRequirements(
+                    requests={
+                        "cpu": "1000m",
+                        "memory": "2Gi"
+                    },
+                    limits={
+                        "cpu": "2000m",
+                        "memory": "4Gi"
+                    }
+                )
+            )
             
-            # Step 3: Convert media files
-            logger.info("Step 3: Converting media files...")
-            mp4_path, aac_path = self.media_converter.convert(recording_path)
-            if not mp4_path or not aac_path:
-                logger.error("Media conversion failed")
-                return False
+            # Container 2: manager (Python orchestrator that calls meeting-bot API)
+            manager_container = client.V1Container(
+                name="manager",
+                image=self.manager_image,
+                env=env_vars + [
+                    # Manager needs to communicate with meeting-bot on localhost
+                    client.V1EnvVar(name="MEETING_BOT_API_URL", value="http://localhost:3000"),
+                ],
+                image_pull_policy="IfNotPresent",
+                resources=client.V1ResourceRequirements(
+                    requests={
+                        "cpu": "500m",
+                        "memory": "512Mi"
+                    },
+                    limits={
+                        "cpu": "2000m",
+                        "memory": "2Gi"
+                    }
+                )
+            )
             
-            logger.info(f"Conversion complete - MP4: {mp4_path}, AAC: {aac_path}")
+            # Define the pod template with BOTH containers
+            template = client.V1PodTemplateSpec(
+                metadata=client.V1ObjectMeta(
+                    labels={
+                        "app": "meeting-bot-manager",
+                        "meeting-id": meeting_id[:63],  # K8s label value max length
+                    }
+                ),
+                spec=client.V1PodSpec(
+                    restart_policy="Never",
+                    containers=[meeting_bot_container, manager_container],
+                    service_account_name=self.job_service_account,
+                )
+            )
             
-            # Step 4: Upload to GCS
-            logger.info("Step 4: Uploading to GCS...")
-            mp4_uploaded = self.storage_client.upload_file(mp4_path, f"{gcs_path}/video.mp4")
-            aac_uploaded = self.storage_client.upload_file(aac_path, f"{gcs_path}/audio.aac")
+            # Define the job
+            job = client.V1Job(
+                api_version="batch/v1",
+                kind="Job",
+                metadata=client.V1ObjectMeta(
+                    name=job_name,
+                    namespace=self.k8s_namespace,
+                    labels={
+                        "app": "meeting-bot-manager",
+                        "meeting-id": meeting_id[:63],
+                        "managed-by": "meeting-bot-controller"
+                    }
+                ),
+                spec=client.V1JobSpec(
+                    template=template,
+                    backoff_limit=2,  # Retry up to 2 times on failure
+                    ttl_seconds_after_finished=3600,  # Clean up after 1 hour
+                )
+            )
             
-            if mp4_uploaded and aac_uploaded:
-                logger.info(f"Successfully uploaded files to gs://{self.gcs_bucket}/{gcs_path}/")
-                
-                # Cleanup local files
-                self.media_converter.cleanup(recording_path, mp4_path, aac_path)
-                
-                return True
-            else:
-                logger.error("Failed to upload one or more files to GCS")
-                return False
-                
+            # Create the job
+            self.batch_v1.create_namespaced_job(
+                namespace=self.k8s_namespace,
+                body=job
+            )
+            
+            logger.info(f"✅ Created job '{job_name}' for meeting {meeting_id}")
+            return True
+            
+        except ApiException as e:
+            logger.error(f"❌ Kubernetes API error creating job: {e}")
+            return False
         except Exception as e:
-            logger.exception(f"Error processing message: {e}")
+            logger.error(f"❌ Error creating manager job: {e}")
             return False
     
-    def run(self):
-        """Main run loop - pull and process one message"""
-        logger.info("=" * 50)
-        logger.info("Meeting Bot Controller starting...")
-        logger.info("=" * 50)
-        logger.info(f"Project ID: {self.project_id}")
-        logger.info(f"Subscription: {self.subscription_name}")
-        logger.info(f"GCS Bucket: {self.gcs_bucket}")
-        logger.info(f"Meeting Bot API: {self.meeting_bot_api}")
-        logger.info("=" * 50)
+    def process_message(self, message: pubsub_v1.types.PubsubMessage, ack_id: str) -> None:
+        """
+        Process a single Pub/Sub message
         
-        # Run diagnostic check on subscription
-        logger.info("Running Pub/Sub subscription diagnostic check...")
-        self.pubsub_client.check_subscription_status()
-        
-        exit_code = 0
-        
+        Args:
+            message: Pub/Sub message containing meeting details
+            ack_id: ACK ID for the message
+        """
         try:
-            # Pull one message from Pub/Sub
-            message_data = self.pubsub_client.pull_one_message()
+            # Parse message data
+            message_data = json.loads(message.data.decode('utf-8'))
+            logger.info(f"📨 Received message {message.message_id}: {message_data.get('meeting_id', 'unknown')}")
             
-            if not message_data:
-                logger.info("No messages available. Shutting down meeting-bot.")
-                return 0
+            # ACK the message immediately to prevent redelivery
+            self.subscriber.acknowledge(
+                request={
+                    "subscription": self.subscription_path,
+                    "ack_ids": [ack_id],
+                }
+            )
+            logger.info(f"✓ ACKed message {message.message_id}")
             
-            # Process the message
-            success = self.process_message(message_data)
+            # Create Kubernetes Job
+            success = self.create_manager_job(message_data, message.message_id)
             
-            if success:
-                logger.info("=" * 50)
-                logger.info("Processing completed successfully")
-                logger.info("=" * 50)
-                exit_code = 0
-            else:
-                logger.error("=" * 50)
-                logger.error("Processing failed")
-                logger.error("=" * 50)
-                exit_code = 1
+            if not success:
+                logger.warning(f"⚠️  Job creation failed for message {message.message_id}, but message was already ACKed")
         
-        finally:
-            # ALWAYS trigger shutdown of meeting-bot, regardless of success or failure
-            logger.info("Triggering meeting-bot shutdown...")
-            shutdown_success = self.meeting_monitor.shutdown()
-            if shutdown_success:
-                logger.info("Meeting-bot shutdown triggered successfully")
-            else:
-                logger.warning("Failed to trigger meeting-bot shutdown")
+        except json.JSONDecodeError as e:
+            logger.error(f"❌ Invalid JSON in message {message.message_id}: {e}")
+            # ACK invalid messages to remove them from queue
+            self.subscriber.acknowledge(
+                request={
+                    "subscription": self.subscription_path,
+                    "ack_ids": [ack_id],
+                }
+            )
         
-        return exit_code
+        except Exception as e:
+            logger.error(f"❌ Error processing message {message.message_id}: {e}", exc_info=True)
+            # ACK to prevent infinite retries
+            self.subscriber.acknowledge(
+                request={
+                    "subscription": self.subscription_path,
+                    "ack_ids": [ack_id],
+                }
+            )
+    
+    def run(self):
+        """Main run loop - continuously process messages"""
+        logger.info("=" * 50)
+        logger.info("🚀 Meeting Bot Controller starting...")
+        logger.info("=" * 50)
+        logger.info(f"📡 Project ID: {self.project_id}")
+        logger.info(f"📡 Subscription: {self.subscription_name}")
+        logger.info(f"📁 Namespace: {self.k8s_namespace}")
+        logger.info(f"🐳 Manager Image: {self.manager_image}")
+        logger.info(f"🐳 Meeting Bot Image: {self.meeting_bot_image}")
+        logger.info("=" * 50)
+        
+        # Start health check server
+        health_server = HealthCheckServer()
+        health_server.start()
+        
+        while True:
+            try:
+                # Pull messages with a short timeout (batch of up to 10)
+                response = self.subscriber.pull(
+                    request={
+                        "subscription": self.subscription_path,
+                        "max_messages": 10,
+                    },
+                    timeout=30.0
+                )
+                
+                if response.received_messages:
+                    logger.info(f"📬 Received {len(response.received_messages)} message(s)")
+                    
+                    for received_message in response.received_messages:
+                        self.process_message(received_message.message, received_message.ack_id)
+                else:
+                    logger.debug(f"No messages, waiting {self.poll_interval}s...")
+                    time.sleep(self.poll_interval)
+                    
+            except KeyboardInterrupt:
+                logger.info("👋 Received shutdown signal")
+                break
+            except Exception as e:
+                logger.error(f"❌ Error in main loop: {e}", exc_info=True)
+                time.sleep(self.poll_interval)
 
 
 def main():
     """Entry point"""
-    controller = None
-    exit_code = 1
-    
     try:
         controller = MeetingController()
-        exit_code = controller.run()
+        controller.run()
+    except KeyboardInterrupt:
+        logger.info("👋 Shutting down controller")
+        sys.exit(0)
     except Exception as e:
-        logger.exception(f"Fatal error during initialization: {e}")
-        exit_code = 1
-        
-        # Try to shutdown even if initialization failed partway through
-        if controller and hasattr(controller, 'meeting_monitor'):
-            try:
-                logger.info("Attempting meeting-bot shutdown after fatal error...")
-                controller.meeting_monitor.shutdown()
-            except Exception as shutdown_error:
-                logger.error(f"Error during shutdown after fatal error: {shutdown_error}")
-    
-    sys.exit(exit_code)
+        logger.error(f"💥 Fatal error: {e}", exc_info=True)
+        sys.exit(1)
 
 
 if __name__ == '__main__':
