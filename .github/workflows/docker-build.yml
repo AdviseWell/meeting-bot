@@ -13,6 +13,7 @@ on:
 env:
   GAR_LOCATION: australia-southeast1
   GAR_REPOSITORY: meeting-bot
+  GAR_CONTROLLER_REPOSITORY: meeting-bot-controller
 
 jobs:
   build:
@@ -38,18 +39,24 @@ jobs:
       - name: Set up Google Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
 
-      - name: Set Google Artifact Registry URL
+      - name: Set Google Artifact Registry URLs
         id: gar
         run: |
           if [[ "${{ github.ref_name }}" == "main" ]]; then
             echo "REGISTRY=${{ env.GAR_LOCATION }}-docker.pkg.dev/aw-production-4df9/${{ env.GAR_REPOSITORY }}" >> $GITHUB_ENV
             echo "registry=${{ env.GAR_LOCATION }}-docker.pkg.dev/aw-production-4df9/${{ env.GAR_REPOSITORY }}" >> $GITHUB_OUTPUT
+            echo "CONTROLLER_REGISTRY=${{ env.GAR_LOCATION }}-docker.pkg.dev/aw-production-4df9/${{ env.GAR_CONTROLLER_REPOSITORY }}" >> $GITHUB_ENV
+            echo "controller_registry=${{ env.GAR_LOCATION }}-docker.pkg.dev/aw-production-4df9/${{ env.GAR_CONTROLLER_REPOSITORY }}" >> $GITHUB_OUTPUT
           elif [[ "${{ github.ref_name }}" == "develop" ]]; then
             echo "REGISTRY=${{ env.GAR_LOCATION }}-docker.pkg.dev/aw-development-7226/${{ env.GAR_REPOSITORY }}" >> $GITHUB_ENV
             echo "registry=${{ env.GAR_LOCATION }}-docker.pkg.dev/aw-development-7226/${{ env.GAR_REPOSITORY }}" >> $GITHUB_OUTPUT
+            echo "CONTROLLER_REGISTRY=${{ env.GAR_LOCATION }}-docker.pkg.dev/aw-development-7226/${{ env.GAR_CONTROLLER_REPOSITORY }}" >> $GITHUB_ENV
+            echo "controller_registry=${{ env.GAR_LOCATION }}-docker.pkg.dev/aw-development-7226/${{ env.GAR_CONTROLLER_REPOSITORY }}" >> $GITHUB_OUTPUT
           else
             echo "REGISTRY=${{ env.GAR_LOCATION }}-docker.pkg.dev/aw-development-7226/${{ env.GAR_REPOSITORY }}" >> $GITHUB_ENV
             echo "registry=${{ env.GAR_LOCATION }}-docker.pkg.dev/aw-development-7226/${{ env.GAR_REPOSITORY }}" >> $GITHUB_OUTPUT
+            echo "CONTROLLER_REGISTRY=${{ env.GAR_LOCATION }}-docker.pkg.dev/aw-development-7226/${{ env.GAR_CONTROLLER_REPOSITORY }}" >> $GITHUB_ENV
+            echo "controller_registry=${{ env.GAR_LOCATION }}-docker.pkg.dev/aw-development-7226/${{ env.GAR_CONTROLLER_REPOSITORY }}" >> $GITHUB_OUTPUT
           fi
 
       - name: Set up Docker Buildx
@@ -115,3 +122,85 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  build-controller:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Authenticate with Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          project_id: ${{ github.ref_name == 'main' && vars.GCP_PROJECT_CODE_PROD || vars.GCP_PROJECT_CODE_DEV }}
+          workload_identity_provider: ${{ github.ref_name == 'main' && vars.GCP_WIF_POOL_PROD || vars.GCP_WIF_POOL_DEV }}
+          service_account: ${{ github.ref_name == 'main' && vars.CICD_SERVICE_ACCOUNT_ADVISEWELLCO_PROD || vars.CICD_SERVICE_ACCOUNT_ADVISEWELLCO_DEV }}
+          create_credentials_file: true
+          export_environment_variables: true
+
+      - name: Set up Google Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Set Google Artifact Registry URL for Controller
+        id: controller_gar
+        run: |
+          if [[ "${{ github.ref_name }}" == "main" ]]; then
+            echo "CONTROLLER_REGISTRY=${{ env.GAR_LOCATION }}-docker.pkg.dev/aw-production-4df9/${{ env.GAR_CONTROLLER_REPOSITORY }}" >> $GITHUB_ENV
+            echo "controller_registry=${{ env.GAR_LOCATION }}-docker.pkg.dev/aw-production-4df9/${{ env.GAR_CONTROLLER_REPOSITORY }}" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref_name }}" == "develop" ]]; then
+            echo "CONTROLLER_REGISTRY=${{ env.GAR_LOCATION }}-docker.pkg.dev/aw-development-7226/${{ env.GAR_CONTROLLER_REPOSITORY }}" >> $GITHUB_ENV
+            echo "controller_registry=${{ env.GAR_LOCATION }}-docker.pkg.dev/aw-development-7226/${{ env.GAR_CONTROLLER_REPOSITORY }}" >> $GITHUB_OUTPUT
+          else
+            echo "CONTROLLER_REGISTRY=${{ env.GAR_LOCATION }}-docker.pkg.dev/aw-development-7226/${{ env.GAR_CONTROLLER_REPOSITORY }}" >> $GITHUB_ENV
+            echo "controller_registry=${{ env.GAR_LOCATION }}-docker.pkg.dev/aw-development-7226/${{ env.GAR_CONTROLLER_REPOSITORY }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Only login to registry if we will push
+      - name: Log in to Google Artifact Registry
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+        run: |
+          gcloud auth configure-docker ${{ env.GAR_LOCATION }}-docker.pkg.dev --quiet
+
+      # Get version/tag only on main push
+      - name: Get version from package.json
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        id: pkg
+        run: |
+          VERSION=$(jq -r .version package.json)
+          TAG="v$VERSION"
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "TAG=$TAG" >> $GITHUB_ENV
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+      # Generate Docker tags for controller
+      - name: Extract metadata for controller
+        id: controller_meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.CONTROLLER_REGISTRY }}/controller
+          tags: |
+            ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && format('type=raw,value={0}', env.TAG) || '' }}
+            type=ref,event=branch
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      # Build controller image (always), push only on main or develop
+      - name: Build and push controller Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile.controller
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop') }}
+          tags: ${{ steps.controller_meta.outputs.tags }}
+          labels: ${{ steps.controller_meta.outputs.labels }}
+          cache-from: type=gha,scope=controller
+          cache-to: type=gha,mode=max,scope=controller

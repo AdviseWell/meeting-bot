@@ -1,0 +1,69 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Node.js (not needed for Python controller)
+node_modules/
+npm-debug.log
+yarn-error.log
+package*.json
+tsconfig.json
+
+# TypeScript source (not needed for controller)
+src/
+*.ts
+*.tsx
+
+# Tests
+*.test.py
+test/
+tests/
+__tests__/
+
+# Git
+.git/
+.gitignore
+.github/
+
+# Docker
+Dockerfile.development
+Dockerfile.production
+docker-compose.yml
+
+# Documentation
+README.md
+*.md
+docs/
+
+# CI/CD
+.github/
+scripts/
+
+# Other app files
+assets/
+playwright.config.ts
+start.sh
+xvfb-run-wrapper
+auto_launch_protocols.json
