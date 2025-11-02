@@ -5,9 +5,35 @@ Meeting Monitor - Interface with the meeting-bot API
 import time
 import logging
 import requests
-from typing import Optional, Dict
+from typing import Optional, Dict, Literal
 
 logger = logging.getLogger(__name__)
+
+# Type alias for meeting providers
+Provider = Literal['google', 'microsoft', 'zoom']
+
+
+def detect_meeting_provider(meeting_url: str) -> Optional[Provider]:
+    """
+    Detect the meeting provider from the URL
+    
+    Args:
+        meeting_url: The meeting URL
+        
+    Returns:
+        Provider name ('google', 'microsoft', or 'zoom'), or None if unknown
+    """
+    url_lower = meeting_url.lower()
+    
+    if 'meet.google.com' in url_lower or 'google.com/meet' in url_lower:
+        return 'google'
+    elif 'teams.microsoft.com' in url_lower or 'teams.live.com' in url_lower:
+        return 'microsoft'
+    elif 'zoom.us' in url_lower or 'zoom.com' in url_lower:
+        return 'zoom'
+    else:
+        logger.warning(f"Unknown meeting provider for URL: {meeting_url}")
+        return None
 
 
 class MeetingMonitor:
@@ -71,20 +97,38 @@ class MeetingMonitor:
         
         Args:
             meeting_url: URL of the meeting to join
-            metadata: Additional metadata to pass to the API
+            metadata: Additional metadata to pass to the API (must include required fields)
             
         Returns:
             Job ID if successful, None otherwise
         """
         try:
-            endpoint = f"{self.api_base_url}/api/join"
+            # Detect provider from URL
+            provider = detect_meeting_provider(meeting_url)
+            if not provider:
+                logger.error(f"Could not detect meeting provider from URL: {meeting_url}")
+                return None
             
+            # Build provider-specific endpoint
+            endpoint = f"{self.api_base_url}/{provider}/join"
+            
+            # Build payload with required fields
+            # The meeting-bot API expects: bearerToken, url, name, teamId, timezone, userId, botId
+            # Note: API accepts either botId or eventId, but documentation shows botId as standard
             payload = {
-                "meeting_url": meeting_url,
-                "metadata": metadata
+                "url": meeting_url,
+                "name": metadata.get('name', 'Meeting Bot'),
+                "bearerToken": metadata.get('bearerToken', metadata.get('bearer_token', '')),
+                "teamId": metadata.get('teamId', metadata.get('team_id', metadata.get('meeting_id', 'default-team'))),
+                "timezone": metadata.get('timezone', 'UTC'),
+                "userId": metadata.get('userId', metadata.get('user_id', 'system')),
+                "botId": metadata.get('botId', metadata.get('bot_id', metadata.get('meeting_id', 'unknown'))),
             }
+
             
-            logger.info(f"Joining meeting: {meeting_url}")
+            logger.info(f"Joining {provider} meeting: {meeting_url}")
+            logger.debug(f"Payload: {payload}")
+            
             response = requests.post(
                 endpoint,
                 json=payload,
@@ -94,13 +138,22 @@ class MeetingMonitor:
             response.raise_for_status()
             
             result = response.json()
-            job_id = result.get('job_id') or result.get('id')
             
-            if not job_id:
-                logger.error(f"No job_id in response: {result}")
+            # Check if job was accepted
+            if not result.get('success'):
+                error_msg = result.get('error', 'Unknown error')
+                logger.error(f"Meeting join request failed: {error_msg}")
                 return None
             
-            logger.info(f"Successfully joined meeting. Job ID: {job_id}")
+            # Extract job/bot ID from response
+            data = result.get('data', {})
+            job_id = data.get('botId') or data.get('eventId') or payload.get('botId') or payload.get('eventId')
+            
+            if not job_id:
+                logger.error(f"No job ID in response: {result}")
+                return None
+            
+            logger.info(f"Successfully joined {provider} meeting. Job ID: {job_id}")
             return job_id
             
         except requests.exceptions.RequestException as e:

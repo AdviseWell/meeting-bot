@@ -64,22 +64,82 @@ class MeetingManager:
         self.storage_client = StorageClient(self.gcs_bucket)
     
     def _load_metadata(self) -> Dict:
-        """Load optional metadata from environment variables"""
+        """Load metadata from environment variables for meeting-bot API"""
         metadata = {}
         
-        # Add any additional metadata fields from environment
+        # Core meeting fields
+        if self.meeting_id:
+            metadata['meeting_id'] = self.meeting_id
+        if self.gcs_path:
+            metadata['gcs_path'] = self.gcs_path
+        
+        # Meeting-bot API required fields (support both snake_case and camelCase env vars)
+        # bearerToken (required)
+        metadata['bearerToken'] = (
+            os.environ.get('BEARERTOKEN') or 
+            os.environ.get('BEARER_TOKEN') or 
+            os.environ.get('bearer_token') or ''
+        )
+        
+        # teamId (required) - fallback to meeting_id
+        metadata['teamId'] = (
+            os.environ.get('TEAMID') or 
+            os.environ.get('TEAM_ID') or 
+            os.environ.get('team_id') or 
+            self.meeting_id
+        )
+        
+        # userId (required) - fallback to 'system'
+        metadata['userId'] = (
+            os.environ.get('USERID') or 
+            os.environ.get('USER_ID') or 
+            os.environ.get('user_id') or 
+            'system'
+        )
+        
+        # timezone (required) - fallback to UTC
+        metadata['timezone'] = (
+            os.environ.get('TIMEZONE') or 
+            os.environ.get('timezone') or 
+            'UTC'
+        )
+        
+        # name (required) - fallback to 'Meeting Bot'
+        metadata['name'] = (
+            os.environ.get('NAME') or 
+            os.environ.get('name') or 
+            os.environ.get('BOT_NAME') or 
+            'Meeting Bot'
+        )
+        
+        # botId (required by API - either botId or eventId)
+        # Prefer botId over eventId based on documentation
+        bot_id = (
+            os.environ.get('BOTID') or 
+            os.environ.get('BOT_ID') or 
+            os.environ.get('bot_id')
+        )
+        event_id = (
+            os.environ.get('EVENTID') or 
+            os.environ.get('EVENT_ID') or 
+            os.environ.get('event_id')
+        )
+        
+        if bot_id:
+            metadata['botId'] = bot_id
+        elif event_id:
+            metadata['botId'] = event_id  # Use eventId as botId
+        else:
+            # Fallback to meeting_id if neither is provided
+            metadata['botId'] = self.meeting_id
+        
+        # Optional meeting metadata
         if os.environ.get('MEETING_TITLE'):
             metadata['meeting_title'] = os.environ.get('MEETING_TITLE')
         if os.environ.get('MEETING_ORGANIZER'):
             metadata['meeting_organizer'] = os.environ.get('MEETING_ORGANIZER')
         if os.environ.get('MEETING_START_TIME'):
             metadata['meeting_start_time'] = os.environ.get('MEETING_START_TIME')
-        
-        # Include the core fields
-        if self.meeting_id:
-            metadata['meeting_id'] = self.meeting_id
-        if self.gcs_path:
-            metadata['gcs_path'] = self.gcs_path
             
         return metadata
         

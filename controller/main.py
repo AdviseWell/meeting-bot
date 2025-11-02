@@ -181,7 +181,22 @@ class MeetingController:
                 client.V1EnvVar(name="INACTIVITY_DETECTION_START_DELAY_MINUTES", value=str(self.inactivity_detection_delay)),
             ]
             
-            # Add optional metadata fields
+            # Add ALL fields from Pub/Sub message as environment variables
+            # This ensures the manager has all the data it needs for the meeting-bot API
+            # We add both original case AND uppercase versions for compatibility
+            for key, value in message_data.items():
+                if value is not None and isinstance(value, (str, int, float, bool)):
+                    # Skip keys we've already added
+                    if key.lower() not in ['meeting_url', 'meeting_id', 'gcs_path']:
+                        # Add original case (e.g., bearerToken, teamId, userId)
+                        env_vars.append(client.V1EnvVar(name=key, value=str(value)))
+                        
+                        # Also add UPPERCASE version for backward compatibility (e.g., BEARERTOKEN, TEAM_ID)
+                        env_key_upper = key.upper().replace('-', '_')
+                        if env_key_upper != key:  # Only add if different from original
+                            env_vars.append(client.V1EnvVar(name=env_key_upper, value=str(value)))
+            
+            # Add optional metadata fields (for backward compatibility)
             if message_data.get('meeting_title'):
                 env_vars.append(client.V1EnvVar(name="MEETING_TITLE", value=message_data['meeting_title']))
             if message_data.get('organizer'):
