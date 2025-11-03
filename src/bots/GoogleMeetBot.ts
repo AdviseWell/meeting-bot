@@ -456,16 +456,16 @@ export class GoogleMeetBot extends MeetBotBase {
             console.log(`Media Recorder will use ${primaryMimeType} codecs with ultra quality...`);
             options = {
               mimeType: primaryMimeType,
-              videoBitsPerSecond: 5000000,  // 5 Mbps for high quality video
-              audioBitsPerSecond: 256000     // 256 kbps for high quality audio
+              videoBitsPerSecond: 15000000,  // 15 Mbps for ultra high quality video (3x)
+              audioBitsPerSecond: 768000     // 768 kbps for ultra high quality audio (3x)
             };
           }
           else {
             console.warn(`Media Recorder did not find primary mime type codecs ${primaryMimeType}, Using fallback codecs ${secondaryMimeType}`);
             options = {
               mimeType: secondaryMimeType,
-              videoBitsPerSecond: 5000000,  // 5 Mbps for high quality video
-              audioBitsPerSecond: 256000     // 256 kbps for high quality audio
+              videoBitsPerSecond: 15000000,  // 15 Mbps for ultra high quality video (3x)
+              audioBitsPerSecond: 768000     // 768 kbps for ultra high quality audio (3x)
             };
           }
 

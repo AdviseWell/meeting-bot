@@ -102,15 +102,15 @@ class MediaConverter:
             logger.info(f"Converting to MP4: {input_path} -> {output_path}")
             
             # ffmpeg command for MP4 conversion
-            # Using H.264 codec with reasonable quality settings
+            # Using H.264 codec with ultra high quality settings
             cmd = [
                 'ffmpeg',
                 '-i', input_path,
                 '-c:v', 'libx264',      # Video codec
-                '-preset', 'medium',     # Encoding speed/quality balance
-                '-crf', '23',            # Quality (lower = better, 23 is default)
+                '-preset', 'slow',       # Slower encoding for better quality
+                '-crf', '18',            # Quality (lower = better, 18 is very high quality, was 23)
                 '-c:a', 'aac',           # Audio codec
-                '-b:a', '128k',          # Audio bitrate
+                '-b:a', '384k',          # Audio bitrate (3x from 128k)
                 '-movflags', '+faststart',  # Enable streaming
                 '-y',                    # Overwrite output file
                 output_path
@@ -152,13 +152,15 @@ class MediaConverter:
         try:
             logger.info(f"Extracting AAC audio: {input_path} -> {output_path}")
             
-            # ffmpeg command for AAC extraction
+            # ffmpeg command for AAC extraction with audio normalization
+            # Using loudnorm filter for professional audio normalization
             cmd = [
                 'ffmpeg',
                 '-i', input_path,
                 '-vn',                   # No video
+                '-af', 'loudnorm=I=-16:TP=-1.5:LRA=11',  # Audio normalization filter
                 '-c:a', 'aac',           # Audio codec
-                '-b:a', '128k',          # Audio bitrate
+                '-b:a', '384k',          # Audio bitrate (3x from 128k)
                 '-y',                    # Overwrite output file
                 output_path
             ]
