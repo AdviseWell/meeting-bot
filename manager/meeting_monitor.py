@@ -2,6 +2,8 @@
 Meeting Monitor - Interface with the meeting-bot API
 """
 
+import os
+import glob
 import time
 import logging
 import requests
@@ -273,13 +275,42 @@ class MeetingMonitor:
             
             # Check if job is complete
             if state in ['completed', 'finished', 'done']:
-                recording_path = status.get('recording_path') or status.get('output_path')
-                if recording_path:
-                    logger.info(f"Meeting completed successfully. Recording: {recording_path}")
-                    return recording_path
-                else:
-                    logger.warning("Meeting completed but no recording path found")
+                # Recording file is in the shared volume
+                # Meeting-bot saves to: /usr/src/app/dist/_tempvideo/{userId}/recording.webm
+                # This is mounted to /recordings in the manager container
+                user_id = os.getenv('userId') or os.getenv('USERID')
+                if not user_id:
+                    logger.error("❌ No userId found in environment variables - cannot locate recording")
                     return None
+                
+                # Look for the recording file
+                recording_dir = f"/recordings/{user_id}"
+                if not os.path.exists(recording_dir):
+                    logger.error(f"❌ Recording directory not found: {recording_dir}")
+                    return None
+                
+                # Find .webm files in the directory
+                recording_files = glob.glob(f"{recording_dir}/*.webm")
+                
+                if not recording_files:
+                    logger.error(f"❌ No .webm recording files found in {recording_dir}")
+                    return None
+                
+                if len(recording_files) > 1:
+                    logger.warning(f"⚠️  Multiple recording files found, using first: {recording_files}")
+                
+                recording_path = recording_files[0]
+                logger.info(f"📹 Found recording file: {recording_path}")
+                
+                # Verify file exists and is readable
+                if not os.path.isfile(recording_path):
+                    logger.error(f"❌ Recording path is not a file: {recording_path}")
+                    return None
+                
+                file_size = os.path.getsize(recording_path)
+                logger.info(f"📊 Recording file size: {file_size / (1024*1024):.2f} MB")
+                
+                return recording_path
             
             # Check if job failed
             if state in ['failed', 'error', 'cancelled']:

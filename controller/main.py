@@ -215,6 +215,14 @@ class MeetingController:
                     client.V1EnvVar(name="MAX_RECORDING_DURATION_MINUTES", value=str(self.max_recording_duration)),
                     client.V1EnvVar(name="MEETING_INACTIVITY_MINUTES", value=str(self.meeting_inactivity)),
                     client.V1EnvVar(name="INACTIVITY_DETECTION_START_DELAY_MINUTES", value=str(self.inactivity_detection_delay)),
+                    # Disable S3 upload - manager will handle the recording file
+                    client.V1EnvVar(name="S3_ENDPOINT", value=""),
+                ],
+                volume_mounts=[
+                    client.V1VolumeMount(
+                        name="recordings",
+                        mount_path="/usr/src/app/dist/_tempvideo"
+                    )
                 ],
                 resources=client.V1ResourceRequirements(
                     requests={
@@ -235,6 +243,12 @@ class MeetingController:
                 env=env_vars + [
                     # Manager needs to communicate with meeting-bot on localhost
                     client.V1EnvVar(name="MEETING_BOT_API_URL", value="http://localhost:3000"),
+                ],
+                volume_mounts=[
+                    client.V1VolumeMount(
+                        name="recordings",
+                        mount_path="/recordings"
+                    )
                 ],
                 image_pull_policy="IfNotPresent",
                 resources=client.V1ResourceRequirements(
@@ -261,6 +275,12 @@ class MeetingController:
                     restart_policy="Never",
                     containers=[meeting_bot_container, manager_container],
                     service_account_name=self.job_service_account,
+                    volumes=[
+                        client.V1Volume(
+                            name="recordings",
+                            empty_dir=client.V1EmptyDirVolumeSource()
+                        )
+                    ]
                 )
             )
             
@@ -279,7 +299,7 @@ class MeetingController:
                 ),
                 spec=client.V1JobSpec(
                     template=template,
-                    backoff_limit=2,  # Retry up to 2 times on failure
+                    backoff_limit=0,  # Do not retry on failure
                     ttl_seconds_after_finished=3600,  # Clean up after 1 hour
                 )
             )
