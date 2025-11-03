@@ -226,12 +226,12 @@ class MeetingController:
                 ],
                 resources=client.V1ResourceRequirements(
                     requests={
-                        "cpu": "1000m",
-                        "memory": "2Gi"
+                        "cpu": "2000m",      # Increased from 1000m for better encoding
+                        "memory": "4Gi"      # Increased from 2Gi for high-quality recording
                     },
                     limits={
-                        "cpu": "2000m",
-                        "memory": "4Gi"
+                        "cpu": "4000m",      # Increased from 2000m for peak performance
+                        "memory": "8Gi"      # Increased from 4Gi for headroom
                     }
                 )
             )

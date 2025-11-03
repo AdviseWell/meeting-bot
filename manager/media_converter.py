@@ -103,14 +103,28 @@ class MediaConverter:
             
             # ffmpeg command for MP4 conversion
             # Using H.264 codec with ultra high quality settings
+            # Audio filter chain for professional quality:
+            # 1. highpass: Remove low frequency rumble/noise below 80Hz
+            # 2. lowpass: Remove high frequency hiss above 15kHz
+            # 3. afftdn: Advanced noise reduction using FFT
+            # 4. loudnorm: Professional loudness normalization (EBU R128)
+            audio_filters = (
+                'highpass=f=80,'                          # Remove rumble
+                'lowpass=f=15000,'                        # Remove hiss
+                'afftdn=nf=-25,'                          # Noise reduction
+                'loudnorm=I=-16:TP=-1.5:LRA=11'           # Normalize loudness
+            )
+            
             cmd = [
                 'ffmpeg',
                 '-i', input_path,
                 '-c:v', 'libx264',      # Video codec
                 '-preset', 'slow',       # Slower encoding for better quality
                 '-crf', '18',            # Quality (lower = better, 18 is very high quality, was 23)
+                '-af', audio_filters,    # Audio filter chain
                 '-c:a', 'aac',           # Audio codec
                 '-b:a', '384k',          # Audio bitrate (3x from 128k)
+                '-ar', '48000',          # 48 kHz sample rate
                 '-movflags', '+faststart',  # Enable streaming
                 '-y',                    # Overwrite output file
                 output_path
@@ -152,15 +166,29 @@ class MediaConverter:
         try:
             logger.info(f"Extracting AAC audio: {input_path} -> {output_path}")
             
-            # ffmpeg command for AAC extraction with audio normalization
-            # Using loudnorm filter for professional audio normalization
+            # ffmpeg command for AAC extraction with advanced audio processing
+            # Multi-stage audio filter chain for professional quality:
+            # 1. highpass: Remove low frequency rumble/noise below 80Hz
+            # 2. lowpass: Remove high frequency hiss above 15kHz
+            # 3. afftdn: Advanced noise reduction using FFT
+            # 4. loudnorm: Professional loudness normalization (EBU R128)
+            # 5. compand: Dynamic range compression for clearer speech
+            audio_filters = (
+                'highpass=f=80,'                          # Remove rumble
+                'lowpass=f=15000,'                        # Remove hiss
+                'afftdn=nf=-25,'                          # Noise reduction
+                'loudnorm=I=-16:TP=-1.5:LRA=11,'          # Normalize loudness
+                'compand=attacks=0.3:decays=0.8:points=-80/-80|-45/-30|-27/-20|0/-10'  # Compress dynamics
+            )
+            
             cmd = [
                 'ffmpeg',
                 '-i', input_path,
                 '-vn',                   # No video
-                '-af', 'loudnorm=I=-16:TP=-1.5:LRA=11',  # Audio normalization filter
+                '-af', audio_filters,    # Audio filter chain
                 '-c:a', 'aac',           # Audio codec
                 '-b:a', '384k',          # Audio bitrate (3x from 128k)
+                '-ar', '48000',          # 48 kHz sample rate
                 '-y',                    # Overwrite output file
                 output_path
             ]

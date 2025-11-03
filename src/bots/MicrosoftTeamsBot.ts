@@ -306,13 +306,17 @@ export class MicrosoftTeamsBot extends MeetBotBase {
           }
 
           const stream: MediaStream = await (navigator.mediaDevices as any).getDisplayMedia({
-            video: true,
+            video: {
+              frameRate: { ideal: 30, max: 30 }  // 30 fps is optimal for meetings
+            },
             audio: {
               autoGainControl: false,
               channels: 2,
               channelCount: 2,
               echoCancellation: false,
               noiseSuppression: false,
+              sampleRate: 48000,  // 48 kHz sample rate for professional audio quality
+              sampleSize: 16,     // 16-bit audio depth
             },
             preferCurrentTab: true,
           });
