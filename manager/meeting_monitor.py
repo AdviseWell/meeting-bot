@@ -4,6 +4,8 @@ Meeting Monitor - Interface with the meeting-bot API
 
 import os
 import glob
+import shutil
+import tempfile
 import time
 import logging
 import requests
@@ -277,13 +279,13 @@ class MeetingMonitor:
             if state in ['completed', 'finished', 'done']:
                 # Recording file is in the shared volume
                 # Meeting-bot saves to: /usr/src/app/dist/_tempvideo/{userId}/recording.webm
-                # This is mounted to /recordings in the manager container
+                # This is mounted to /recordings in the manager container (read-only access)
                 user_id = os.getenv('userId') or os.getenv('USERID')
                 if not user_id:
                     logger.error("❌ No userId found in environment variables - cannot locate recording")
                     return None
                 
-                # Look for the recording file
+                # Look for the recording file in the shared volume
                 recording_dir = f"/recordings/{user_id}"
                 if not os.path.exists(recording_dir):
                     logger.error(f"❌ Recording directory not found: {recording_dir}")
@@ -299,18 +301,27 @@ class MeetingMonitor:
                 if len(recording_files) > 1:
                     logger.warning(f"⚠️  Multiple recording files found, using first: {recording_files}")
                 
-                recording_path = recording_files[0]
-                logger.info(f"📹 Found recording file: {recording_path}")
+                source_path = recording_files[0]
+                logger.info(f"📹 Found recording file: {source_path}")
                 
                 # Verify file exists and is readable
-                if not os.path.isfile(recording_path):
-                    logger.error(f"❌ Recording path is not a file: {recording_path}")
+                if not os.path.isfile(source_path):
+                    logger.error(f"❌ Recording path is not a file: {source_path}")
                     return None
                 
-                file_size = os.path.getsize(recording_path)
+                file_size = os.path.getsize(source_path)
                 logger.info(f"📊 Recording file size: {file_size / (1024*1024):.2f} MB")
                 
-                return recording_path
+                # Copy to /tmp for processing (shared volume is read-only for manager)
+                temp_dir = tempfile.mkdtemp(prefix="recording_")
+                filename = os.path.basename(source_path)
+                temp_path = os.path.join(temp_dir, filename)
+                
+                logger.info(f"📋 Copying recording to temp directory: {temp_path}")
+                shutil.copy2(source_path, temp_path)
+                logger.info(f"✅ Recording copied successfully")
+                
+                return temp_path
             
             # Check if job failed
             if state in ['failed', 'error', 'cancelled']:
