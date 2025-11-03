@@ -21,6 +21,7 @@ from typing import Optional, Dict
 from meeting_monitor import MeetingMonitor
 from media_converter import MediaConverter
 from storage_client import StorageClient
+from transcription_client import TranscriptionClient
 
 # Configure logging
 logging.basicConfig(
@@ -62,6 +63,7 @@ class MeetingManager:
         self.meeting_monitor = MeetingMonitor(self.meeting_bot_api)
         self.media_converter = MediaConverter()
         self.storage_client = StorageClient(self.gcs_bucket)
+        self.transcription_client = TranscriptionClient(project_id="aw-gemini-api-central")
     
     def _load_metadata(self) -> Dict:
         """Load metadata from environment variables for meeting-bot API"""
@@ -201,16 +203,84 @@ class MeetingManager:
             
             logger.info(f"Conversion complete - MP4: {mp4_path}, AAC: {aac_path}")
             
-            # Step 4: Upload to GCS
-            logger.info("Step 4: Uploading to GCS...")
+            # Step 4: Transcribe audio using Chirp 3 (optional, don't fail job if it fails)
+            logger.info("Step 4: Transcribing audio with Chirp 3...")
+            transcript_txt_path = None
+            transcript_json_path = None
+            
+            try:
+                # First, upload the AAC file to GCS so Chirp 3 can access it
+                aac_gcs_path = f"{self.gcs_path}/audio.aac"
+                aac_uploaded = self.storage_client.upload_file(aac_path, aac_gcs_path)
+                
+                if aac_uploaded:
+                    # Build GCS URI for Chirp 3
+                    audio_gcs_uri = f"gs://{self.gcs_bucket}/{aac_gcs_path}"
+                    logger.info(f"Transcribing from: {audio_gcs_uri}")
+                    
+                    # Transcribe the audio
+                    transcript_data = self.transcription_client.transcribe_audio(
+                        audio_uri=audio_gcs_uri,
+                        language_code="en-US",
+                        enable_automatic_punctuation=True,
+                        enable_speaker_diarization=True,
+                        max_speaker_count=5
+                    )
+                    
+                    if transcript_data:
+                        import tempfile
+                        
+                        # Save transcript as TXT
+                        transcript_txt_path = os.path.join(tempfile.gettempdir(), f"{self.meeting_id}_transcript.txt")
+                        self.transcription_client.save_transcript(transcript_data, transcript_txt_path, format="txt")
+                        
+                        # Save transcript as JSON
+                        transcript_json_path = os.path.join(tempfile.gettempdir(), f"{self.meeting_id}_transcript.json")
+                        self.transcription_client.save_transcript(transcript_data, transcript_json_path, format="json")
+                        
+                        logger.info(f"✅ Transcription complete! Words: {transcript_data['word_count']}, Speakers: {transcript_data['speaker_count']}")
+                    else:
+                        logger.warning("Transcription completed but no results returned")
+                else:
+                    logger.warning("Failed to upload AAC to GCS for transcription, skipping transcription step")
+                    
+            except Exception as e:
+                logger.exception(f"Transcription failed (non-fatal): {e}")
+                logger.warning("Continuing with upload despite transcription failure")
+            
+            # Step 5: Upload all files to GCS
+            logger.info("Step 5: Uploading all files to GCS...")
+            
+            # Upload video
             mp4_uploaded = self.storage_client.upload_file(mp4_path, f"{self.gcs_path}/video.mp4")
-            aac_uploaded = self.storage_client.upload_file(aac_path, f"{self.gcs_path}/audio.aac")
+            
+            # Upload audio (if not already uploaded for transcription)
+            if not aac_uploaded:
+                aac_uploaded = self.storage_client.upload_file(aac_path, f"{self.gcs_path}/audio.aac")
+            
+            # Upload transcripts if available
+            transcript_txt_uploaded = False
+            transcript_json_uploaded = False
+            if transcript_txt_path and os.path.exists(transcript_txt_path):
+                transcript_txt_uploaded = self.storage_client.upload_file(transcript_txt_path, f"{self.gcs_path}/transcript.txt")
+            if transcript_json_path and os.path.exists(transcript_json_path):
+                transcript_json_uploaded = self.storage_client.upload_file(transcript_json_path, f"{self.gcs_path}/transcript.json")
             
             if mp4_uploaded and aac_uploaded:
                 logger.info(f"Successfully uploaded files to gs://{self.gcs_bucket}/{self.gcs_path}/")
+                if transcript_txt_uploaded and transcript_json_uploaded:
+                    logger.info(f"✅ Transcripts also uploaded successfully")
                 
                 # Cleanup local files
                 self.media_converter.cleanup(recording_path, mp4_path, aac_path)
+                
+                # Cleanup transcript files
+                if transcript_txt_path and os.path.exists(transcript_txt_path):
+                    os.remove(transcript_txt_path)
+                    logger.debug(f"Removed local transcript: {transcript_txt_path}")
+                if transcript_json_path and os.path.exists(transcript_json_path):
+                    os.remove(transcript_json_path)
+                    logger.debug(f"Removed local transcript: {transcript_json_path}")
                 
                 return True
             else:

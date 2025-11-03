@@ -1,5 +1,6 @@
 # Google Cloud Platform
 google-cloud-storage==3.4.1
+google-cloud-speech==2.34.0
 
 # HTTP client
 requests==2.32.5
