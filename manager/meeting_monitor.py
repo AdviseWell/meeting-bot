@@ -124,18 +124,44 @@ class MeetingMonitor:
                 "userId": metadata.get('userId', metadata.get('user_id', 'system')),
                 "botId": metadata.get('botId', metadata.get('bot_id', metadata.get('meeting_id', 'unknown'))),
             }
-
+            
+            # Validate critical fields
+            if not payload.get('bearerToken'):
+                logger.warning("⚠️  bearerToken is missing or empty - API call may fail!")
+            if not payload.get('userId') or payload['userId'] == 'system':
+                logger.warning(f"⚠️  userId is using fallback value: {payload['userId']}")
             
             logger.info(f"Joining {provider} meeting: {meeting_url}")
-            logger.debug(f"Payload: {payload}")
+            logger.info(f"Payload: name={payload['name']}, teamId={payload['teamId']}, userId={payload['userId']}, botId={payload['botId']}, timezone={payload['timezone']}, bearerToken={'***' if payload.get('bearerToken') else 'MISSING'}")
             
-            response = requests.post(
-                endpoint,
-                json=payload,
-                timeout=30
-            )
-            
-            response.raise_for_status()
+            try:
+                response = requests.post(
+                    endpoint,
+                    json=payload,
+                    timeout=30
+                )
+                
+                # Log response details for debugging
+                logger.info(f"API Response Status: {response.status_code}")
+                logger.debug(f"API Response Headers: {dict(response.headers)}")
+                
+                response.raise_for_status()
+                
+            except requests.exceptions.HTTPError as http_err:
+                # Log detailed error information
+                logger.error(f"HTTP error occurred: {http_err}")
+                logger.error(f"Response status: {response.status_code}")
+                logger.error(f"Response body: {response.text}")
+                raise
+            except requests.exceptions.Timeout as timeout_err:
+                logger.error(f"Request timeout after 30s: {timeout_err}")
+                raise
+            except requests.exceptions.ConnectionError as conn_err:
+                logger.error(f"Connection error: {conn_err}")
+                raise
+            except Exception as req_err:
+                logger.error(f"Request failed: {req_err}")
+                raise
             
             result = response.json()
             
@@ -162,21 +188,45 @@ class MeetingMonitor:
     
     def get_job_status(self, job_id: str) -> Optional[Dict]:
         """
-        Get the status of a meeting job
+        Get the status of a meeting job by checking if the bot is busy
+        
+        Note: Meeting-bot doesn't have a /api/job/{id} endpoint. Instead, it uses
+        a single-job execution model where we check the /isbusy endpoint.
         
         Args:
-            job_id: The job ID to check
+            job_id: The job ID to check (not actually used by meeting-bot)
             
         Returns:
             Job status dict if successful, None otherwise
         """
         try:
-            endpoint = f"{self.api_base_url}/api/job/{job_id}"
+            # Check if meeting-bot is currently busy processing
+            endpoint = f"{self.api_base_url}/isbusy"
             
             response = requests.get(endpoint, timeout=10)
             response.raise_for_status()
             
-            return response.json()
+            result = response.json()
+            is_busy = result.get('data', 0)
+            
+            # Map busy status to job state
+            # When busy=1, meeting is in progress
+            # When busy=0, meeting is complete or bot is idle
+            if is_busy == 1:
+                return {
+                    'status': 'processing',
+                    'state': 'in_progress',
+                    'job_id': job_id
+                }
+            else:
+                # Bot is no longer busy - meeting either completed or failed
+                # We can't distinguish without additional state tracking
+                return {
+                    'status': 'completed',
+                    'state': 'finished',
+                    'job_id': job_id,
+                    'note': 'Meeting-bot is no longer busy. Check logs for recording location.'
+                }
             
         except requests.exceptions.RequestException as e:
             logger.error(f"Failed to get job status: {e}")
