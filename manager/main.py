@@ -221,7 +221,7 @@ class MeetingManager:
                     # Transcribe the audio
                     transcript_data = self.transcription_client.transcribe_audio(
                         audio_uri=audio_gcs_uri,
-                        language_code="en-US",
+                        language_code="en-AU",  # Australian English
                         enable_automatic_punctuation=True,
                         enable_speaker_diarization=True,
                         max_speaker_count=5

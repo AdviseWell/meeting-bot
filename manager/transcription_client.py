@@ -9,6 +9,7 @@ from typing import Optional, Dict
 from google.cloud import speech_v2
 from google.cloud.speech_v2 import SpeechClient
 from google.cloud.speech_v2.types import cloud_speech
+from google.api_core.client_options import ClientOptions
 
 logger = logging.getLogger(__name__)
 
@@ -16,19 +17,29 @@ logger = logging.getLogger(__name__)
 class TranscriptionClient:
     """Client for transcribing audio files using Google Chirp 3"""
     
-    def __init__(self, project_id: str = "aw-gemini-api-central"):
+    def __init__(
+        self, 
+        project_id: str = "aw-gemini-api-central",
+        region: str = "asia-southeast1"  # Singapore - closest to Sydney
+    ):
         """
         Initialize the transcription client
         
         Args:
             project_id: Google Cloud project ID for AI workloads
+            region: GCP region for Chirp 3 (must be regional, not global)
         """
         self.project_id = project_id
+        self.region = region
         self.client = None
         
         try:
-            self.client = SpeechClient()
-            logger.info(f"Initialized Chirp 3 transcription client for project: {project_id}")
+            # Chirp 3 requires a regional endpoint, not global
+            client_options = ClientOptions(
+                api_endpoint=f"{region}-speech.googleapis.com"
+            )
+            self.client = SpeechClient(client_options=client_options)
+            logger.info(f"Initialized Chirp 3 transcription client for project: {project_id}, region: {region}")
         except Exception as e:
             logger.error(f"Failed to initialize transcription client: {e}")
             raise
@@ -61,7 +72,7 @@ class TranscriptionClient:
             config = cloud_speech.RecognitionConfig(
                 auto_decoding_config=cloud_speech.AutoDetectDecodingConfig(),
                 language_codes=[language_code],
-                model="chirp",  # Latest Chirp model (Chirp 3)
+                model="chirp_3",  # Chirp 3 - latest model with enhanced accuracy and diarization
                 features=cloud_speech.RecognitionFeatures(
                     enable_automatic_punctuation=enable_automatic_punctuation,
                     enable_word_time_offsets=True,
@@ -78,9 +89,9 @@ class TranscriptionClient:
                 uri=audio_uri,
             )
             
-            # Create the recognition request
+            # Create the recognition request (use regional location, not global)
             request = cloud_speech.BatchRecognizeRequest(
-                recognizer=f"projects/{self.project_id}/locations/global/recognizers/_",
+                recognizer=f"projects/{self.project_id}/locations/{self.region}/recognizers/_",
                 config=config,
                 files=[file_metadata],
                 recognition_output_config=cloud_speech.RecognitionOutputConfig(
