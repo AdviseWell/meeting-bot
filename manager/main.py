@@ -208,62 +208,85 @@ class MeetingManager:
 
             logger.info(f"Conversion complete - MP4: {mp4_path}, M4A: {m4a_path}")
 
-            # Step 4: Transcribe audio using Chirp 3 (optional, don't fail job if it fails)
-            logger.info("Step 4: Transcribing audio with Chirp 3...")
+            # Step 4: Transcribe audio using Gemini (optional, non-fatal)
+            logger.info("Step 4: Transcribing audio with Gemini...")
             transcript_txt_path = None
             transcript_json_path = None
 
             try:
-                # First, upload the M4A file to GCS so Chirp 3 can access it
+                # Upload the M4A file to GCS first
                 m4a_gcs_path = f"{self.gcs_path}/audio.m4a"
-                m4a_uploaded = self.storage_client.upload_file(m4a_path, m4a_gcs_path)
+                m4a_uploaded = self.storage_client.upload_file(
+                    m4a_path, m4a_gcs_path
+                )
 
                 if m4a_uploaded:
-                    # Build GCS URI for Chirp 3
-                    audio_gcs_uri = f"gs://{self.gcs_bucket}/{m4a_gcs_path}"
-                    logger.info(f"Transcribing from: {audio_gcs_uri}")
-
-                    # Transcribe the audio
-                    transcript_data = self.transcription_client.transcribe_audio(
-                        audio_uri=audio_gcs_uri,
-                        language_code="en-AU",  # Australian English
-                        enable_automatic_punctuation=True,
+                    # Generate signed URL for Gemini to access the audio
+                    audio_url = self.storage_client.get_signed_url(
+                        m4a_gcs_path,
+                        expiration_minutes=120  # 2 hours for long files
                     )
 
-                    if transcript_data:
-                        import tempfile
+                    if audio_url:
+                        logger.info("Transcribing audio with Gemini...")
 
-                        # Save transcript as TXT
-                        transcript_txt_path = os.path.join(
-                            tempfile.gettempdir(), f"{self.meeting_id}_transcript.txt"
-                        )
-                        self.transcription_client.save_transcript(
-                            transcript_data, transcript_txt_path, format="txt"
-                        )
-
-                        # Save transcript as JSON
-                        transcript_json_path = os.path.join(
-                            tempfile.gettempdir(), f"{self.meeting_id}_transcript.json"
-                        )
-                        self.transcription_client.save_transcript(
-                            transcript_data, transcript_json_path, format="json"
+                        # Transcribe the audio with speaker diarization
+                        transcript_data = (
+                            self.transcription_client.transcribe_audio(
+                                audio_uri=audio_url,
+                                language_code="en-AU",  # Australian English
+                                enable_speaker_diarization=True,
+                                enable_timestamps=False,
+                                enable_action_items=True,
+                            )
                         )
 
-                        logger.info(
-                            f"✅ Transcription complete! Words: {transcript_data['word_count']}"
-                        )
+                        if transcript_data:
+                            import tempfile
+
+                            # Save transcript as TXT
+                            transcript_txt_path = os.path.join(
+                                tempfile.gettempdir(),
+                                f"{self.meeting_id}_transcript.txt"
+                            )
+                            self.transcription_client.save_transcript(
+                                transcript_data, transcript_txt_path, format="txt"
+                            )
+
+                            # Save transcript as JSON
+                            transcript_json_path = os.path.join(
+                                tempfile.gettempdir(),
+                                f"{self.meeting_id}_transcript.json"
+                            )
+                            self.transcription_client.save_transcript(
+                                transcript_data,
+                                transcript_json_path,
+                                format="json"
+                            )
+
+                            logger.info(
+                                f"✅ Transcription complete! "
+                                f"Words: {transcript_data['word_count']}"
+                            )
+                        else:
+                            logger.warning(
+                                "Transcription completed but no results returned"
+                            )
                     else:
                         logger.warning(
-                            "Transcription completed but no results returned"
+                            "Failed to generate signed URL for audio file"
                         )
                 else:
                     logger.warning(
-                        "Failed to upload M4A to GCS for transcription, skipping transcription step"
+                        "Failed to upload M4A to GCS, "
+                        "skipping transcription step"
                     )
 
             except Exception as e:
                 logger.exception(f"Transcription failed (non-fatal): {e}")
-                logger.warning("Continuing with upload despite transcription failure")
+                logger.warning(
+                    "Continuing with upload despite transcription failure"
+                )
 
             # Step 5: Upload all files to GCS
             logger.info("Step 5: Uploading all files to GCS...")

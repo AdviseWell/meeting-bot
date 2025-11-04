@@ -111,3 +111,41 @@ class StorageClient:
         except Exception as e:
             logger.error(f"Failed to delete file from GCS: {e}")
             return False
+    
+    def get_signed_url(
+        self,
+        gcs_path: str,
+        expiration_minutes: int = 60
+    ) -> Optional[str]:
+        """
+        Get a signed URL for a file in GCS
+        
+        Args:
+            gcs_path: Path in GCS
+            expiration_minutes: URL expiration time in minutes (default: 60)
+            
+        Returns:
+            Signed URL string, or None if failed
+        """
+        try:
+            from datetime import timedelta
+            
+            gcs_path = gcs_path.lstrip('/')
+            blob = self.bucket.blob(gcs_path)
+            
+            # Generate signed URL
+            url = blob.generate_signed_url(
+                version="v4",
+                expiration=timedelta(minutes=expiration_minutes),
+                method="GET"
+            )
+            
+            logger.info(
+                f"Generated signed URL for gs://{self.bucket_name}/{gcs_path}"
+            )
+            return url
+            
+        except Exception as e:
+            logger.error(f"Failed to generate signed URL: {e}")
+            return None
+

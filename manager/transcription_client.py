@@ -1,46 +1,56 @@
 """
-Transcription Client - Uses Google Chirp 3 for speech-to-text transcription
+Audio Transcription Client - Uses Google Gemini for speech-to-text transcription
+
+This module provides audio transcription capabilities using Google's Gemini models
+via the GenAI API. It supports direct transcription with speaker diarization,
+timestamps, and action items extraction.
 """
 
 import os
 import time
 import logging
-from typing import Optional, Dict
-from google.cloud import speech_v2
-from google.cloud.speech_v2 import SpeechClient
-from google.cloud.speech_v2.types import cloud_speech
-from google.api_core.client_options import ClientOptions
+import json
+from typing import Optional, Dict, Any, List, Tuple
+from google import genai
+from google.genai.types import HttpOptions, Part
+from io import BytesIO
+import requests
 
 logger = logging.getLogger(__name__)
 
 
 class TranscriptionClient:
-    """Client for transcribing audio files using Google Chirp 3"""
+    """Client for transcribing audio files using Google Gemini"""
 
     def __init__(
         self,
         project_id: str = "aw-gemini-api-central",
-        region: str = "asia-southeast1",  # Singapore - closest to Sydney
+        region: str = "australia-southeast1",  # Sydney, Australia
     ):
         """
         Initialize the transcription client
 
         Args:
             project_id: Google Cloud project ID for AI workloads
-            region: GCP region for Chirp 3 (must be regional, not global)
+            region: GCP location for Vertex AI (default: Sydney)
         """
         self.project_id = project_id
         self.region = region
         self.client = None
 
         try:
-            # Chirp 3 requires a regional endpoint, not global
-            client_options = ClientOptions(
-                api_endpoint=f"{region}-speech.googleapis.com"
+            self.client = genai.Client(
+                vertexai=True,
+                project=project_id,
+                location=region,
+                http_options=HttpOptions(
+                    api_version="v1",
+                    timeout=1800000,  # 30 minutes in milliseconds
+                    headers={"Connection": "close"}  # Prevent stale connections
+                )
             )
-            self.client = SpeechClient(client_options=client_options)
             logger.info(
-                f"Initialized Chirp 3 transcription client for project: {project_id}, region: {region}"
+                f"Initialized Gemini transcription client for project: {project_id}, region: {region}"
             )
         except Exception as e:
             logger.error(f"Failed to initialize transcription client: {e}")
@@ -49,145 +59,278 @@ class TranscriptionClient:
     def transcribe_audio(
         self,
         audio_uri: str,
-        language_code: str = "en-US",
-        enable_automatic_punctuation: bool = True,
+        language_code: str = "en-AU",
+        enable_speaker_diarization: bool = True,
+        enable_timestamps: bool = False,
+        enable_action_items: bool = True,
     ) -> Optional[Dict]:
         """
-        Transcribe an audio file using Chirp 3
+        Transcribe an audio file using Gemini
 
         Args:
-            audio_uri: GCS URI of the audio file (gs://bucket/file.aac)
-            language_code: Language code (default: en-US)
-            enable_automatic_punctuation: Add punctuation to transcript
+            audio_uri: HTTP/HTTPS URL or GCS URI of the audio file
+            language_code: Language code (default: en-AU for Australian English)
+            enable_speaker_diarization: Enable speaker identification
+            enable_timestamps: Enable timestamped transcript
+            enable_action_items: Extract action items from the conversation
 
         Returns:
             Dictionary with transcript and metadata, or None if failed
-
-        Note:
-            Chirp 3 with default recognizer supports automatic punctuation
-            but does not support word timestamps or speaker diarization.
         """
         try:
-            logger.info(f"Starting Chirp 3 transcription for: {audio_uri}")
+            logger.info(f"Starting Gemini transcription for: {audio_uri}")
 
-            # Configure recognition request
-            # Note: Chirp 3 with default recognizer has limitations:
-            # - Does NOT support enable_word_time_offsets
-            # - Does NOT support diarization_config
-            # For these features, a custom recognizer must be created
-            config = cloud_speech.RecognitionConfig(
-                auto_decoding_config=cloud_speech.AutoDetectDecodingConfig(),
-                language_codes=[language_code],
-                model="chirp_3",
-                features=cloud_speech.RecognitionFeatures(
-                    enable_automatic_punctuation=enable_automatic_punctuation,
-                    # Chirp 3 does not support these features with default recognizer
-                    # enable_word_time_offsets=True,
-                    # diarization_config=None,
-                ),
-            )  # Set up the audio source
-            file_metadata = cloud_speech.BatchRecognizeFileMetadata(
-                uri=audio_uri,
-            )
-
-            # Create the recognition request (use regional location, not global)
-            request = cloud_speech.BatchRecognizeRequest(
-                recognizer=f"projects/{self.project_id}/locations/{self.region}/recognizers/_",
-                config=config,
-                files=[file_metadata],
-                recognition_output_config=cloud_speech.RecognitionOutputConfig(
-                    inline_response_config=cloud_speech.InlineOutputConfig(),
-                ),
-            )
-
-            # Start the transcription operation
-            logger.info("Submitting transcription request to Chirp 3...")
-            operation = self.client.batch_recognize(request=request)
-
-            logger.info("Waiting for transcription to complete...")
-            response = operation.result(timeout=3600)  # 1 hour timeout
-
-            # Process the results
-            transcript_data = self._process_response(response)
-
-            if transcript_data:
-                logger.info(
-                    f"✅ Transcription complete! {transcript_data['word_count']} words transcribed"
-                )
-                return transcript_data
-            else:
-                logger.warning("Transcription completed but no results found")
+            # Download audio file
+            if audio_uri.startswith("gs://"):
+                # For GCS URIs, convert to signed URL or download via GCS client
+                logger.error("Direct GCS URIs not supported - please provide signed URL")
                 return None
+            
+            logger.info("Downloading audio file...")
+            response = requests.get(audio_uri, timeout=60)
+            response.raise_for_status()
+            audio_bytes = response.content
+            
+            # Detect MIME type from URL or default to m4a
+            mime_type = "audio/mp4"  # M4A files use audio/mp4 MIME type
+            if audio_uri.endswith(".mp3"):
+                mime_type = "audio/mpeg"
+            elif audio_uri.endswith(".wav"):
+                mime_type = "audio/wav"
+            elif audio_uri.endswith(".ogg"):
+                mime_type = "audio/ogg"
+
+            logger.info(f"Downloaded {len(audio_bytes)} bytes ({len(audio_bytes) / (1024 * 1024):.2f} MB)")
+
+            # Convert to optimized format
+            audio_bytes, optimized_mime_type = self._convert_to_optimized_format(
+                audio_bytes, mime_type
+            )
+
+            # Build transcription options
+            options = {
+                "fullTranscript": True,  # Always get full transcript
+                "timestamps": enable_timestamps,
+                "speakerIdentification": enable_speaker_diarization,
+                "summary": False,  # Can be enabled if needed
+                "actionItems": enable_action_items,
+                "customPrompt": None,
+            }
+
+            # Build prompt
+            prompt = self._build_transcription_prompt(options, language_code)
+
+            logger.info("Sending audio to Gemini for transcription...")
+            
+            # Create audio part
+            audio_part = Part.from_bytes(
+                data=audio_bytes,
+                mime_type=optimized_mime_type
+            )
+
+            # Generate transcription with Gemini
+            start_time = time.time()
+            gemini_response = self.client.models.generate_content(
+                model="gemini-2.0-flash-exp",  # Fast and cost-effective model
+                contents=[prompt, audio_part],
+                config={
+                    "temperature": 0.1,  # Low temperature for accuracy
+                    "max_output_tokens": 32768,  # Support longer transcripts
+                    "response_mime_type": "text/plain"
+                }
+            )
+
+            processing_time_ms = int((time.time() - start_time) * 1000)
+
+            # Extract and parse response
+            transcript_text = gemini_response.text
+            sections = self._parse_transcription_sections(transcript_text, options)
+
+            # Build result in expected format
+            result = {
+                "transcript": sections.get("fullTranscript", transcript_text),
+                "segments": [],  # Gemini doesn't provide segments like Chirp
+                "word_count": len(transcript_text.split()),
+                "duration_seconds": 0.0,  # Not available from Gemini
+                "processing_time_ms": processing_time_ms,
+                "model": "gemini-2.0-flash-exp",
+                "sections": sections,  # Include all parsed sections
+            }
+
+            logger.info(
+                f"✅ Transcription complete! {result['word_count']} words transcribed"
+            )
+            return result
 
         except Exception as e:
             logger.exception(f"Error during transcription: {e}")
             return None
 
-    def _process_response(self, response) -> Optional[Dict]:
+    def _convert_to_optimized_format(
+        self, audio_bytes: bytes, mime_type: str
+    ) -> Tuple[bytes, str]:
         """
-        Process the transcription response and extract structured data
+        Convert audio to optimized format for Gemini transcription
 
-        Args:
-            response: BatchRecognizeResponse from Chirp 3
-
-        Returns:
-            Dictionary with transcript, segments, and metadata
+        Converts to OGG/Opus with speech-optimized settings to reduce file size
+        by 60-70% without quality loss.
         """
         try:
-            full_transcript = []
-            segments = []
-            total_words = 0
-            total_duration = 0.0
+            from pydub import AudioSegment
 
-            # Process each file result (should be just one)
-            for file_result in response.results.values():
-                for result in file_result.transcript.results:
-                    if not result.alternatives:
-                        continue
-
-                    # Get the best alternative
-                    alternative = result.alternatives[0]
-
-                    # Extract transcript text
-                    transcript_text = alternative.transcript.strip()
-                    if transcript_text:
-                        full_transcript.append(transcript_text)
-
-                    # Count words (approximate)
-                    total_words += len(transcript_text.split())
-
-                    # Create segment
-                    segment = {
-                        "transcript": transcript_text,
-                        "confidence": (
-                            alternative.confidence
-                            if hasattr(alternative, "confidence")
-                            else None
-                        ),
-                        "language_code": (
-                            result.language_code
-                            if hasattr(result, "language_code")
-                            else None
-                        ),
-                    }
-
-                    segments.append(segment)
-
-            # Combine all transcript parts
-            combined_transcript = " ".join(full_transcript)
-
-            result = {
-                "transcript": combined_transcript,
-                "segments": segments,
-                "word_count": total_words,
-                "duration_seconds": total_duration,
+            format_map = {
+                'audio/mpeg': 'mp3',
+                'audio/mp3': 'mp3',
+                'audio/wav': 'wav',
+                'audio/flac': 'flac',
+                'audio/mp4': 'm4a',
+                'audio/m4a': 'm4a',
+                'audio/ogg': 'ogg',
+                'audio/webm': 'webm',
             }
 
-            return result
+            audio_format = format_map.get(mime_type, 'mp3')
+            original_size = len(audio_bytes)
 
+            logger.info(f"Converting audio from {audio_format} to optimized format")
+
+            # Load audio
+            audio = AudioSegment.from_file(BytesIO(audio_bytes), format=audio_format)
+
+            # Convert to mono, 16kHz, and export as OGG/Opus
+            audio = audio.set_channels(1)
+            audio = audio.set_frame_rate(16000)
+
+            output = BytesIO()
+            audio.export(output, format='ogg', codec='libopus', bitrate='48k')
+
+            converted_bytes = output.getvalue()
+            size_reduction = ((original_size - len(converted_bytes)) / original_size) * 100
+
+            logger.info(
+                f"Audio conversion complete: {original_size / (1024 * 1024):.2f} MB → "
+                f"{len(converted_bytes) / (1024 * 1024):.2f} MB "
+                f"({size_reduction:.1f}% reduction)"
+            )
+
+            return converted_bytes, 'audio/ogg'
+
+        except ImportError:
+            logger.warning("pydub not installed - using original audio format")
+            return audio_bytes, mime_type
         except Exception as e:
-            logger.exception(f"Error processing transcription response: {e}")
-            return None
+            logger.warning(f"Audio conversion failed, using original: {e}")
+            return audio_bytes, mime_type
+
+    def _build_transcription_prompt(
+        self, options: Dict[str, Any], spelling_preference: str = "en-AU"
+    ) -> str:
+        """Build transcription prompt based on options"""
+        prompt_parts = [
+            "Please analyze the following audio file and provide:"
+        ]
+
+        section_number = 1
+
+        if options.get("fullTranscript"):
+            prompt_parts.append(f"{section_number}. A complete word-for-word transcript of the audio")
+            section_number += 1
+
+        if options.get("timestamps"):
+            prompt_parts.append(f"{section_number}. A timestamped transcript with MM:SS markers at regular intervals")
+            section_number += 1
+
+        if options.get("speakerIdentification"):
+            prompt_parts.extend([
+                f"{section_number}. Speaker diarization with the following requirements:",
+                "   - Identify different speakers and detect their voice characteristics",
+                "   - Use descriptive labels: 'Speaker 1 (*Male*):', 'Speaker 2 (*Female*):'",
+                "   - Start speaker identification from the VERY FIRST WORDS of the audio",
+                "   - Format EVERY speaker change as a new paragraph with speaker label",
+                "   - Maintain consistent speaker labels throughout the ENTIRE audio"
+            ])
+            section_number += 1
+
+        if options.get("summary"):
+            prompt_parts.append(f"{section_number}. A concise summary of the key points discussed")
+            section_number += 1
+
+        if options.get("actionItems"):
+            prompt_parts.append(f"{section_number}. A list of action items, tasks, or decisions mentioned")
+            section_number += 1
+
+        if options.get("customPrompt"):
+            prompt_parts.append(f"{section_number}. Custom Analysis: {options['customPrompt']}")
+            section_number += 1
+
+        prompt_parts.extend([
+            "\nFormatting Guidelines:",
+            "- Use clear Markdown section headers (##) for each requested section",
+            "- Maintain consistent formatting throughout",
+            "- Start new paragraphs for speaker changes or topic shifts",
+            "\nQuality Requirements:",
+            "- Be accurate and thorough in your transcription",
+            "- Maintain consistency in all labels and formatting",
+        ])
+
+        return "\n".join(prompt_parts)
+
+    def _parse_transcription_sections(
+        self, text: str, options: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Parse transcription response into sections"""
+        sections = {}
+        current_section = None
+        current_content = []
+
+        for line in text.split('\n'):
+            if line.startswith('##'):
+                # Save previous section
+                if current_section and current_content:
+                    sections[current_section] = '\n'.join(current_content).strip()
+
+                # Start new section
+                header = line.replace('##', '').strip().lower()
+                current_content = []
+
+                if 'full transcript' in header or 'transcript' in header:
+                    current_section = 'fullTranscript'
+                elif 'timestamp' in header:
+                    current_section = 'timestampedTranscript'
+                elif 'speaker' in header or 'diarization' in header:
+                    current_section = 'speakerDiarization'
+                elif 'summary' in header:
+                    current_section = 'summary'
+                elif 'action' in header:
+                    current_section = 'actionItems'
+                else:
+                    current_section = None
+            else:
+                if current_section:
+                    current_content.append(line)
+
+        # Save last section
+        if current_section and current_content:
+            sections[current_section] = '\n'.join(current_content).strip()
+
+        # Parse action items into list
+        if 'actionItems' in sections:
+            action_text = sections['actionItems']
+            items = []
+            for line in action_text.split('\n'):
+                line = line.strip()
+                if line and (line[0].isdigit() or line.startswith('-') or line.startswith('•')):
+                    item = line.lstrip('0123456789.-•').strip()
+                    if item:
+                        items.append(item)
+            if items:
+                sections['actionItems'] = items
+
+        # If no sections parsed, use entire text
+        if not sections and options.get("fullTranscript"):
+            sections['fullTranscript'] = text
+
+        return sections
 
     def save_transcript(
         self, transcript_data: Dict, output_path: str, format: str = "txt"
@@ -198,7 +341,7 @@ class TranscriptionClient:
         Args:
             transcript_data: Transcript data from transcribe_audio()
             output_path: Local file path to save to
-            format: Output format ('txt', 'json', or 'srt')
+            format: Output format ('txt', 'json')
 
         Returns:
             True if successful, False otherwise
@@ -207,28 +350,37 @@ class TranscriptionClient:
             logger.info(f"Saving transcript to: {output_path}")
 
             if format == "txt":
-                # Simple text format
                 with open(output_path, "w", encoding="utf-8") as f:
+                    # Write main transcript
                     f.write(transcript_data["transcript"])
                     f.write("\n\n")
+                    
+                    # Write metadata
                     f.write("--- Metadata ---\n")
                     f.write(f"Words: {transcript_data['word_count']}\n")
-                    f.write(f"Duration: {transcript_data['duration_seconds']:.2f}s\n")
+                    f.write(f"Processing Time: {transcript_data.get('processing_time_ms', 0) / 1000:.2f}s\n")
+                    f.write(f"Model: {transcript_data.get('model', 'N/A')}\n")
+                    
+                    # Write additional sections if available
+                    if 'sections' in transcript_data:
+                        sections = transcript_data['sections']
+                        
+                        if 'speakerDiarization' in sections:
+                            f.write("\n\n--- Speaker Diarization ---\n")
+                            f.write(sections['speakerDiarization'])
+                        
+                        if 'actionItems' in sections:
+                            f.write("\n\n--- Action Items ---\n")
+                            items = sections['actionItems']
+                            if isinstance(items, list):
+                                for item in items:
+                                    f.write(f"- {item}\n")
+                            else:
+                                f.write(items)
 
             elif format == "json":
-                # JSON format with all details
-                import json
-
                 with open(output_path, "w", encoding="utf-8") as f:
                     json.dump(transcript_data, f, indent=2, ensure_ascii=False)
-
-            elif format == "srt":
-                # SRT subtitle format (simplified)
-                with open(output_path, "w", encoding="utf-8") as f:
-                    for idx, segment in enumerate(transcript_data["segments"], 1):
-                        f.write(f"{idx}\n")
-                        f.write(f"00:00:00,000 --> 00:00:00,000\n")  # Simplified timing
-                        f.write(f"{segment['transcript']}\n\n")
 
             else:
                 logger.error(f"Unsupported format: {format}")

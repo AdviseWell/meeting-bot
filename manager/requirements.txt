@@ -1,6 +1,12 @@
 # Google Cloud Platform
 google-cloud-storage==3.4.1
-google-cloud-speech==2.34.0
+
+# Google GenAI for Gemini transcription
+google-genai==1.48.0
+
+# Audio processing
+pydub==0.25.1
+ffmpeg-python==2.0.12
 
 # HTTP client
 requests==2.32.5
