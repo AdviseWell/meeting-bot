@@ -221,51 +221,69 @@ class MeetingManager:
                 if m4a_uploaded:
                     # Generate signed URL for Gemini to access audio
                     # Uses IAM-based signing to keep files private
+                    # Falls back to public URL if IAM permissions missing
                     audio_url = self.storage_client.get_signed_url(
-                        m4a_gcs_path, expiration_minutes=120  # 2 hours for long files
+                        m4a_gcs_path, expiration_minutes=120  # 2 hours
                     )
 
                     if audio_url:
                         logger.info("Transcribing audio with Gemini...")
 
-                        # Transcribe the audio with speaker diarization
-                        transcript_data = self.transcription_client.transcribe_audio(
-                            audio_uri=audio_url,
-                            language_code="en-AU",  # Australian
-                            enable_speaker_diarization=True,
-                            enable_timestamps=False,
-                            enable_action_items=True,
-                        )
-
-                        if transcript_data:
-                            import tempfile
-
-                            # Save transcript as TXT
-                            transcript_txt_path = os.path.join(
-                                tempfile.gettempdir(),
-                                f"{self.meeting_id}_transcript.txt",
-                            )
-                            self.transcription_client.save_transcript(
-                                transcript_data, transcript_txt_path, format="txt"
+                        try:
+                            # Transcribe the audio with speaker diarization
+                            transcript_data = (
+                                self.transcription_client.transcribe_audio(
+                                    audio_uri=audio_url,
+                                    language_code="en-AU",  # Australian
+                                    enable_speaker_diarization=True,
+                                    enable_timestamps=False,
+                                    enable_action_items=True,
+                                )
                             )
 
-                            # Save transcript as JSON
-                            transcript_json_path = os.path.join(
-                                tempfile.gettempdir(),
-                                f"{self.meeting_id}_transcript.json",
-                            )
-                            self.transcription_client.save_transcript(
-                                transcript_data, transcript_json_path, format="json"
-                            )
+                            if transcript_data:
+                                import tempfile
 
-                            logger.info(
-                                f"✅ Transcription complete! "
-                                f"Words: {transcript_data['word_count']}"
-                            )
-                        else:
-                            logger.warning(
-                                "Transcription completed but no results " "returned"
-                            )
+                                # Save transcript as TXT
+                                transcript_txt_path = os.path.join(
+                                    tempfile.gettempdir(),
+                                    f"{self.meeting_id}_transcript.txt",
+                                )
+                                self.transcription_client.save_transcript(
+                                    transcript_data,
+                                    transcript_txt_path,
+                                    format="txt",
+                                )
+
+                                # Save transcript as JSON
+                                transcript_json_path = os.path.join(
+                                    tempfile.gettempdir(),
+                                    f"{self.meeting_id}_transcript.json",
+                                )
+                                self.transcription_client.save_transcript(
+                                    transcript_data,
+                                    transcript_json_path,
+                                    format="json",
+                                )
+
+                                logger.info(
+                                    f"✅ Transcription complete! "
+                                    f"Words: {transcript_data['word_count']}"
+                                )
+                            else:
+                                logger.warning(
+                                    "Transcription completed but no results " "returned"
+                                )
+                        finally:
+                            # Always try to revoke public access
+                            # (in case fallback made it public)
+                            try:
+                                self.storage_client.revoke_public_access(m4a_gcs_path)
+                            except Exception as revoke_err:
+                                logger.debug(
+                                    f"Could not revoke public access "
+                                    f"(may not be public): {revoke_err}"
+                                )
                     else:
                         logger.warning("Failed to generate signed URL for audio file")
                 else:

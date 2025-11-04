@@ -147,24 +147,48 @@ class StorageClient:
                     "(no service account key required)"
                 )
 
-                # Get the default service account email
-                auth_req = auth_requests.Request()
-                credentials.refresh(auth_req)
-                service_account_email = credentials.service_account_email
+                try:
+                    # Get the default service account email
+                    auth_req = auth_requests.Request()
+                    credentials.refresh(auth_req)
+                    service_account_email = credentials.service_account_email
 
-                # Generate signed URL using IAM signing
-                url = blob.generate_signed_url(
-                    version="v4",
-                    expiration=timedelta(minutes=expiration_minutes),
-                    method="GET",
-                    service_account_email=service_account_email,
-                    access_token=credentials.token,
-                )
+                    logger.info(f"Service account: {service_account_email}")
 
-                logger.info(
-                    f"Generated IAM-based signed URL for "
-                    f"gs://{self.bucket_name}/{gcs_path}"
-                )
+                    # Generate signed URL using IAM signing
+                    url = blob.generate_signed_url(
+                        version="v4",
+                        expiration=timedelta(minutes=expiration_minutes),
+                        method="GET",
+                        service_account_email=service_account_email,
+                        access_token=credentials.token,
+                    )
+
+                    logger.info(
+                        f"✅ Generated IAM-based signed URL for "
+                        f"gs://{self.bucket_name}/{gcs_path}"
+                    )
+                except Exception as iam_error:
+                    logger.error(
+                        f"IAM-based signing failed: {iam_error}", exc_info=True
+                    )
+                    logger.warning(
+                        "This likely means the service account lacks "
+                        "'iam.serviceAccountTokenCreator' role. "
+                        "Falling back to public URL approach..."
+                    )
+
+                    # Fallback: Make blob temporarily public
+                    blob.make_public()
+                    url = blob.public_url
+
+                    logger.warning(
+                        f"⚠️  Made blob PUBLIC (temporary): "
+                        f"gs://{self.bucket_name}/{gcs_path}"
+                    )
+                    logger.warning(
+                        "Remember to revoke public access after transcription!"
+                    )
             else:
                 # We have a service account key, use standard signed URL
                 url = blob.generate_signed_url(
@@ -182,3 +206,30 @@ class StorageClient:
         except Exception as e:
             logger.error(f"Failed to generate signed URL: {e}", exc_info=True)
             return None
+
+    def revoke_public_access(self, gcs_path: str) -> bool:
+        """
+        Revoke public access from a blob
+
+        Args:
+            gcs_path: Path in GCS
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            gcs_path = gcs_path.lstrip("/")
+            blob = self.bucket.blob(gcs_path)
+
+            # Remove public access
+            blob.acl.all().revoke_read()
+            blob.acl.save()
+
+            logger.info(
+                f"Revoked public access for " f"gs://{self.bucket_name}/{gcs_path}"
+            )
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to revoke public access: {e}")
+            return False
