@@ -11,28 +11,17 @@ import { getWaitingPromise } from '../lib/promise';
 import createBrowserContext from '../lib/chromium';
 import { uploadDebugImage } from '../services/bugService';
 import { Logger } from 'winston';
-import { handleWaitingAtLobbyError } from './MeetBotBase';
+import { MeetBotBase, handleWaitingAtLobbyError } from './MeetBotBase';
 import { ZOOM_REQUEST_DENIED } from '../constants';
 
-class BotBase extends AbstractMeetBot {
-  protected page: Page;
-  protected slightlySecretId: symbol; // Use any hard-to-guess identifier
+export class ZoomBot extends MeetBotBase {
   protected _logger: Logger;
   protected _correlationId: string;
   constructor(logger: Logger, correlationId: string) {
     super();
-    this.slightlySecretId = Symbol(v4());
+    this.slightlySecretId = v4();
     this._logger = logger;
     this._correlationId = correlationId;
-  }
-  join(params: JoinParams): Promise<void> {
-    throw new Error('Function not implemented.');
-  }
-}
-
-export class ZoomBot extends BotBase {
-  constructor(logger: Logger, correlationId: string) {
-    super(logger, correlationId);
   }
 
   // TODO use base class for shared functions such as bot status and bot logging
@@ -73,14 +62,23 @@ export class ZoomBot extends BotBase {
     
     this.page = await createBrowserContext(url, this._correlationId);
 
+    this._logger.info('Navigating to Zoom Meeting URL...');
+    await this.page.goto(url, { waitUntil: 'networkidle' });
+
+    // Start early recording immediately after page load
+    await this.startEarlyRecording({ 
+      teamId: params.teamId, 
+      userId: params.userId, 
+      eventId: params.eventId, 
+      botId: params.botId, 
+      uploader: params.uploader 
+    }, this._logger);
+
     await this.page.route('**/*.exe', (route) => {
       this._logger.info(`Detected .exe download: ${route.request().url()?.split('download')[0]}`);
     });
 
     await this.page.waitForTimeout(1000);
-
-    this._logger.info('Navigating to Zoom Meeting URL...');
-    await this.page.goto(url, { waitUntil: 'networkidle' });
 
     // Accept cookies
     try {
@@ -455,9 +453,44 @@ export class ZoomBot extends BotBase {
 
     pushState('joined');
 
-    // Recording the meeting page
-    this._logger.info('Begin recording...');
-    await this.recordMeetingPage({ ...params });
+    // Check if early recording is active, otherwise fall back to normal recording
+    if (this.earlyRecordingActive) {
+      this._logger.info('Continuing with early recording for Zoom, setting up monitoring...');
+      await this.setupRecordingMonitoring({
+        duration: config.maxRecordingDuration * 60 * 1000,
+        inactivityLimit: config.inactivityLimit * 60 * 1000,
+        userId: params.userId,
+        teamId: params.teamId
+      }, this._logger);
+
+      // Still need to set up the waiting promise and context bridge
+      this._logger.info('Setting up the recording connect functions for Zoom...');
+      const processingTime = 0.2 * 60 * 1000;
+      const duration = config.maxRecordingDuration * 60 * 1000;
+      const waitingPromise: WaitPromise = getWaitingPromise(processingTime + duration);
+
+      const chores = new ContextBridgeTask(
+        this.page, 
+        { ...params, botId: params.botId ?? '' },
+        this.slightlySecretId.toString(),
+        waitingPromise,
+        params.uploader,
+        this._logger
+      );
+      await chores.runAsync(null);
+
+      this._logger.info('Waiting for recording duration:', config.maxRecordingDuration, 'minutes...');
+      waitingPromise.promise.then(async () => {
+        this._logger.info('Closing the browser...');
+        await this.page.context().browser()?.close();
+        this._logger.info('All done ✨', { botId: params.botId, eventId: params.eventId, userId: params.userId, teamId: params.teamId });
+      });
+      await waitingPromise.promise;
+    } else {
+      // Fallback to normal recording if early recording failed
+      this._logger.info('Early recording not active for Zoom, starting normal recording...');
+      await this.recordMeetingPage({ ...params });
+    }
     
     pushState('finished');
   }
