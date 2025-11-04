@@ -312,6 +312,7 @@ class MeetingController:
                 ),
                 spec=client.V1PodSpec(
                     restart_policy="Never",
+                    priority_class_name="high-priority",
                     containers=[meeting_bot_container, manager_container],
                     service_account_name=self.job_service_account,
                     volumes=[
