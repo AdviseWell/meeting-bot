@@ -180,7 +180,7 @@ class MediaConverter:
             # 5. afftdn: Additional FFT-based noise reduction
             # 6. speechnorm: Speech-specific normalization (better than loudnorm for voice)
             # 7. compand: Multi-band compression for clearer speech
-            # 8. silenceremove: Remove long silences to reduce file size
+            # Note: silenceremove disabled to prevent audio truncation issues
             audio_filters = (
                 "arnndn=m=/usr/share/rnnoise/models/rnnoise.rnnn,"  # AI noise reduction
                 "highpass=f=80,"  # Remove rumble
@@ -189,9 +189,7 @@ class MediaConverter:
                 "equalizer=f=2000:width_type=o:width=2:g=2,"  # Boost mid speech frequencies
                 "afftdn=nf=-25:tn=1,"  # Additional noise reduction with tracking
                 "speechnorm=e=50:r=0.0005:l=1,"  # Speech normalization
-                "compand=attacks=0.1:decays=0.2:points=-80/-80|-50/-40|-30/-20|0/-10,"  # Compression
-                "silenceremove=start_periods=1:start_duration=0.1:start_threshold=-50dB:"
-                "stop_periods=1:stop_duration=2:stop_threshold=-50dB"  # Remove silences
+                "compand=attacks=0.1:decays=0.2:points=-80/-80|-50/-40|-30/-20|0/-10"  # Compression
             )
 
             cmd = [
@@ -255,6 +253,7 @@ class MediaConverter:
             logger.info("Using fallback audio extraction (no RNNoise)")
 
             # Optimized filter chain without RNNoise
+            # Note: silenceremove disabled to prevent audio truncation issues
             audio_filters = (
                 "highpass=f=80,"  # Remove rumble
                 "lowpass=f=12000,"  # Remove high-freq noise
@@ -262,9 +261,7 @@ class MediaConverter:
                 "equalizer=f=2000:width_type=o:width=2:g=2,"  # Boost mid speech
                 "afftdn=nf=-25:tn=1,"  # Noise reduction with tracking
                 "speechnorm=e=50:r=0.0005:l=1,"  # Speech normalization
-                "compand=attacks=0.1:decays=0.2:points=-80/-80|-50/-40|-30/-20|0/-10,"
-                "silenceremove=start_periods=1:start_duration=0.1:start_threshold=-50dB:"
-                "stop_periods=1:stop_duration=2:stop_threshold=-50dB"
+                "compand=attacks=0.1:decays=0.2:points=-80/-80|-50/-40|-30/-20|0/-10"
             )
 
             cmd = [

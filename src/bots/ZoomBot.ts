@@ -34,7 +34,7 @@ export class ZoomBot extends MeetBotBase {
       const uploadResult = await uploader.uploadRecordingToRemoteStorage();
       this._logger.info('Recording upload result', { uploadResult, userId, teamId });
     };
-    
+
     try {
       const pushState = (st: BotStatus) => _state.push(st);
       await this.joinMeeting({ url, name, bearerToken, teamId, timezone, userId, eventId, botId, pushState, uploader });
@@ -42,12 +42,12 @@ export class ZoomBot extends MeetBotBase {
 
       // Finish the upload from the temp video
       await handleUpload();
-    } catch(error) {
-      if (!_state.includes('finished')) 
+    } catch (error) {
+      if (!_state.includes('finished'))
         _state.push('failed');
 
       await patchBotStatus({ botId, eventId, provider: 'zoom', status: _state, token: bearerToken }, this._logger);
-      
+
       if (error instanceof WaitingAtLobbyRetryError) {
         await handleWaitingAtLobbyError({ token: bearerToken, botId, eventId, provider: 'zoom', error }, this._logger);
       }
@@ -59,19 +59,19 @@ export class ZoomBot extends MeetBotBase {
   private async joinMeeting({ pushState, ...params }: JoinParams & { pushState(state: BotStatus): void }): Promise<void> {
     const { url, name } = params;
     this._logger.info('Launching browser for Zoom...', { userId: params.userId });
-    
+
     this.page = await createBrowserContext(url, this._correlationId);
 
     this._logger.info('Navigating to Zoom Meeting URL...');
     await this.page.goto(url, { waitUntil: 'networkidle' });
 
     // Start early recording immediately after page load
-    await this.startEarlyRecording({ 
-      teamId: params.teamId, 
-      userId: params.userId, 
-      eventId: params.eventId, 
-      botId: params.botId, 
-      uploader: params.uploader 
+    await this.startEarlyRecording({
+      teamId: params.teamId,
+      userId: params.userId,
+      eventId: params.eventId,
+      botId: params.botId,
+      uploader: params.uploader
     }, this._logger);
 
     await this.page.route('**/*.exe', (route) => {
@@ -89,7 +89,7 @@ export class ZoomBot extends MeetBotBase {
 
       this._logger.info('Clicking the "Accept Cookies" button...', await acceptCookies.count());
       await acceptCookies.click({ force: true });
-      
+
     } catch (error) {
       await uploadDebugImage(await this.page.screenshot({ type: 'png', fullPage: true }), 'accept-cookie', params.userId, this._logger, params.botId);
       this._logger.info('Unable to accept cookies...', error);
@@ -129,7 +129,7 @@ export class ZoomBot extends MeetBotBase {
           this._logger.info('Try to find the Join from your browser button again...', retry + 1);
           return await findAndEnableJoinFromBrowserButton(retry + 1);
         }
-      } catch(error) {
+      } catch (error) {
         this._logger.info('Error on try find the web client', error);
         if (retry >= attempts) {
           return false;
@@ -146,7 +146,7 @@ export class ZoomBot extends MeetBotBase {
         this._logger.info('Navigating to Zoom Web Client URL...', { wcUrl: wcUrl.toString(), botId: params.botId, userId: params.userId });
         await this.page.goto(wcUrl.toString(), { waitUntil: 'networkidle' });
         return true;
-      } catch(err) {
+      } catch (err) {
         this._logger.info('Failed to access ZOOM web client by URL', { botId: params.botId, userId: params.userId });
         return false;
       }
@@ -176,7 +176,7 @@ export class ZoomBot extends MeetBotBase {
                 foundResolver(true);
               }
             }
-            catch(e) {
+            catch (e) {
               if (e?.name === 'TimeoutError') {
                 this._logger.info('Join from your browser is no longer present on page...', params.userId);
                 clearInterval(interv);
@@ -195,7 +195,7 @@ export class ZoomBot extends MeetBotBase {
         });
         const success = await navPromise;
         return success;
-      } catch(err) {
+      } catch (err) {
         this._logger.info('Zoom error: Unable to move forward from Join from your browser', params.userId);
         return false;
       }
@@ -204,14 +204,14 @@ export class ZoomBot extends MeetBotBase {
     // Join from browser
     this._logger.info('Waiting for Join from your browser to be visible...');
     const foundAndClickedJoinFromBrowser = await findAndEnableJoinFromBrowserButton(0);
-    
+
     let navSuccess = false;
     if (foundAndClickedJoinFromBrowser) {
       this._logger.info('Verify the meeting web client is visible...');
       // Ensure the page has navigated to the web client...
       navSuccess = await waitForJoinFromBrowserNav();
     }
-    
+
     if (!foundAndClickedJoinFromBrowser || !navSuccess) {
       await uploadDebugImage(await this.page.screenshot({ type: 'png', fullPage: true }), 'enable-join-from-browser', params.userId, this._logger, params.botId);
       this._logger.info('Failed to enable Join from your browser button...', params.userId);
@@ -261,7 +261,7 @@ export class ZoomBot extends MeetBotBase {
         }
 
         return true;
-      } catch(err) {
+      } catch (err) {
         this._logger.info('Cannot detect the App container for Zoom Web Client', startWith, err);
         await uploadDebugImage(await this.page.screenshot({ type: 'png', fullPage: true }), 'detect-app-container', params.userId, this._logger, params.botId);
         return await detectAppContainer(startWith === 'app' ? 'iframe' : 'app');
@@ -276,7 +276,7 @@ export class ZoomBot extends MeetBotBase {
 
     this._logger.info('Waiting for the input field to be visible...');
     await iframe.waitForSelector('input[type="text"]', { timeout: 60000 });
-    
+
     this._logger.info('Waiting for 5 seconds...');
     await this.page.waitForTimeout(5000);
     this._logger.info('Filling the input field with the name...');
@@ -291,7 +291,7 @@ export class ZoomBot extends MeetBotBase {
     // Wait in waiting room
     try {
       const wanderingTime = config.joinWaitTime * 60 * 1000; // Give some time to be let in
-      
+
       let waitTimeout: NodeJS.Timeout;
       let waitInterval: NodeJS.Timeout;
       const waitAtLobbyPromise = new Promise<boolean>((resolveMe) => {
@@ -309,7 +309,7 @@ export class ZoomBot extends MeetBotBase {
             const tokens1 = footerText.split('\n');
             const tokens2 = footerText.split(' ');
             const tokens = tokens1.length > tokens2.length ? tokens1 : tokens2;
-  
+
             const filtered: string[] = [];
             for (const tok of tokens) {
               if (!tok) continue;
@@ -322,7 +322,7 @@ export class ZoomBot extends MeetBotBase {
             }
             const joinedText = filtered.join('');
 
-            if (joinedText === 'participants') 
+            if (joinedText === 'participants')
               return;
 
             const isValid = joinedText.match(/\d+(.*)participants/i);
@@ -339,7 +339,7 @@ export class ZoomBot extends MeetBotBase {
               clearTimeout(waitTimeout);
               resolveMe(true);
             }
-          } catch(e) {
+          } catch (e) {
             // Do nothing
           }
         }, 2000);
@@ -371,7 +371,7 @@ export class ZoomBot extends MeetBotBase {
       const cameraNotifications: ('found' | 'dismissed')[] = [];
       const micNotifications: ('found' | 'dismissed')[] = [];
       const stopWaiting = 30 * 1000;
-      
+
       const notifyPromise = new Promise<boolean>((res) => {
         notifyTimeout = setTimeout(() => {
           clearInterval(notifyInternval);
@@ -409,7 +409,7 @@ export class ZoomBot extends MeetBotBase {
 
             const closeButtons = await iframe.getByLabel('close').all();
             this._logger.info('Clicking the "x" button...', closeButtons.length);
-            
+
             let counter = 0;
             try {
               for await (const close of closeButtons) {
@@ -436,7 +436,7 @@ export class ZoomBot extends MeetBotBase {
         clearTimeout(notifyTimeout);
       });
     }
-    catch(err) {
+    catch (err) {
       this._logger.info('Caught notifications close error', err.message);
     }
 
@@ -470,7 +470,7 @@ export class ZoomBot extends MeetBotBase {
       const waitingPromise: WaitPromise = getWaitingPromise(processingTime + duration);
 
       const chores = new ContextBridgeTask(
-        this.page, 
+        this.page,
         { ...params, botId: params.botId ?? '' },
         this.slightlySecretId.toString(),
         waitingPromise,
@@ -491,7 +491,7 @@ export class ZoomBot extends MeetBotBase {
       this._logger.info('Early recording not active for Zoom, starting normal recording...');
       await this.recordMeetingPage({ ...params });
     }
-    
+
     pushState('finished');
   }
 
@@ -505,7 +505,7 @@ export class ZoomBot extends MeetBotBase {
 
     this._logger.info('Setting up the recording connect functions');
     const chores = new ContextBridgeTask(
-      this.page, 
+      this.page,
       { ...params, botId: params.botId ?? '' },
       this.slightlySecretId.toString(),
       waitingPromise,
@@ -525,7 +525,7 @@ export class ZoomBot extends MeetBotBase {
       this._logger
     );
     await recordingTask.runAsync(null);
-  
+
     this._logger.info('Waiting for recording duration:', config.maxRecordingDuration, 'minutes...');
     waitingPromise.promise.then(async () => {
       this._logger.info('Closing the browser...');
