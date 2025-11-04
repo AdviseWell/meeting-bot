@@ -236,12 +236,6 @@ export class MicrosoftTeamsBot extends MeetBotBase {
     // Check if early recording is active, otherwise fall back to normal recording
     if (this.earlyRecordingActive) {
       this._logger.info('Continuing with early recording, setting up monitoring...');
-      await this.setupRecordingMonitoring({
-        duration: config.maxRecordingDuration * 60 * 1000,
-        inactivityLimit: config.inactivityLimit * 60 * 1000,
-        userId,
-        teamId
-      }, this._logger);
 
       // Still need to set up the waiting promise
       this._logger.info('Waiting for recording duration', config.maxRecordingDuration, 'minutes...');
@@ -257,6 +251,16 @@ export class MicrosoftTeamsBot extends MeetBotBase {
         } catch (error) {
           this._logger.error('Could not process meeting end event', error);
         }
+      });
+
+      // Set up Teams-specific end detection for early recording
+      await this.setupTeamsEndDetection({
+        duration: config.maxRecordingDuration * 60 * 1000,
+        inactivityLimit: config.inactivityLimit * 60 * 1000,
+        userId,
+        teamId,
+        slightlySecretId: this.slightlySecretId,
+        activateInactivityDetectionAfterMinutes: config.activateInactivityDetectionAfter
       });
 
       waitingPromise.promise.then(async () => {
@@ -526,5 +530,123 @@ export class MicrosoftTeamsBot extends MeetBotBase {
     });
 
     await waitingPromise.promise;
+  }
+
+  /**
+   * Sets up Microsoft Teams-specific end detection for early recordings
+   * This includes participant detection and silence detection
+   */
+  private async setupTeamsEndDetection(params: {
+    duration: number;
+    inactivityLimit: number;
+    userId: string;
+    teamId: string;
+    slightlySecretId: string;
+    activateInactivityDetectionAfterMinutes: number;
+  }): Promise<void> {
+    const { duration, inactivityLimit, userId, teamId, slightlySecretId, activateInactivityDetectionAfterMinutes } = params;
+
+    await this.page.evaluate(
+      ({ duration, inactivityLimit, userId, teamId, slightlySecretId, activateInactivityDetectionAfterMinutes }) => {
+        console.log('Setting up Microsoft Teams end detection for early recording...');
+
+        const mediaRecorder = (window as any).__earlyMediaRecorder;
+        const stream = (window as any).__earlyStream;
+
+        if (!mediaRecorder || !stream) {
+          console.error('Early recording objects not found for end detection setup');
+          return;
+        }
+
+        const stopTheRecording = () => {
+          console.log('Stopping early recording from Teams end detection...');
+          try {
+            if (mediaRecorder.state !== 'inactive') {
+              mediaRecorder.stop();
+            }
+            stream.getTracks().forEach((track: any) => track.stop());
+            (window as any).screenAppMeetEndResolved(slightlySecretId);
+          } catch (error) {
+            console.error('Error stopping early recording:', error);
+          }
+        };
+
+        let inactivityDetectionTimeout: any;
+
+        // Participant detection
+        const detectLoneParticipant = () => {
+          const loneTest = setInterval(() => {
+            try {
+              const regex = new RegExp(/\d+/);
+              const contributors = Array.from(document.querySelectorAll('button[aria-label=People]') ?? [])
+                .filter(x => (regex.test(x?.textContent ?? '')))[0]
+                ?.textContent;
+              const match: null | RegExpMatchArray = (typeof contributors === 'undefined' || !contributors) ? null : contributors.match(regex);
+              if (match && Number(match[0]) >= 2) {
+                return;
+              }
+
+              console.log('Detected meeting bot is alone in Teams meeting, ending recording');
+              clearInterval(loneTest);
+              stopTheRecording();
+            } catch (error: any) {
+              console.error('Microsoft Teams Meeting presence detection failed:', error?.message);
+            }
+          }, 5000);
+        };
+
+        // Silence detection
+        const detectIncrediblySilentMeeting = () => {
+          try {
+            const audioContext = new AudioContext();
+            const mediaSource = audioContext.createMediaStreamSource(stream);
+            const analyser = audioContext.createAnalyser();
+            analyser.fftSize = 256;
+            mediaSource.connect(analyser);
+
+            const dataArray = new Uint8Array(analyser.frequencyBinCount);
+            let silenceDuration = 0;
+            const silenceThreshold = 10;
+            let monitor = true;
+
+            const monitorSilence = () => {
+              analyser.getByteFrequencyData(dataArray);
+              const audioActivity = dataArray.reduce((a, b) => a + b) / dataArray.length;
+
+              if (audioActivity < silenceThreshold) {
+                silenceDuration += 100;
+                if (silenceDuration >= inactivityLimit) {
+                  console.warn('Detected silence in Microsoft Teams Meeting, ending recording');
+                  monitor = false;
+                  stopTheRecording();
+                }
+              } else {
+                silenceDuration = 0;
+              }
+
+              if (monitor) {
+                setTimeout(monitorSilence, 100);
+              }
+            };
+
+            monitorSilence();
+          } catch (error) {
+            console.error('Failed to initialize silence detection:', error);
+          }
+        };
+
+        // Activate detections after delay
+        inactivityDetectionTimeout = setTimeout(() => {
+          console.log('Activating Teams end detection (participant & silence)...');
+          detectLoneParticipant();
+          detectIncrediblySilentMeeting();
+        }, activateInactivityDetectionAfterMinutes * 60 * 1000);
+
+        console.log('Microsoft Teams end detection configured for early recording');
+      },
+      { duration, inactivityLimit, userId, teamId, slightlySecretId, activateInactivityDetectionAfterMinutes }
+    );
+
+    this._logger.info('Microsoft Teams end detection configured');
   }
 }
