@@ -216,29 +216,25 @@ class MeetingManager:
             try:
                 # Upload the M4A file to GCS first
                 m4a_gcs_path = f"{self.gcs_path}/audio.m4a"
-                m4a_uploaded = self.storage_client.upload_file(
-                    m4a_path, m4a_gcs_path
-                )
+                m4a_uploaded = self.storage_client.upload_file(m4a_path, m4a_gcs_path)
 
                 if m4a_uploaded:
-                    # Generate signed URL for Gemini to access the audio
+                    # Generate signed URL for Gemini to access audio
+                    # Uses IAM-based signing to keep files private
                     audio_url = self.storage_client.get_signed_url(
-                        m4a_gcs_path,
-                        expiration_minutes=120  # 2 hours for long files
+                        m4a_gcs_path, expiration_minutes=120  # 2 hours for long files
                     )
 
                     if audio_url:
                         logger.info("Transcribing audio with Gemini...")
 
                         # Transcribe the audio with speaker diarization
-                        transcript_data = (
-                            self.transcription_client.transcribe_audio(
-                                audio_uri=audio_url,
-                                language_code="en-AU",  # Australian English
-                                enable_speaker_diarization=True,
-                                enable_timestamps=False,
-                                enable_action_items=True,
-                            )
+                        transcript_data = self.transcription_client.transcribe_audio(
+                            audio_uri=audio_url,
+                            language_code="en-AU",  # Australian
+                            enable_speaker_diarization=True,
+                            enable_timestamps=False,
+                            enable_action_items=True,
                         )
 
                         if transcript_data:
@@ -247,7 +243,7 @@ class MeetingManager:
                             # Save transcript as TXT
                             transcript_txt_path = os.path.join(
                                 tempfile.gettempdir(),
-                                f"{self.meeting_id}_transcript.txt"
+                                f"{self.meeting_id}_transcript.txt",
                             )
                             self.transcription_client.save_transcript(
                                 transcript_data, transcript_txt_path, format="txt"
@@ -256,12 +252,10 @@ class MeetingManager:
                             # Save transcript as JSON
                             transcript_json_path = os.path.join(
                                 tempfile.gettempdir(),
-                                f"{self.meeting_id}_transcript.json"
+                                f"{self.meeting_id}_transcript.json",
                             )
                             self.transcription_client.save_transcript(
-                                transcript_data,
-                                transcript_json_path,
-                                format="json"
+                                transcript_data, transcript_json_path, format="json"
                             )
 
                             logger.info(
@@ -270,23 +264,18 @@ class MeetingManager:
                             )
                         else:
                             logger.warning(
-                                "Transcription completed but no results returned"
+                                "Transcription completed but no results " "returned"
                             )
                     else:
-                        logger.warning(
-                            "Failed to generate signed URL for audio file"
-                        )
+                        logger.warning("Failed to generate signed URL for audio file")
                 else:
                     logger.warning(
-                        "Failed to upload M4A to GCS, "
-                        "skipping transcription step"
+                        "Failed to upload M4A to GCS, " "skipping transcription step"
                     )
 
             except Exception as e:
                 logger.exception(f"Transcription failed (non-fatal): {e}")
-                logger.warning(
-                    "Continuing with upload despite transcription failure"
-                )
+                logger.warning("Continuing with upload despite transcription failure")
 
             # Step 5: Upload all files to GCS
             logger.info("Step 5: Uploading all files to GCS...")

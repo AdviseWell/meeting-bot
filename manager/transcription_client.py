@@ -46,8 +46,8 @@ class TranscriptionClient:
                 http_options=HttpOptions(
                     api_version="v1",
                     timeout=1800000,  # 30 minutes in milliseconds
-                    headers={"Connection": "close"}  # Prevent stale connections
-                )
+                    headers={"Connection": "close"},  # Prevent stale connections
+                ),
             )
             logger.info(
                 f"Initialized Gemini transcription client for project: {project_id}, region: {region}"
@@ -83,14 +83,16 @@ class TranscriptionClient:
             # Download audio file
             if audio_uri.startswith("gs://"):
                 # For GCS URIs, convert to signed URL or download via GCS client
-                logger.error("Direct GCS URIs not supported - please provide signed URL")
+                logger.error(
+                    "Direct GCS URIs not supported - please provide signed URL"
+                )
                 return None
-            
+
             logger.info("Downloading audio file...")
             response = requests.get(audio_uri, timeout=60)
             response.raise_for_status()
             audio_bytes = response.content
-            
+
             # Detect MIME type from URL or default to m4a
             mime_type = "audio/mp4"  # M4A files use audio/mp4 MIME type
             if audio_uri.endswith(".mp3"):
@@ -100,7 +102,9 @@ class TranscriptionClient:
             elif audio_uri.endswith(".ogg"):
                 mime_type = "audio/ogg"
 
-            logger.info(f"Downloaded {len(audio_bytes)} bytes ({len(audio_bytes) / (1024 * 1024):.2f} MB)")
+            logger.info(
+                f"Downloaded {len(audio_bytes)} bytes ({len(audio_bytes) / (1024 * 1024):.2f} MB)"
+            )
 
             # Convert to optimized format
             audio_bytes, optimized_mime_type = self._convert_to_optimized_format(
@@ -121,11 +125,10 @@ class TranscriptionClient:
             prompt = self._build_transcription_prompt(options, language_code)
 
             logger.info("Sending audio to Gemini for transcription...")
-            
+
             # Create audio part
             audio_part = Part.from_bytes(
-                data=audio_bytes,
-                mime_type=optimized_mime_type
+                data=audio_bytes, mime_type=optimized_mime_type
             )
 
             # Generate transcription with Gemini
@@ -136,8 +139,8 @@ class TranscriptionClient:
                 config={
                     "temperature": 0.1,  # Low temperature for accuracy
                     "max_output_tokens": 32768,  # Support longer transcripts
-                    "response_mime_type": "text/plain"
-                }
+                    "response_mime_type": "text/plain",
+                },
             )
 
             processing_time_ms = int((time.time() - start_time) * 1000)
@@ -179,17 +182,17 @@ class TranscriptionClient:
             from pydub import AudioSegment
 
             format_map = {
-                'audio/mpeg': 'mp3',
-                'audio/mp3': 'mp3',
-                'audio/wav': 'wav',
-                'audio/flac': 'flac',
-                'audio/mp4': 'm4a',
-                'audio/m4a': 'm4a',
-                'audio/ogg': 'ogg',
-                'audio/webm': 'webm',
+                "audio/mpeg": "mp3",
+                "audio/mp3": "mp3",
+                "audio/wav": "wav",
+                "audio/flac": "flac",
+                "audio/mp4": "m4a",
+                "audio/m4a": "m4a",
+                "audio/ogg": "ogg",
+                "audio/webm": "webm",
             }
 
-            audio_format = format_map.get(mime_type, 'mp3')
+            audio_format = format_map.get(mime_type, "mp3")
             original_size = len(audio_bytes)
 
             logger.info(f"Converting audio from {audio_format} to optimized format")
@@ -202,10 +205,12 @@ class TranscriptionClient:
             audio = audio.set_frame_rate(16000)
 
             output = BytesIO()
-            audio.export(output, format='ogg', codec='libopus', bitrate='48k')
+            audio.export(output, format="ogg", codec="libopus", bitrate="48k")
 
             converted_bytes = output.getvalue()
-            size_reduction = ((original_size - len(converted_bytes)) / original_size) * 100
+            size_reduction = (
+                (original_size - len(converted_bytes)) / original_size
+            ) * 100
 
             logger.info(
                 f"Audio conversion complete: {original_size / (1024 * 1024):.2f} MB → "
@@ -213,7 +218,7 @@ class TranscriptionClient:
                 f"({size_reduction:.1f}% reduction)"
             )
 
-            return converted_bytes, 'audio/ogg'
+            return converted_bytes, "audio/ogg"
 
         except ImportError:
             logger.warning("pydub not installed - using original audio format")
@@ -226,52 +231,64 @@ class TranscriptionClient:
         self, options: Dict[str, Any], spelling_preference: str = "en-AU"
     ) -> str:
         """Build transcription prompt based on options"""
-        prompt_parts = [
-            "Please analyze the following audio file and provide:"
-        ]
+        prompt_parts = ["Please analyze the following audio file and provide:"]
 
         section_number = 1
 
         if options.get("fullTranscript"):
-            prompt_parts.append(f"{section_number}. A complete word-for-word transcript of the audio")
+            prompt_parts.append(
+                f"{section_number}. A complete word-for-word transcript of the audio"
+            )
             section_number += 1
 
         if options.get("timestamps"):
-            prompt_parts.append(f"{section_number}. A timestamped transcript with MM:SS markers at regular intervals")
+            prompt_parts.append(
+                f"{section_number}. A timestamped transcript with MM:SS markers at regular intervals"
+            )
             section_number += 1
 
         if options.get("speakerIdentification"):
-            prompt_parts.extend([
-                f"{section_number}. Speaker diarization with the following requirements:",
-                "   - Identify different speakers and detect their voice characteristics",
-                "   - Use descriptive labels: 'Speaker 1 (*Male*):', 'Speaker 2 (*Female*):'",
-                "   - Start speaker identification from the VERY FIRST WORDS of the audio",
-                "   - Format EVERY speaker change as a new paragraph with speaker label",
-                "   - Maintain consistent speaker labels throughout the ENTIRE audio"
-            ])
+            prompt_parts.extend(
+                [
+                    f"{section_number}. Speaker diarization with the following requirements:",
+                    "   - Identify different speakers and detect their voice characteristics",
+                    "   - Use descriptive labels: 'Speaker 1 (*Male*):', 'Speaker 2 (*Female*):'",
+                    "   - Start speaker identification from the VERY FIRST WORDS of the audio",
+                    "   - Format EVERY speaker change as a new paragraph with speaker label",
+                    "   - Maintain consistent speaker labels throughout the ENTIRE audio",
+                ]
+            )
             section_number += 1
 
         if options.get("summary"):
-            prompt_parts.append(f"{section_number}. A concise summary of the key points discussed")
+            prompt_parts.append(
+                f"{section_number}. A concise summary of the key points discussed"
+            )
             section_number += 1
 
         if options.get("actionItems"):
-            prompt_parts.append(f"{section_number}. A list of action items, tasks, or decisions mentioned")
+            prompt_parts.append(
+                f"{section_number}. A list of action items, tasks, or decisions mentioned"
+            )
             section_number += 1
 
         if options.get("customPrompt"):
-            prompt_parts.append(f"{section_number}. Custom Analysis: {options['customPrompt']}")
+            prompt_parts.append(
+                f"{section_number}. Custom Analysis: {options['customPrompt']}"
+            )
             section_number += 1
 
-        prompt_parts.extend([
-            "\nFormatting Guidelines:",
-            "- Use clear Markdown section headers (##) for each requested section",
-            "- Maintain consistent formatting throughout",
-            "- Start new paragraphs for speaker changes or topic shifts",
-            "\nQuality Requirements:",
-            "- Be accurate and thorough in your transcription",
-            "- Maintain consistency in all labels and formatting",
-        ])
+        prompt_parts.extend(
+            [
+                "\nFormatting Guidelines:",
+                "- Use clear Markdown section headers (##) for each requested section",
+                "- Maintain consistent formatting throughout",
+                "- Start new paragraphs for speaker changes or topic shifts",
+                "\nQuality Requirements:",
+                "- Be accurate and thorough in your transcription",
+                "- Maintain consistency in all labels and formatting",
+            ]
+        )
 
         return "\n".join(prompt_parts)
 
@@ -283,26 +300,26 @@ class TranscriptionClient:
         current_section = None
         current_content = []
 
-        for line in text.split('\n'):
-            if line.startswith('##'):
+        for line in text.split("\n"):
+            if line.startswith("##"):
                 # Save previous section
                 if current_section and current_content:
-                    sections[current_section] = '\n'.join(current_content).strip()
+                    sections[current_section] = "\n".join(current_content).strip()
 
                 # Start new section
-                header = line.replace('##', '').strip().lower()
+                header = line.replace("##", "").strip().lower()
                 current_content = []
 
-                if 'full transcript' in header or 'transcript' in header:
-                    current_section = 'fullTranscript'
-                elif 'timestamp' in header:
-                    current_section = 'timestampedTranscript'
-                elif 'speaker' in header or 'diarization' in header:
-                    current_section = 'speakerDiarization'
-                elif 'summary' in header:
-                    current_section = 'summary'
-                elif 'action' in header:
-                    current_section = 'actionItems'
+                if "full transcript" in header or "transcript" in header:
+                    current_section = "fullTranscript"
+                elif "timestamp" in header:
+                    current_section = "timestampedTranscript"
+                elif "speaker" in header or "diarization" in header:
+                    current_section = "speakerDiarization"
+                elif "summary" in header:
+                    current_section = "summary"
+                elif "action" in header:
+                    current_section = "actionItems"
                 else:
                     current_section = None
             else:
@@ -311,24 +328,26 @@ class TranscriptionClient:
 
         # Save last section
         if current_section and current_content:
-            sections[current_section] = '\n'.join(current_content).strip()
+            sections[current_section] = "\n".join(current_content).strip()
 
         # Parse action items into list
-        if 'actionItems' in sections:
-            action_text = sections['actionItems']
+        if "actionItems" in sections:
+            action_text = sections["actionItems"]
             items = []
-            for line in action_text.split('\n'):
+            for line in action_text.split("\n"):
                 line = line.strip()
-                if line and (line[0].isdigit() or line.startswith('-') or line.startswith('•')):
-                    item = line.lstrip('0123456789.-•').strip()
+                if line and (
+                    line[0].isdigit() or line.startswith("-") or line.startswith("•")
+                ):
+                    item = line.lstrip("0123456789.-•").strip()
                     if item:
                         items.append(item)
             if items:
-                sections['actionItems'] = items
+                sections["actionItems"] = items
 
         # If no sections parsed, use entire text
         if not sections and options.get("fullTranscript"):
-            sections['fullTranscript'] = text
+            sections["fullTranscript"] = text
 
         return sections
 
@@ -354,24 +373,26 @@ class TranscriptionClient:
                     # Write main transcript
                     f.write(transcript_data["transcript"])
                     f.write("\n\n")
-                    
+
                     # Write metadata
                     f.write("--- Metadata ---\n")
                     f.write(f"Words: {transcript_data['word_count']}\n")
-                    f.write(f"Processing Time: {transcript_data.get('processing_time_ms', 0) / 1000:.2f}s\n")
+                    f.write(
+                        f"Processing Time: {transcript_data.get('processing_time_ms', 0) / 1000:.2f}s\n"
+                    )
                     f.write(f"Model: {transcript_data.get('model', 'N/A')}\n")
-                    
+
                     # Write additional sections if available
-                    if 'sections' in transcript_data:
-                        sections = transcript_data['sections']
-                        
-                        if 'speakerDiarization' in sections:
+                    if "sections" in transcript_data:
+                        sections = transcript_data["sections"]
+
+                        if "speakerDiarization" in sections:
                             f.write("\n\n--- Speaker Diarization ---\n")
-                            f.write(sections['speakerDiarization'])
-                        
-                        if 'actionItems' in sections:
+                            f.write(sections["speakerDiarization"])
+
+                        if "actionItems" in sections:
                             f.write("\n\n--- Action Items ---\n")
-                            items = sections['actionItems']
+                            items = sections["actionItems"]
                             if isinstance(items, list):
                                 for item in items:
                                     f.write(f"- {item}\n")
