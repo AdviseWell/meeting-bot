@@ -61,9 +61,6 @@ export class MicrosoftTeamsBot extends MeetBotBase {
     this._logger.info('Navigating to Microsoft Teams Meeting URL...');
     await this.page.goto(url, { waitUntil: 'domcontentloaded' });
 
-    // Start early recording immediately after page load
-    await this.startEarlyRecording({ teamId, userId, eventId, botId, uploader }, this._logger);
-
     let joinFromBrowserButtonFound = false;
 
     try {
@@ -233,44 +230,9 @@ export class MicrosoftTeamsBot extends MeetBotBase {
     };
     await dismissDeviceChecksAndNotifications();
 
-    // Check if early recording is active, otherwise fall back to normal recording
-    if (this.earlyRecordingActive) {
-      this._logger.info('Continuing with early recording, setting up monitoring...');
-      await this.setupRecordingMonitoring({
-        duration: config.maxRecordingDuration * 60 * 1000,
-        inactivityLimit: config.inactivityLimit * 60 * 1000,
-        userId,
-        teamId
-      }, this._logger);
-
-      // Still need to set up the waiting promise
-      this._logger.info('Waiting for recording duration', config.maxRecordingDuration, 'minutes...');
-      const processingTime = 0.2 * 60 * 1000;
-      const duration = config.maxRecordingDuration * 60 * 1000;
-      const waitingPromise: WaitPromise = getWaitingPromise(processingTime + duration);
-
-      // Update the screenAppMeetEnd function to use the waiting promise
-      await this.page.exposeFunction('screenAppMeetEndResolved', (slightlySecretId: string) => {
-        if (slightlySecretId !== this.slightlySecretId) return;
-        try {
-          waitingPromise.resolveEarly();
-        } catch (error) {
-          this._logger.error('Could not process meeting end event', error);
-        }
-      });
-
-      waitingPromise.promise.then(async () => {
-        this._logger.info('Closing the browser...');
-        await this.page.context().browser()?.close();
-        this._logger.info('All done ✨', { botId, eventId, userId, teamId });
-      });
-
-      await waitingPromise.promise;
-    } else {
-      // Fallback to normal recording if early recording failed
-      this._logger.info('Early recording not active, starting normal recording...');
-      await this.recordMeetingPage({ teamId, userId, eventId, botId, uploader });
-    }
+    // Recording the meeting page
+    this._logger.info('Begin recording...');
+    await this.recordMeetingPage({ teamId, userId, eventId, botId, uploader });
 
     pushState('finished');
   }
