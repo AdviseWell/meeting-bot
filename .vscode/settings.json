@@ -3,6 +3,5 @@
   "editor.detectIndentation": false,
   "editor.codeActionsOnSave": {
     "source.fixAll.eslint": "always"
-  },
-  "sarif-viewer.connectToGithubCodeScanning": "off"
+  }
 }

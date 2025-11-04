@@ -237,15 +237,6 @@ export class MicrosoftTeamsBot extends MeetBotBase {
     if (this.earlyRecordingActive) {
       this._logger.info('Continuing with early recording, setting up monitoring...');
 
-      // Capture and send the browser console logs to Node.js context
-      this.page?.on('console', async msg => {
-        try {
-          await browserLogCaptureCallback(this._logger, msg);
-        } catch (err) {
-          this._logger.info('Playwright chrome logger: Failed to log browser messages...', err?.message);
-        }
-      });
-
       // Still need to set up the waiting promise
       this._logger.info('Waiting for recording duration', config.maxRecordingDuration, 'minutes...');
       const processingTime = 0.2 * 60 * 1000;
