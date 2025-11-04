@@ -9,7 +9,7 @@ The controller runs as a Kubernetes Job (triggered by KEDA) and performs the fol
 1. **Pull Message**: Retrieves a message from GCP Pub/Sub queue
 2. **Join Meeting**: Calls the meeting-bot API to join the meeting
 3. **Monitor**: Checks meeting status every 10 seconds until completion
-4. **Convert**: Converts the recording to MP4 format and extracts AAC audio
+4. **Convert**: Converts the recording to MP4 format and extracts M4A audio
 5. **Upload**: Saves both files to Google Cloud Storage
 
 ## Architecture
@@ -36,7 +36,7 @@ Orchestrates the entire workflow and coordinates between components.
 
 ### Media Converter (`media_converter.py`)
 - Converts recordings to MP4 using H.264 codec
-- Extracts audio as AAC
+- Extracts audio as M4A
 - Uses ffmpeg for all conversions
 
 ### Storage Client (`storage_client.py`)
@@ -71,7 +71,7 @@ Files are uploaded to GCS with the following structure:
 
 ```
 gs://{GCS_BUCKET}/{gcs_path}/video.mp4
-gs://{GCS_BUCKET}/{gcs_path}/audio.aac
+gs://{GCS_BUCKET}/{gcs_path}/audio.m4a
 ```
 
 ## Building
@@ -173,7 +173,7 @@ All components use Python's logging module with structured output:
 
 ## Future Enhancements
 
-- Parallel conversion of MP4 and AAC
+- Parallel conversion of MP4 and M4A
 - Configurable video quality settings
 - Support for additional audio formats
 - Webhook notifications on completion

@@ -6,7 +6,7 @@ This manager processes a single meeting recording job:
 1. Reads job details from environment variables
 2. Initiates meeting join via meeting-bot API
 3. Monitors meeting status
-4. Converts recordings (MP4 + AAC)
+4. Converts recordings (MP4 + M4A)
 5. Uploads to GCS
 
 Designed to run as a Kubernetes Job, spawned by the controller.
@@ -201,12 +201,12 @@ class MeetingManager:
 
             # Step 3: Convert media files
             logger.info("Step 3: Converting media files...")
-            mp4_path, aac_path = self.media_converter.convert(recording_path)
-            if not mp4_path or not aac_path:
+            mp4_path, m4a_path = self.media_converter.convert(recording_path)
+            if not mp4_path or not m4a_path:
                 logger.error("Media conversion failed")
                 return False
 
-            logger.info(f"Conversion complete - MP4: {mp4_path}, AAC: {aac_path}")
+            logger.info(f"Conversion complete - MP4: {mp4_path}, M4A: {m4a_path}")
 
             # Step 4: Transcribe audio using Chirp 3 (optional, don't fail job if it fails)
             logger.info("Step 4: Transcribing audio with Chirp 3...")
@@ -214,13 +214,13 @@ class MeetingManager:
             transcript_json_path = None
 
             try:
-                # First, upload the AAC file to GCS so Chirp 3 can access it
-                aac_gcs_path = f"{self.gcs_path}/audio.aac"
-                aac_uploaded = self.storage_client.upload_file(aac_path, aac_gcs_path)
+                # First, upload the M4A file to GCS so Chirp 3 can access it
+                m4a_gcs_path = f"{self.gcs_path}/audio.m4a"
+                m4a_uploaded = self.storage_client.upload_file(m4a_path, m4a_gcs_path)
 
-                if aac_uploaded:
+                if m4a_uploaded:
                     # Build GCS URI for Chirp 3
-                    audio_gcs_uri = f"gs://{self.gcs_bucket}/{aac_gcs_path}"
+                    audio_gcs_uri = f"gs://{self.gcs_bucket}/{m4a_gcs_path}"
                     logger.info(f"Transcribing from: {audio_gcs_uri}")
 
                     # Transcribe the audio
@@ -258,7 +258,7 @@ class MeetingManager:
                         )
                 else:
                     logger.warning(
-                        "Failed to upload AAC to GCS for transcription, skipping transcription step"
+                        "Failed to upload M4A to GCS for transcription, skipping transcription step"
                     )
 
             except Exception as e:
@@ -274,9 +274,9 @@ class MeetingManager:
             )
 
             # Upload audio (if not already uploaded for transcription)
-            if not aac_uploaded:
-                aac_uploaded = self.storage_client.upload_file(
-                    aac_path, f"{self.gcs_path}/audio.aac"
+            if not m4a_uploaded:
+                m4a_uploaded = self.storage_client.upload_file(
+                    m4a_path, f"{self.gcs_path}/audio.m4a"
                 )
 
             # Upload transcripts if available
@@ -291,7 +291,7 @@ class MeetingManager:
                     transcript_json_path, f"{self.gcs_path}/transcript.json"
                 )
 
-            if mp4_uploaded and aac_uploaded:
+            if mp4_uploaded and m4a_uploaded:
                 logger.info(
                     f"Successfully uploaded files to gs://{self.gcs_bucket}/{self.gcs_path}/"
                 )
@@ -299,7 +299,7 @@ class MeetingManager:
                     logger.info(f"✅ Transcripts also uploaded successfully")
 
                 # Cleanup local files
-                self.media_converter.cleanup(recording_path, mp4_path, aac_path)
+                self.media_converter.cleanup(recording_path, mp4_path, m4a_path)
 
                 # Cleanup transcript files
                 if transcript_txt_path and os.path.exists(transcript_txt_path):

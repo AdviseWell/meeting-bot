@@ -1,5 +1,5 @@
 """
-Media Converter - Convert recordings to MP4 and extract AAC audio
+Media Converter - Convert recordings to MP4 and extract M4A audio
 """
 
 import os
@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 class MediaConverter:
     """Convert media files using ffmpeg"""
-    
+
     def __init__(self):
         """Initialize media converter"""
         # Verify ffmpeg is available
@@ -21,10 +21,7 @@ class MediaConverter:
         try:
             # First, check if ffmpeg exists in PATH using 'which'
             result = subprocess.run(
-                ['which', 'ffmpeg'],
-                capture_output=True,
-                text=True,
-                timeout=2
+                ["which", "ffmpeg"], capture_output=True, text=True, timeout=2
             )
             if result.returncode == 0:
                 logger.info(f"ffmpeg found at: {result.stdout.strip()}")
@@ -38,11 +35,11 @@ class MediaConverter:
             # 'which' command not available, try direct ffmpeg check with shorter timeout
             try:
                 result = subprocess.run(
-                    ['ffmpeg', '-version'],
+                    ["ffmpeg", "-version"],
                     capture_output=True,
                     text=True,
                     timeout=2,
-                    stdin=subprocess.DEVNULL  # Prevent ffmpeg from waiting for input
+                    stdin=subprocess.DEVNULL,  # Prevent ffmpeg from waiting for input
                 )
                 if result.returncode == 0:
                     logger.info("ffmpeg is available")
@@ -55,52 +52,52 @@ class MediaConverter:
         except Exception as e:
             logger.error(f"Error checking for ffmpeg: {e}")
             raise RuntimeError("ffmpeg is required but not available")
-    
+
     def convert(self, input_path: str) -> Tuple[Optional[str], Optional[str]]:
         """
-        Convert recording to MP4 and extract AAC audio
-        
+        Convert recording to MP4 and extract M4A audio
+
         Args:
-            input_path: Path to the input recording file
-            
+            input_path: Path to input recording file
+
         Returns:
-            Tuple of (mp4_path, aac_path) if successful, (None, None) otherwise
+            Tuple of (mp4_path, m4a_path) if successful, (None, None) otherwise
         """
         if not os.path.exists(input_path):
             logger.error(f"Input file not found: {input_path}")
             return None, None
-        
+
         # Generate output paths
         base_path = os.path.splitext(input_path)[0]
         mp4_path = f"{base_path}.mp4"
-        aac_path = f"{base_path}.aac"
-        
+        m4a_path = f"{base_path}.m4a"
+
         # Convert to MP4
         mp4_success = self._convert_to_mp4(input_path, mp4_path)
         if not mp4_success:
             return None, None
-        
-        # Extract AAC audio
-        aac_success = self._extract_aac(input_path, aac_path)
-        if not aac_success:
+
+        # Extract M4A audio
+        m4a_success = self._extract_m4a(input_path, m4a_path)
+        if not m4a_success:
             return None, None
-        
-        return mp4_path, aac_path
-    
+
+        return mp4_path, m4a_path
+
     def _convert_to_mp4(self, input_path: str, output_path: str) -> bool:
         """
         Convert video to MP4 format
-        
+
         Args:
             input_path: Input video file
             output_path: Output MP4 file path
-            
+
         Returns:
             True if successful, False otherwise
         """
         try:
             logger.info(f"Converting to MP4: {input_path} -> {output_path}")
-            
+
             # ffmpeg command for MP4 conversion
             # Using H.264 codec with ultra high quality settings
             # Audio filter chain for professional quality:
@@ -109,116 +106,211 @@ class MediaConverter:
             # 3. afftdn: Advanced noise reduction using FFT
             # 4. loudnorm: Professional loudness normalization (EBU R128)
             audio_filters = (
-                'highpass=f=80,'                          # Remove rumble
-                'lowpass=f=15000,'                        # Remove hiss
-                'afftdn=nf=-25,'                          # Noise reduction
-                'loudnorm=I=-16:TP=-1.5:LRA=11'           # Normalize loudness
+                "highpass=f=80,"  # Remove rumble
+                "lowpass=f=15000,"  # Remove hiss
+                "afftdn=nf=-25,"  # Noise reduction
+                "loudnorm=I=-16:TP=-1.5:LRA=11"  # Normalize loudness
             )
-            
+
             cmd = [
-                'ffmpeg',
-                '-i', input_path,
-                '-c:v', 'libx264',      # Video codec
-                '-preset', 'slow',       # Slower encoding for better quality
-                '-crf', '18',            # Quality (lower = better, 18 is very high quality, was 23)
-                '-af', audio_filters,    # Audio filter chain
-                '-c:a', 'aac',           # Audio codec
-                '-b:a', '384k',          # Audio bitrate (3x from 128k)
-                '-ar', '48000',          # 48 kHz sample rate
-                '-movflags', '+faststart',  # Enable streaming
-                '-y',                    # Overwrite output file
-                output_path
+                "ffmpeg",
+                "-i",
+                input_path,
+                "-c:v",
+                "libx264",  # Video codec
+                "-preset",
+                "slow",  # Slower encoding for better quality
+                "-crf",
+                "18",  # Quality (lower = better, 18 is very high quality, was 23)
+                "-af",
+                audio_filters,  # Audio filter chain
+                "-c:a",
+                "aac",  # Audio codec
+                "-b:a",
+                "384k",  # Audio bitrate (3x from 128k)
+                "-ar",
+                "48000",  # 48 kHz sample rate
+                "-movflags",
+                "+faststart",  # Enable streaming
+                "-y",  # Overwrite output file
+                output_path,
             ]
-            
+
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
                 timeout=3600,  # 1 hour timeout
-                stdin=subprocess.DEVNULL  # Prevent ffmpeg from waiting for input
+                stdin=subprocess.DEVNULL,  # Prevent ffmpeg from waiting for input
             )
-            
+
             if result.returncode == 0:
                 logger.info(f"Successfully converted to MP4: {output_path}")
                 return True
             else:
                 logger.error(f"MP4 conversion failed: {result.stderr}")
                 return False
-                
+
         except subprocess.TimeoutExpired:
             logger.error("MP4 conversion timed out")
             return False
         except Exception as e:
             logger.exception(f"Error during MP4 conversion: {e}")
             return False
-    
-    def _extract_aac(self, input_path: str, output_path: str) -> bool:
+
+    def _extract_m4a(self, input_path: str, output_path: str) -> bool:
         """
-        Extract audio as AAC
-        
+        Extract audio as M4A with advanced speech enhancement
+
         Args:
             input_path: Input video file
-            output_path: Output AAC file path
-            
+            output_path: Output M4A file path
+
         Returns:
             True if successful, False otherwise
         """
         try:
-            logger.info(f"Extracting AAC audio: {input_path} -> {output_path}")
-            
-            # ffmpeg command for AAC extraction with advanced audio processing
-            # Multi-stage audio filter chain for professional quality:
-            # 1. highpass: Remove low frequency rumble/noise below 80Hz
-            # 2. lowpass: Remove high frequency hiss above 15kHz
-            # 3. afftdn: Advanced noise reduction using FFT
-            # 4. loudnorm: Professional loudness normalization (EBU R128)
-            # 5. compand: Dynamic range compression for clearer speech
+            logger.info(f"Extracting M4A audio: {input_path} -> {output_path}")
+
+            # Advanced audio filter chain optimized for speech/meetings:
+            # 1. arnndn: AI-based noise reduction using RNNoise (trained on speech)
+            # 2. highpass: Remove low frequency rumble/noise below 80Hz
+            # 3. lowpass: Remove high frequency noise above 12kHz (speech focused)
+            # 4. equalizer: Boost speech frequencies (200-4000Hz)
+            # 5. afftdn: Additional FFT-based noise reduction
+            # 6. speechnorm: Speech-specific normalization (better than loudnorm for voice)
+            # 7. compand: Multi-band compression for clearer speech
+            # 8. silenceremove: Remove long silences to reduce file size
             audio_filters = (
-                'highpass=f=80,'                          # Remove rumble
-                'lowpass=f=15000,'                        # Remove hiss
-                'afftdn=nf=-25,'                          # Noise reduction
-                'loudnorm=I=-16:TP=-1.5:LRA=11,'          # Normalize loudness
-                'compand=attacks=0.3:decays=0.8:points=-80/-80|-45/-30|-27/-20|0/-10'  # Compress dynamics
+                "arnndn=m=/usr/share/rnnoise/models/rnnoise.rnnn,"  # AI noise reduction
+                "highpass=f=80,"  # Remove rumble
+                "lowpass=f=12000,"  # Remove high-freq noise (speech is <8kHz)
+                "equalizer=f=300:width_type=o:width=2:g=3,"  # Boost low speech frequencies
+                "equalizer=f=2000:width_type=o:width=2:g=2,"  # Boost mid speech frequencies
+                "afftdn=nf=-25:tn=1,"  # Additional noise reduction with tracking
+                "speechnorm=e=50:r=0.0005:l=1,"  # Speech normalization
+                "compand=attacks=0.1:decays=0.2:points=-80/-80|-50/-40|-30/-20|0/-10,"  # Compression
+                "silenceremove=start_periods=1:start_duration=0.1:start_threshold=-50dB:"
+                "stop_periods=1:stop_duration=2:stop_threshold=-50dB"  # Remove silences
             )
-            
+
             cmd = [
-                'ffmpeg',
-                '-i', input_path,
-                '-vn',                   # No video
-                '-af', audio_filters,    # Audio filter chain
-                '-c:a', 'aac',           # Audio codec
-                '-b:a', '384k',          # Audio bitrate (3x from 128k)
-                '-ar', '48000',          # 48 kHz sample rate
-                '-y',                    # Overwrite output file
-                output_path
+                "ffmpeg",
+                "-i",
+                input_path,
+                "-vn",  # No video
+                "-af",
+                audio_filters,  # Audio filter chain
+                "-c:a",
+                "aac",  # Audio codec (AAC in M4A container)
+                "-b:a",
+                "256k",  # High quality audio bitrate
+                "-ar",
+                "48000",  # 48 kHz sample rate
+                "-ac",
+                "1",  # Mono (meetings typically don't need stereo)
+                "-y",  # Overwrite output file
+                output_path,
             ]
-            
+
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
                 timeout=1800,  # 30 minute timeout
-                stdin=subprocess.DEVNULL  # Prevent ffmpeg from waiting for input
+                stdin=subprocess.DEVNULL,  # Prevent ffmpeg from waiting for input
             )
-            
+
             if result.returncode == 0:
-                logger.info(f"Successfully extracted AAC audio: {output_path}")
+                logger.info(f"Successfully extracted M4A audio: {output_path}")
                 return True
             else:
-                logger.error(f"AAC extraction failed: {result.stderr}")
-                return False
-                
+                # If arnndn fails (RNNoise not available), fall back to simpler chain
+                if "arnndn" in result.stderr or "rnnoise" in result.stderr.lower():
+                    logger.warning("RNNoise not available, using fallback filter chain")
+                    return self._extract_m4a_fallback(input_path, output_path)
+                else:
+                    logger.error(f"M4A extraction failed: {result.stderr}")
+                    return False
+
         except subprocess.TimeoutExpired:
-            logger.error("AAC extraction timed out")
+            logger.error("M4A extraction timed out")
             return False
         except Exception as e:
-            logger.exception(f"Error during AAC extraction: {e}")
+            logger.exception(f"Error during M4A extraction: {e}")
             return False
-    
+
+    def _extract_m4a_fallback(self, input_path: str, output_path: str) -> bool:
+        """
+        Fallback M4A extraction without RNNoise (for environments without it)
+
+        Args:
+            input_path: Input video file
+            output_path: Output M4A file path
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            logger.info("Using fallback audio extraction (no RNNoise)")
+
+            # Optimized filter chain without RNNoise
+            audio_filters = (
+                "highpass=f=80,"  # Remove rumble
+                "lowpass=f=12000,"  # Remove high-freq noise
+                "equalizer=f=300:width_type=o:width=2:g=3,"  # Boost low speech
+                "equalizer=f=2000:width_type=o:width=2:g=2,"  # Boost mid speech
+                "afftdn=nf=-25:tn=1,"  # Noise reduction with tracking
+                "speechnorm=e=50:r=0.0005:l=1,"  # Speech normalization
+                "compand=attacks=0.1:decays=0.2:points=-80/-80|-50/-40|-30/-20|0/-10,"
+                "silenceremove=start_periods=1:start_duration=0.1:start_threshold=-50dB:"
+                "stop_periods=1:stop_duration=2:stop_threshold=-50dB"
+            )
+
+            cmd = [
+                "ffmpeg",
+                "-i",
+                input_path,
+                "-vn",
+                "-af",
+                audio_filters,
+                "-c:a",
+                "aac",
+                "-b:a",
+                "256k",
+                "-ar",
+                "48000",
+                "-ac",
+                "1",  # Mono
+                "-y",
+                output_path,
+            ]
+
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=1800,
+                stdin=subprocess.DEVNULL,
+            )
+
+            if result.returncode == 0:
+                logger.info(
+                    f"Successfully extracted M4A audio (fallback): {output_path}"
+                )
+                return True
+            else:
+                logger.error(f"M4A extraction failed (fallback): {result.stderr}")
+                return False
+
+        except Exception as e:
+            logger.exception(f"Error during fallback M4A extraction: {e}")
+            return False
+
     def cleanup(self, *file_paths: str):
         """
         Clean up temporary files
-        
+
         Args:
             *file_paths: File paths to delete
         """
