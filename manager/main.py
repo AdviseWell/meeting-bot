@@ -224,7 +224,8 @@ class MeetingManager:
                         language_code="en-AU",  # Australian English
                         enable_automatic_punctuation=True,
                         enable_speaker_diarization=True,
-                        max_speaker_count=5
+                        min_speaker_count=1,
+                        max_speaker_count=6,
                     )
                     
                     if transcript_data:

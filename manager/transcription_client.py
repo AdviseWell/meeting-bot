@@ -52,6 +52,8 @@ class TranscriptionClient:
         language_code: str = "en-US",
         enable_automatic_punctuation: bool = True,
         enable_speaker_diarization: bool = True,
+        min_speaker_count: int = 2,
+        max_speaker_count: int = 6,
     ) -> Optional[Dict]:
         """
         Transcribe an audio file using Chirp 3
@@ -61,6 +63,8 @@ class TranscriptionClient:
             language_code: Language code (default: en-US)
             enable_automatic_punctuation: Add punctuation to transcript
             enable_speaker_diarization: Identify different speakers
+            min_speaker_count: Minimum number of speakers (1-6)
+            max_speaker_count: Maximum number of speakers (1-6)
 
         Returns:
             Dictionary with transcript and metadata, or None if failed
@@ -71,9 +75,8 @@ class TranscriptionClient:
         """
         try:
             logger.info(f"Starting Chirp 3 transcription for: {audio_uri}")
-
+            
             # Configure recognition request
-            # Per Chirp 3 docs: Enable diarization with empty config
             # Word confidence is not meaningful for Chirp 3
             config = cloud_speech.RecognitionConfig(
                 auto_decoding_config=cloud_speech.AutoDetectDecodingConfig(),
@@ -82,16 +85,17 @@ class TranscriptionClient:
                 features=cloud_speech.RecognitionFeatures(
                     enable_automatic_punctuation=enable_automatic_punctuation,
                     enable_word_time_offsets=True,
-                    # Enable diarization with empty config as per docs
+                    # Enable diarization with speaker count settings
                     diarization_config=(
-                        cloud_speech.SpeakerDiarizationConfig()
+                        cloud_speech.SpeakerDiarizationConfig(
+                            min_speaker_count=min_speaker_count,
+                            max_speaker_count=max_speaker_count,
+                        )
                         if enable_speaker_diarization
                         else None
                     ),
                 ),
-            )
-
-            # Set up the audio source
+            )            # Set up the audio source
             file_metadata = cloud_speech.BatchRecognizeFileMetadata(
                 uri=audio_uri,
             )
