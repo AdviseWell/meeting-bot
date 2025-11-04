@@ -51,9 +51,6 @@ class TranscriptionClient:
         audio_uri: str,
         language_code: str = "en-US",
         enable_automatic_punctuation: bool = True,
-        enable_speaker_diarization: bool = True,
-        min_speaker_count: int = 2,
-        max_speaker_count: int = 6,
     ) -> Optional[Dict]:
         """
         Transcribe an audio file using Chirp 3
@@ -62,40 +59,33 @@ class TranscriptionClient:
             audio_uri: GCS URI of the audio file (gs://bucket/file.aac)
             language_code: Language code (default: en-US)
             enable_automatic_punctuation: Add punctuation to transcript
-            enable_speaker_diarization: Identify different speakers
-            min_speaker_count: Minimum number of speakers (1-6)
-            max_speaker_count: Maximum number of speakers (1-6)
 
         Returns:
             Dictionary with transcript and metadata, or None if failed
 
         Note:
-            Diarization is available only in BatchRecognize for Chirp 3.
-            Word-level confidence is not truly meaningful for Chirp 3.
+            Chirp 3 with default recognizer supports automatic punctuation
+            but does not support word timestamps or speaker diarization.
         """
         try:
             logger.info(f"Starting Chirp 3 transcription for: {audio_uri}")
-            
+
             # Configure recognition request
-            # Word confidence is not meaningful for Chirp 3
+            # Note: Chirp 3 with default recognizer has limitations:
+            # - Does NOT support enable_word_time_offsets
+            # - Does NOT support diarization_config
+            # For these features, a custom recognizer must be created
             config = cloud_speech.RecognitionConfig(
                 auto_decoding_config=cloud_speech.AutoDetectDecodingConfig(),
                 language_codes=[language_code],
                 model="chirp_3",
                 features=cloud_speech.RecognitionFeatures(
                     enable_automatic_punctuation=enable_automatic_punctuation,
-                    enable_word_time_offsets=True,
-                    # Enable diarization with speaker count settings
-                    diarization_config=(
-                        cloud_speech.SpeakerDiarizationConfig(
-                            min_speaker_count=min_speaker_count,
-                            max_speaker_count=max_speaker_count,
-                        )
-                        if enable_speaker_diarization
-                        else None
-                    ),
+                    # Chirp 3 does not support these features with default recognizer
+                    # enable_word_time_offsets=True,
+                    # diarization_config=None,
                 ),
-            )            # Set up the audio source
+            )  # Set up the audio source
             file_metadata = cloud_speech.BatchRecognizeFileMetadata(
                 uri=audio_uri,
             )
@@ -148,7 +138,6 @@ class TranscriptionClient:
             segments = []
             total_words = 0
             total_duration = 0.0
-            speakers_found = set()
 
             # Process each file result (should be just one)
             for file_result in response.results.values():
@@ -164,24 +153,10 @@ class TranscriptionClient:
                     if transcript_text:
                         full_transcript.append(transcript_text)
 
-                    # Extract word-level details
-                    for word_info in alternative.words:
-                        total_words += 1
+                    # Count words (approximate)
+                    total_words += len(transcript_text.split())
 
-                        # Track speakers if diarization is enabled
-                        if (
-                            hasattr(word_info, "speaker_label")
-                            and word_info.speaker_label
-                        ):
-                            speakers_found.add(word_info.speaker_label)
-
-                        # Calculate duration from first to last word
-                        if hasattr(word_info, "end_offset"):
-                            end_time = word_info.end_offset.total_seconds()
-                            if end_time > total_duration:
-                                total_duration = end_time
-
-                    # Create segment with speaker info
+                    # Create segment
                     segment = {
                         "transcript": transcript_text,
                         "confidence": (
@@ -196,12 +171,6 @@ class TranscriptionClient:
                         ),
                     }
 
-                    # Add speaker info if available
-                    if alternative.words and hasattr(
-                        alternative.words[0], "speaker_label"
-                    ):
-                        segment["speaker"] = alternative.words[0].speaker_label
-
                     segments.append(segment)
 
             # Combine all transcript parts
@@ -212,8 +181,6 @@ class TranscriptionClient:
                 "segments": segments,
                 "word_count": total_words,
                 "duration_seconds": total_duration,
-                "speaker_count": len(speakers_found),
-                "speakers": sorted(list(speakers_found)),
             }
 
             return result
@@ -244,10 +211,9 @@ class TranscriptionClient:
                 with open(output_path, "w", encoding="utf-8") as f:
                     f.write(transcript_data["transcript"])
                     f.write("\n\n")
-                    f.write(f"--- Metadata ---\n")
+                    f.write("--- Metadata ---\n")
                     f.write(f"Words: {transcript_data['word_count']}\n")
                     f.write(f"Duration: {transcript_data['duration_seconds']:.2f}s\n")
-                    f.write(f"Speakers: {transcript_data['speaker_count']}\n")
 
             elif format == "json":
                 # JSON format with all details
