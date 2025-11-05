@@ -134,11 +134,11 @@ class TranscriptionClient:
             # Generate transcription with Gemini
             start_time = time.time()
             gemini_response = self.client.models.generate_content(
-                model="gemini-2.0-flash-exp",  # Fast and cost-effective model
+                model="gemini-2.5-flash",  # Latest high-performance model
                 contents=[prompt, audio_part],
                 config={
                     "temperature": 0.1,  # Low temperature for accuracy
-                    "max_output_tokens": 32768,  # Support longer transcripts
+                    "max_output_tokens": 65536,  # Max for Gemini 2.5 Flash
                     "response_mime_type": "text/plain",
                 },
             )
@@ -156,7 +156,7 @@ class TranscriptionClient:
                 "word_count": len(transcript_text.split()),
                 "duration_seconds": 0.0,  # Not available from Gemini
                 "processing_time_ms": processing_time_ms,
-                "model": "gemini-2.0-flash-exp",
+                "model": "gemini-2.5-flash",
                 "sections": sections,  # Include all parsed sections
             }
 
