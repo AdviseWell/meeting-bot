@@ -117,26 +117,26 @@ class MeetingMonitor:
             endpoint = f"{self.api_base_url}/{provider}/join"
             
             # Build payload with required fields
-            # The meeting-bot API expects: bearerToken, url, name, teamId, timezone, userId, botId
-            # Note: API accepts either botId or eventId, but documentation shows botId as standard
+            # The meeting-bot API now auto-generates: bearerToken, userId, botId if not provided
+            # Required fields: url, name, teamId, timezone
+            # Optional fields: bearerToken, userId, botId
             payload = {
                 "url": meeting_url,
                 "name": metadata.get('name', 'Meeting Bot'),
-                "bearerToken": metadata.get('bearerToken', metadata.get('bearer_token', '')),
                 "teamId": metadata.get('teamId', metadata.get('team_id', metadata.get('meeting_id', 'default-team'))),
                 "timezone": metadata.get('timezone', 'UTC'),
-                "userId": metadata.get('userId', metadata.get('user_id', 'system')),
-                "botId": metadata.get('botId', metadata.get('bot_id', metadata.get('meeting_id', 'unknown'))),
             }
             
-            # Validate critical fields
-            if not payload.get('bearerToken'):
-                logger.warning("⚠️  bearerToken is missing or empty - API call may fail!")
-            if not payload.get('userId') or payload['userId'] == 'system':
-                logger.warning(f"⚠️  userId is using fallback value: {payload['userId']}")
+            # Add optional fields only if provided
+            if metadata.get('bearerToken') or metadata.get('bearer_token'):
+                payload['bearerToken'] = metadata.get('bearerToken', metadata.get('bearer_token'))
+            if metadata.get('userId') or metadata.get('user_id'):
+                payload['userId'] = metadata.get('userId', metadata.get('user_id'))
+            if metadata.get('botId') or metadata.get('bot_id'):
+                payload['botId'] = metadata.get('botId', metadata.get('bot_id'))
             
             logger.info(f"Joining {provider} meeting: {meeting_url}")
-            logger.info(f"Payload: name={payload['name']}, teamId={payload['teamId']}, userId={payload['userId']}, botId={payload['botId']}, timezone={payload['timezone']}, bearerToken={'***' if payload.get('bearerToken') else 'MISSING'}")
+            logger.info(f"Payload: name={payload['name']}, teamId={payload['teamId']}, timezone={payload['timezone']}, userId={payload.get('userId', 'AUTO-GENERATED')}, botId={payload.get('botId', 'AUTO-GENERATED')}, bearerToken={'***' if payload.get('bearerToken') else 'AUTO-GENERATED'}")
             
             try:
                 response = requests.post(

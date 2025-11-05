@@ -22,6 +22,7 @@ from meeting_monitor import MeetingMonitor
 from media_converter import MediaConverter
 from storage_client import StorageClient
 from transcription_client import TranscriptionClient
+from meeting_utils import auto_generate_missing_fields
 
 # Configure logging
 logging.basicConfig(
@@ -77,14 +78,60 @@ class MeetingManager:
         if self.gcs_path:
             metadata["gcs_path"] = self.gcs_path
 
-        # Meeting-bot API required fields (support both snake_case and camelCase env vars)
-        # bearerToken (required)
-        metadata["bearerToken"] = (
+        # Get optional fields from environment (support both snake_case and camelCase)
+        bearer_token = (
             os.environ.get("BEARERTOKEN")
             or os.environ.get("BEARER_TOKEN")
             or os.environ.get("bearer_token")
-            or ""
         )
+        user_id = (
+            os.environ.get("USERID")
+            or os.environ.get("USER_ID")
+            or os.environ.get("user_id")
+        )
+        bot_id = (
+            os.environ.get("BOTID")
+            or os.environ.get("BOT_ID")
+            or os.environ.get("bot_id")
+        )
+        event_id = (
+            os.environ.get("EVENTID")
+            or os.environ.get("EVENT_ID")
+            or os.environ.get("event_id")
+        )
+
+        # Auto-generate missing fields if meeting URL is available
+        if self.meeting_url:
+            try:
+                auto_generated = auto_generate_missing_fields(
+                    url=self.meeting_url,
+                    bearer_token=bearer_token,
+                    user_id=user_id,
+                    bot_id=bot_id,
+                    event_id=event_id
+                )
+                
+                # Use auto-generated values
+                metadata["bearerToken"] = auto_generated["bearer_token"]
+                metadata["userId"] = auto_generated["user_id"]
+                metadata["botId"] = auto_generated["bot_id"]
+                
+                # Also update meeting_id if it wasn't provided
+                if not self.meeting_id:
+                    metadata["meeting_id"] = auto_generated["meeting_id"]
+                    
+                logger.info(f"Auto-generated fields: userId={metadata['userId']}, botId={metadata['botId']}, bearerToken={'***' if metadata['bearerToken'] else 'NONE'}")
+            except Exception as e:
+                logger.warning(f"Could not auto-generate fields: {e}. Using fallback values.")
+                # Fallback to original behavior
+                metadata["bearerToken"] = bearer_token or ""
+                metadata["userId"] = user_id or "system"
+                metadata["botId"] = bot_id or event_id or self.meeting_id
+        else:
+            # No meeting URL, use provided values or fallbacks
+            metadata["bearerToken"] = bearer_token or ""
+            metadata["userId"] = user_id or "system"
+            metadata["botId"] = bot_id or event_id or self.meeting_id
 
         # teamId (required) - fallback to meeting_id
         metadata["teamId"] = (
@@ -92,14 +139,6 @@ class MeetingManager:
             or os.environ.get("TEAM_ID")
             or os.environ.get("team_id")
             or self.meeting_id
-        )
-
-        # userId (required) - fallback to 'system'
-        metadata["userId"] = (
-            os.environ.get("USERID")
-            or os.environ.get("USER_ID")
-            or os.environ.get("user_id")
-            or "system"
         )
 
         # timezone (required) - fallback to UTC
@@ -114,27 +153,6 @@ class MeetingManager:
             or os.environ.get("BOT_NAME")
             or "Meeting Bot"
         )
-
-        # botId (required by API - either botId or eventId)
-        # Prefer botId over eventId based on documentation
-        bot_id = (
-            os.environ.get("BOTID")
-            or os.environ.get("BOT_ID")
-            or os.environ.get("bot_id")
-        )
-        event_id = (
-            os.environ.get("EVENTID")
-            or os.environ.get("EVENT_ID")
-            or os.environ.get("event_id")
-        )
-
-        if bot_id:
-            metadata["botId"] = bot_id
-        elif event_id:
-            metadata["botId"] = event_id  # Use eventId as botId
-        else:
-            # Fallback to meeting_id if neither is provided
-            metadata["botId"] = self.meeting_id
 
         # Optional meeting metadata
         if os.environ.get("MEETING_TITLE"):
