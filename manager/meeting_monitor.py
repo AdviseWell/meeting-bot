@@ -239,6 +239,7 @@ class MeetingMonitor:
     def monitor_until_complete(
         self,
         job_id: str,
+        metadata: Dict,
         check_interval: int = 10,
         max_wait_time: int = 14400  # 4 hours default
     ) -> Optional[str]:
@@ -247,6 +248,7 @@ class MeetingMonitor:
         
         Args:
             job_id: The job ID to monitor
+            metadata: Meeting metadata containing userId and other info
             check_interval: How often to check status (seconds)
             max_wait_time: Maximum time to wait (seconds)
             
@@ -280,10 +282,13 @@ class MeetingMonitor:
                 # Recording file is in the shared volume
                 # Meeting-bot saves to: /usr/src/app/dist/_tempvideo/{userId}/recording.webm
                 # This is mounted to /recordings in the manager container (read-only access)
-                user_id = os.getenv('userId') or os.getenv('USERID')
+                user_id = metadata.get('userId') or metadata.get('user_id')
                 if not user_id:
-                    logger.error("❌ No userId found in environment variables - cannot locate recording")
+                    logger.error("❌ No userId found in metadata - cannot locate recording")
+                    logger.debug(f"Available metadata keys: {list(metadata.keys())}")
                     return None
+                
+                logger.info(f"Looking for recording in directory for userId: {user_id}")
                 
                 # Look for the recording file in the shared volume
                 recording_dir = f"/recordings/{user_id}"

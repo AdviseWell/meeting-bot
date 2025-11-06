@@ -209,7 +209,7 @@ class MeetingManager:
             # Step 2: Monitor the meeting (check every 10 seconds)
             logger.info("Step 2: Monitoring meeting status...")
             recording_path = self.meeting_monitor.monitor_until_complete(
-                job_id, check_interval=10
+                job_id, self.metadata, check_interval=10
             )
             if not recording_path:
                 logger.error("Meeting monitoring failed or no recording generated")
