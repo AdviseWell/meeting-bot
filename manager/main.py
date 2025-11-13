@@ -20,7 +20,7 @@ from typing import Optional, Dict
 
 from meeting_monitor import MeetingMonitor
 from media_converter import MediaConverter
-from storage_client import StorageClient
+from storage_client import StorageClient, FirestoreClient
 from transcription_client import TranscriptionClient
 from meeting_utils import auto_generate_missing_fields
 
@@ -46,6 +46,7 @@ class MeetingManager:
         # Required environment variables for the meeting job
         self.meeting_url = os.environ.get("MEETING_URL")
         self.meeting_id = os.environ.get("MEETING_ID")
+        self.fs_meeting_id = os.environ.get("FS_MEETING_ID")  # Firestore-specific meeting ID
         self.gcs_path = os.environ.get("GCS_PATH")
 
         # Optional meeting metadata
@@ -53,6 +54,7 @@ class MeetingManager:
 
         # GCS and API configuration
         self.gcs_bucket = os.environ.get("GCS_BUCKET")
+        self.firestore_database = os.environ.get("FIRESTORE_DATABASE", "(default)")
         self.meeting_bot_api = os.environ.get(
             "MEETING_BOT_API_URL", "http://localhost:3000"
         )
@@ -64,6 +66,7 @@ class MeetingManager:
         self.meeting_monitor = MeetingMonitor(self.meeting_bot_api)
         self.media_converter = MediaConverter()
         self.storage_client = StorageClient(self.gcs_bucket)
+        self.firestore_client = FirestoreClient(self.firestore_database)
         self.transcription_client = TranscriptionClient(
             project_id="aw-gemini-api-central"
         )
@@ -288,6 +291,37 @@ class MeetingManager:
                                     f"✅ Transcription complete! "
                                     f"Words: {transcript_data['word_count']}"
                                 )
+
+                                # Store transcription text in Firestore
+                                try:
+                                    transcription_text = transcript_data.get("transcript", "")
+                                    if transcription_text:
+                                        # Use FS_MEETING_ID if provided, otherwise fall back to MEETING_ID
+                                        firestore_meeting_id = self.fs_meeting_id or self.meeting_id
+                                        if firestore_meeting_id:
+                                            firestore_stored = self.firestore_client.set_transcription(
+                                                firestore_meeting_id, transcription_text
+                                            )
+                                            if firestore_stored:
+                                                logger.info(
+                                                    f"✅ Transcription stored in Firestore for meeting: {firestore_meeting_id}"
+                                                )
+                                            else:
+                                                logger.warning(
+                                                    "Failed to store transcription in Firestore"
+                                                )
+                                        else:
+                                            logger.warning(
+                                                "No meeting ID available for Firestore storage (neither FS_MEETING_ID nor MEETING_ID set)"
+                                            )
+                                    else:
+                                        logger.warning(
+                                            "No transcription text available to store in Firestore"
+                                        )
+                                except Exception as firestore_err:
+                                    logger.exception(f"Error storing transcription in Firestore: {firestore_err}")
+                                    logger.warning("Continuing despite Firestore storage failure")
+
                             else:
                                 logger.warning(
                                     "Transcription completed but no results " "returned"
@@ -372,6 +406,8 @@ class MeetingManager:
         logger.info("Meeting Bot Manager starting...")
         logger.info("=" * 50)
         logger.info(f"Meeting ID: {self.meeting_id}")
+        if self.fs_meeting_id:
+            logger.info(f"Firestore Meeting ID: {self.fs_meeting_id}")
         logger.info(f"Meeting URL: {self.meeting_url}")
         logger.info(f"GCS Bucket: {self.gcs_bucket}")
         logger.info(f"GCS Path: {self.gcs_path}")

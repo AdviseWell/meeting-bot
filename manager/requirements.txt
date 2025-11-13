@@ -1,5 +1,6 @@
 # Google Cloud Platform
 google-cloud-storage==3.4.1
+google-cloud-firestore==2.19.0
 
 # Google GenAI for Gemini transcription
 google-genai==1.48.0

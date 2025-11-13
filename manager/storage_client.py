@@ -5,7 +5,7 @@ Google Cloud Storage Client for uploading processed files
 import logging
 import os
 from typing import Optional
-from google.cloud import storage
+from google.cloud import storage, firestore
 
 logger = logging.getLogger(__name__)
 
@@ -232,4 +232,74 @@ class StorageClient:
 
         except Exception as e:
             logger.error(f"Failed to revoke public access: {e}")
+            return False
+
+
+class FirestoreClient:
+    """Client for storing data in Google Cloud Firestore"""
+
+    def __init__(self, database: str = "(default)"):
+        """
+        Initialize Firestore client
+
+        Args:
+            database: Firestore database ID (default: "(default)")
+        """
+        self.database = database
+        self.client = firestore.Client(database=database)
+
+        logger.info(f"Initialized Firestore client for database: {database}")
+
+    def store_transcription(self, meeting_id: str, transcription_text: str) -> bool:
+        """
+        Store transcription text in Firestore
+
+        Args:
+            meeting_id: Meeting ID to use in the document path
+            transcription_text: The transcription text to store
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            # Create document reference: organizations/advisewell/meetings/{meeting_id}
+            doc_ref = self.client.document(f"organizations/advisewell/meetings/{meeting_id}")
+
+            # Update the transcription field
+            doc_ref.update({
+                "transcription": transcription_text
+            })
+
+            logger.info(f"Successfully stored transcription for meeting: {meeting_id}")
+            return True
+
+        except Exception as e:
+            logger.exception(f"Failed to store transcription in Firestore: {e}")
+            return False
+
+    def set_transcription(self, meeting_id: str, transcription_text: str) -> bool:
+        """
+        Set transcription text in Firestore (creates document if it doesn't exist)
+
+        Args:
+            meeting_id: Meeting ID to use in the document path
+            transcription_text: The transcription text to store
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            # Create document reference: organizations/advisewell/meetings/{meeting_id}
+            doc_ref = self.client.document(f"organizations/advisewell/meetings/{meeting_id}")
+
+            # Set the transcription field (creates document if it doesn't exist)
+            doc_ref.set({
+                "transcription": transcription_text
+            }, merge=True)  # merge=True to preserve other fields
+
+            logger.info(f"Successfully stored transcription for meeting: {meeting_id}")
+            return True
+
+        except Exception as e:
+            logger.exception(f"Failed to store transcription in Firestore: {e}")
             return False
