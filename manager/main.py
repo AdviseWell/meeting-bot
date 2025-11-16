@@ -235,6 +235,18 @@ class MeetingManager:
             transcript_json_path = None
 
             try:
+                # Validate M4A file before upload
+                if not os.path.exists(m4a_path):
+                    logger.error(f"M4A file not found: {m4a_path}")
+                    return False
+
+                m4a_size = os.path.getsize(m4a_path)
+                logger.info(f"M4A file size: {m4a_size} bytes ({m4a_size / (1024 * 1024):.2f} MB)")
+
+                if m4a_size < 1000:  # Less than 1KB is likely empty
+                    logger.error(f"M4A file too small ({m4a_size} bytes) - skipping transcription")
+                    return False
+
                 # Upload the M4A file to GCS first
                 m4a_gcs_path = f"{self.gcs_path}/audio.m4a"
                 m4a_uploaded = self.storage_client.upload_file(m4a_path, m4a_gcs_path)
@@ -248,6 +260,7 @@ class MeetingManager:
                     )
 
                     if audio_url:
+                        logger.info(f"Generated signed URL for audio: {audio_url[:50]}...")
                         logger.info("Transcribing audio with Gemini...")
 
                         try:
@@ -263,6 +276,13 @@ class MeetingManager:
                             )
 
                             if transcript_data:
+                                # Check if transcription looks like sample/demo text
+                                transcript_text = transcript_data.get("transcript", "")
+                                if self._is_sample_transcription(transcript_text):
+                                    logger.warning("⚠️  Transcription appears to be sample/demo text, not actual meeting content")
+                                    logger.warning("This may indicate the audio file was not processed correctly")
+                                    # Continue anyway - better to have sample text than no text
+
                                 import tempfile
 
                                 # Save transcript as TXT
@@ -441,6 +461,36 @@ class MeetingManager:
                 logger.warning("Failed to trigger meeting-bot shutdown")
 
         return exit_code
+
+
+def _is_sample_transcription(transcript_text: str) -> bool:
+    """
+    Check if transcription text appears to be sample/demo content
+
+    Args:
+        transcript_text: The transcription text to check
+
+    Returns:
+        True if it looks like sample text, False otherwise
+    """
+    if not transcript_text:
+        return False
+
+    # Common indicators of sample/demo text
+    sample_indicators = [
+        "[Name Redacted]",
+        "[Company Name Redacted]",
+        "revolutionize how we interact with our customers",
+        "360-degree view of each customer",
+        "CRM system that integrates all our customer touchpoints",
+        "phased rollout, starting with a pilot program in Q3",
+        "sales and customer support departments",
+        "customer satisfaction scores, response times, resolution rates"
+    ]
+
+    # Check if multiple sample indicators are present
+    found_indicators = sum(1 for indicator in sample_indicators if indicator.lower() in transcript_text.lower())
+    return found_indicators >= 3  # If 3+ indicators found, likely sample text
 
 
 def main():

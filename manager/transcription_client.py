@@ -106,10 +106,20 @@ class TranscriptionClient:
                 f"Downloaded {len(audio_bytes)} bytes ({len(audio_bytes) / (1024 * 1024):.2f} MB)"
             )
 
+            # Validate audio file has content
+            if len(audio_bytes) < 1000:  # Less than 1KB is likely empty/corrupted
+                logger.error(f"Audio file too small ({len(audio_bytes)} bytes) - likely empty or corrupted")
+                return None
+
             # Convert to optimized format
             audio_bytes, optimized_mime_type = self._convert_to_optimized_format(
                 audio_bytes, mime_type
             )
+
+            # Validate converted audio
+            if len(audio_bytes) < 1000:
+                logger.error(f"Converted audio file too small ({len(audio_bytes)} bytes) - conversion failed")
+                return None
 
             # Build transcription options
             options = {
