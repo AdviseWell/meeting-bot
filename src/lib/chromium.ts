@@ -77,6 +77,10 @@ async function createBrowserContext(url: string, correlationId: string): Promise
     `--window-size=${size.width},${size.height}`,
     '--auto-accept-this-tab-capture',
     '--enable-features=MediaRecorder',
+    // Audio capture flags - critical for recording meeting audio
+    '--autoplay-policy=no-user-gesture-required',
+    '--use-fake-ui-for-media-stream',
+    '--enable-features=AudioServiceOutOfProcess',
     // Performance optimizations
     '--disable-extensions',
     '--disable-component-extensions-with-background-pages',
