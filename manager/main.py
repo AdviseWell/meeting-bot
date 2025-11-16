@@ -278,7 +278,7 @@ class MeetingManager:
                             if transcript_data:
                                 # Check if transcription looks like sample/demo text
                                 transcript_text = transcript_data.get("transcript", "")
-                                if self._is_sample_transcription(transcript_text):
+                                if _is_sample_transcription(transcript_text):
                                     logger.warning("⚠️  Transcription appears to be sample/demo text, not actual meeting content")
                                     logger.warning("This may indicate the audio file was not processed correctly")
                                     # Continue anyway - better to have sample text than no text
@@ -476,7 +476,7 @@ def _is_sample_transcription(transcript_text: str) -> bool:
     if not transcript_text:
         return False
 
-    # Common indicators of sample/demo text
+    # Common indicators of sample/demo text from the provided example
     sample_indicators = [
         "[Name Redacted]",
         "[Company Name Redacted]",
@@ -485,12 +485,29 @@ def _is_sample_transcription(transcript_text: str) -> bool:
         "CRM system that integrates all our customer touchpoints",
         "phased rollout, starting with a pilot program in Q3",
         "sales and customer support departments",
-        "customer satisfaction scores, response times, resolution rates"
+        "customer satisfaction scores, response times, resolution rates",
+        "I'm the director of operations",
+        "new project that we're going to be launching",
+        "Speaker 1 (*Male*):",
+        "Speaker 2 (*Female*):"
     ]
 
     # Check if multiple sample indicators are present
     found_indicators = sum(1 for indicator in sample_indicators if indicator.lower() in transcript_text.lower())
-    return found_indicators >= 3  # If 3+ indicators found, likely sample text
+
+    # Also check for generic business meeting patterns that suggest sample content
+    generic_patterns = [
+        "thank you [name redacted]",
+        "really excited about this new project",
+        "director of operations",
+        "customer touchpoints",
+        "pilot program in q3"
+    ]
+
+    found_patterns = sum(1 for pattern in generic_patterns if pattern.lower() in transcript_text.lower())
+
+    # If we find 3+ indicators OR 2+ patterns, likely sample text
+    return found_indicators >= 3 or found_patterns >= 2
 
 
 def main():

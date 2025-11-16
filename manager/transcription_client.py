@@ -134,6 +134,9 @@ class TranscriptionClient:
             # Build prompt
             prompt = self._build_transcription_prompt(options, language_code)
 
+            logger.info(f"Sending transcription request with options: {options}")
+            logger.debug(f"Transcription prompt: {prompt[:200]}...")
+
             logger.info("Sending audio to Gemini for transcription...")
 
             # Create audio part
@@ -155,8 +158,17 @@ class TranscriptionClient:
 
             processing_time_ms = int((time.time() - start_time) * 1000)
 
+            # Debug: Log Gemini response details
+            logger.info(f"Gemini response received in {processing_time_ms}ms")
+            logger.debug(f"Gemini response text (first 500 chars): {gemini_response.text[:500]}")
+
             # Extract and parse response
             transcript_text = gemini_response.text
+
+            # Check for no speech detected
+            if transcript_text.strip().upper() == "NO SPEECH DETECTED":
+                logger.warning("Gemini detected no speech in the audio file")
+                return None
             sections = self._parse_transcription_sections(transcript_text, options)
 
             # Build result in expected format
@@ -205,7 +217,8 @@ class TranscriptionClient:
             audio_format = format_map.get(mime_type, "mp3")
             original_size = len(audio_bytes)
 
-            logger.info(f"Converting audio from {audio_format} to optimized format")
+            logger.info(f"Converting audio from {audio_format} ({mime_type}) to optimized format")
+            logger.info(f"Original audio size: {original_size} bytes ({original_size / (1024 * 1024):.2f} MB)")
 
             # Load audio
             audio = AudioSegment.from_file(BytesIO(audio_bytes), format=audio_format)
@@ -241,13 +254,19 @@ class TranscriptionClient:
         self, options: Dict[str, Any], spelling_preference: str = "en-AU"
     ) -> str:
         """Build transcription prompt based on options"""
-        prompt_parts = ["Please analyze the following audio file and provide:"]
+        prompt_parts = [
+            "You are a professional transcription service. Your task is to transcribe the SPEECH content from the provided AUDIO file.",
+            "IMPORTANT: Only transcribe what you actually hear in the audio. Do NOT generate sample text, placeholder content, or fictional conversations.",
+            "If you cannot clearly hear speech in the audio, respond with 'NO SPEECH DETECTED' only.",
+            "",
+            "Please analyze the following audio file and provide:"
+        ]
 
         section_number = 1
 
         if options.get("fullTranscript"):
             prompt_parts.append(
-                f"{section_number}. A complete word-for-word transcript of the audio"
+                f"{section_number}. A complete word-for-word transcript of the ACTUAL SPEECH in the audio file"
             )
             section_number += 1
 
