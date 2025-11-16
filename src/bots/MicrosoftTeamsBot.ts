@@ -321,23 +321,6 @@ export class MicrosoftTeamsBot extends MeetBotBase {
             preferCurrentTab: true,
           });
 
-          // Diagnostic logging for audio capture
-          const audioTracks = stream.getAudioTracks();
-          const videoTracks = stream.getVideoTracks();
-          console.log('=== MS TEAMS AUDIO CAPTURE DIAGNOSTIC ===');
-          console.log('Audio tracks count:', audioTracks.length);
-          console.log('Video tracks count:', videoTracks.length);
-          if (audioTracks.length > 0) {
-            const audioSettings = audioTracks[0].getSettings();
-            console.log('Audio track settings:', JSON.stringify(audioSettings));
-            console.log('Audio track state:', audioTracks[0].readyState);
-            console.log('Audio track enabled:', audioTracks[0].enabled);
-          } else {
-            console.error('❌ CRITICAL: No audio tracks captured by getDisplayMedia!');
-            console.error('Recording will be silent - transcription will return sample text');
-          }
-          console.log('=== END DIAGNOSTIC ===');
-
           let options: MediaRecorderOptions = {};
           if (MediaRecorder.isTypeSupported(primaryMimeType)) {
             console.log(`Media Recorder will use ${primaryMimeType} codecs with ultra quality...`);
@@ -359,9 +342,6 @@ export class MicrosoftTeamsBot extends MeetBotBase {
           const mediaRecorder = new MediaRecorder(stream, { ...options });
 
           mediaRecorder.ondataavailable = async (event: BlobEvent) => {
-            // Log chunk size for diagnostics
-            console.log(`📊 MS Teams chunk: ${event.data.size} bytes (${(event.data.size / 1024).toFixed(1)} KB)`);
-
             if (!event.data.size) {
               console.warn('Received empty chunk...');
               return;
