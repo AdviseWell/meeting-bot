@@ -169,6 +169,31 @@ class TranscriptionClient:
             if transcript_text.strip().upper() == "NO SPEECH DETECTED":
                 logger.warning("Gemini detected no speech in the audio file")
                 return None
+            
+            # Check for common sample text patterns that indicate Gemini generated placeholder content
+            sample_patterns = [
+                "just to confirm, we're going with the revised plan",
+                "i've already circulated the updated document",
+                "are we on track to get those approved",
+                "what about the marketing materials",
+                "speaker 1 (male):",
+                "speaker 2 (female):",
+            ]
+            
+            found_sample_patterns = sum(1 for pattern in sample_patterns if pattern.lower() in transcript_text.lower())
+            
+            if found_sample_patterns >= 2:
+                logger.error("❌ SAMPLE TEXT DETECTED IN TRANSCRIPTION!")
+                logger.error("Gemini returned sample/placeholder text instead of actual transcription")
+                logger.error("This typically means:")
+                logger.error("  1. The audio file is empty or nearly empty")
+                logger.error("  2. The audio file contains no discernible speech")
+                logger.error("  3. The audio file is corrupted or invalid")
+                logger.error("  4. The meeting bot failed to capture actual audio")
+                logger.error("")
+                logger.error("ACTION REQUIRED: Check the meeting bot recording process!")
+                logger.error("The M4A file likely contains no actual meeting audio.")
+            
             sections = self._parse_transcription_sections(transcript_text, options)
 
             # Build result in expected format

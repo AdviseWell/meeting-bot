@@ -220,8 +220,18 @@ class MeetingManager:
 
             logger.info(f"Meeting completed. Recording at: {recording_path}")
 
-            # Step 3: Convert media files
-            logger.info("Step 3: Converting media files...")
+            # Step 3: Upload original WEBM file to GCS (before conversion)
+            logger.info("Step 3: Uploading original WEBM file to GCS...")
+            webm_uploaded = self.storage_client.upload_file(
+                recording_path, f"{self.gcs_path}/recording.webm"
+            )
+            if webm_uploaded:
+                logger.info(f"✅ Original WEBM uploaded to gs://{self.gcs_bucket}/{self.gcs_path}/recording.webm")
+            else:
+                logger.warning("Failed to upload original WEBM file (non-fatal)")
+
+            # Step 4: Convert media files
+            logger.info("Step 4: Converting media files...")
             mp4_path, m4a_path = self.media_converter.convert(recording_path)
             if not mp4_path or not m4a_path:
                 logger.error("Media conversion failed")
@@ -229,8 +239,8 @@ class MeetingManager:
 
             logger.info(f"Conversion complete - MP4: {mp4_path}, M4A: {m4a_path}")
 
-            # Step 4: Transcribe audio using Gemini (optional, non-fatal)
-            logger.info("Step 4: Transcribing audio with Gemini...")
+            # Step 5: Transcribe audio using Gemini (optional, non-fatal)
+            logger.info("Step 5: Transcribing audio with Gemini...")
             transcript_txt_path = None
             transcript_json_path = None
 
@@ -243,9 +253,48 @@ class MeetingManager:
                 m4a_size = os.path.getsize(m4a_path)
                 logger.info(f"M4A file size: {m4a_size} bytes ({m4a_size / (1024 * 1024):.2f} MB)")
 
-                if m4a_size < 1000:  # Less than 1KB is likely empty
-                    logger.error(f"M4A file too small ({m4a_size} bytes) - skipping transcription")
+                # Validate file size is reasonable for a meeting recording
+                # Typical sizes: 1min ~500KB-2MB, 5min ~2-10MB, 30min ~10-50MB
+                if m4a_size < 1000:  # Less than 1KB is definitely empty
+                    logger.error(f"❌ M4A file too small ({m4a_size} bytes) - file is empty or corrupted")
+                    logger.error("This indicates the meeting bot did not capture any audio")
+                    logger.error("Check meeting-bot logs for recording errors")
                     return False
+                
+                if m4a_size < 100000:  # Less than 100KB (~10 seconds of audio)
+                    logger.warning(f"⚠️  M4A file is very small ({m4a_size} bytes / {m4a_size / 1024:.1f} KB)")
+                    logger.warning("This is unusually small for a meeting recording")
+                    logger.warning("Expected: >500KB for 1 minute, >2MB for 5 minutes")
+                    logger.warning("The recording may be incomplete or contain no actual audio")
+                    logger.warning("Proceeding with transcription, but results may be poor...")
+
+                # Verify audio content using pydub
+                try:
+                    from pydub import AudioSegment
+                    audio = AudioSegment.from_file(m4a_path, format="m4a")
+                    duration_ms = len(audio)
+                    duration_sec = duration_ms / 1000
+                    duration_min = duration_sec / 60
+                    
+                    logger.info(f"📊 Audio file duration: {duration_min:.2f} minutes ({duration_sec:.1f} seconds)")
+                    
+                    # Check if duration is reasonable
+                    if duration_sec < 5:
+                        logger.error(f"❌ Audio duration is too short ({duration_sec:.1f}s)")
+                        logger.error("Recording appears to be nearly empty - likely no meeting audio was captured")
+                        logger.error("This will result in sample/placeholder text from Gemini")
+                        # Continue anyway to see what happens
+                    
+                    # Check for silent audio (all samples near zero)
+                    max_amplitude = audio.max
+                    if max_amplitude < 100:  # Very quiet audio
+                        logger.warning(f"⚠️  Audio appears to be silent or nearly silent (max amplitude: {max_amplitude})")
+                        logger.warning("The recording may not contain actual speech")
+                        
+                except ImportError:
+                    logger.warning("pydub not available - skipping audio content validation")
+                except Exception as e:
+                    logger.warning(f"Could not analyze audio file: {e}")
 
                 # Upload the M4A file to GCS first
                 m4a_gcs_path = f"{self.gcs_path}/audio.m4a"
@@ -367,8 +416,8 @@ class MeetingManager:
                 logger.exception(f"Transcription failed (non-fatal): {e}")
                 logger.warning("Continuing with upload despite transcription failure")
 
-            # Step 5: Upload all files to GCS
-            logger.info("Step 5: Uploading all files to GCS...")
+            # Step 6: Upload remaining files to GCS
+            logger.info("Step 6: Uploading remaining files to GCS...")
 
             # Upload video
             mp4_uploaded = self.storage_client.upload_file(

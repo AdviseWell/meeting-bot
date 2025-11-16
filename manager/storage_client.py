@@ -58,8 +58,12 @@ class StorageClient:
                 blob.content_type = content_type
             elif gcs_path.endswith(".mp4"):
                 blob.content_type = "video/mp4"
+            elif gcs_path.endswith(".webm"):
+                blob.content_type = "video/webm"
             elif gcs_path.endswith(".aac"):
                 blob.content_type = "audio/aac"
+            elif gcs_path.endswith(".m4a"):
+                blob.content_type = "audio/mp4"
 
             # Upload the file
             blob.upload_from_filename(local_path)
