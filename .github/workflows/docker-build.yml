@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - develop
+      - backup-pulseaudio-implementation
   pull_request:
     branches:
       - main
