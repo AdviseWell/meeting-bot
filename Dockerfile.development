@@ -2,7 +2,7 @@ FROM node:18
 
 WORKDIR /usr/src/app
 
-# Install system dependencies, including WebGL support
+# Install system dependencies, including WebGL support and PulseAudio for audio
 RUN apt-get update && \
   apt-get install -y \
   ffmpeg \
@@ -24,6 +24,9 @@ RUN apt-get update && \
   xserver-xorg \
   libx11-dev \
   libxext-dev \
+  # PulseAudio for virtual audio device support
+  pulseaudio \
+  pulseaudio-utils \
   # ARM-specific packages (only for ARM64)
   $(if [ "$(dpkg --print-architecture)" = "arm64" ]; then echo "libgles2 libegl1 libwayland-egl1"; fi) \
   && rm -rf /var/lib/apt/lists/*
