@@ -305,32 +305,6 @@ export class MicrosoftTeamsBot extends MeetBotBase {
             return;
           }
 
-          // Enumerate available audio devices to diagnose audio issues
-          console.log('=== AUDIO DEVICE DIAGNOSTIC ===');
-          try {
-            const devices = await navigator.mediaDevices.enumerateDevices();
-            const audioInputs = devices.filter(d => d.kind === 'audioinput');
-            const audioOutputs = devices.filter(d => d.kind === 'audiooutput');
-
-            console.log('Audio INPUT devices (microphones):', audioInputs.length);
-            audioInputs.forEach((device, i) => {
-              console.log(`  Input ${i}: ${device.label || 'unnamed'} (${device.deviceId.substring(0, 8)}...)`);
-            });
-
-            console.log('Audio OUTPUT devices (speakers):', audioOutputs.length);
-            audioOutputs.forEach((device, i) => {
-              console.log(`  Output ${i}: ${device.label || 'unnamed'} (${device.deviceId.substring(0, 8)}...)`);
-            });
-
-            if (audioOutputs.length === 0) {
-              console.error('❌ NO AUDIO OUTPUT DEVICES FOUND - Teams cannot play meeting audio!');
-              console.error('This is likely why audio capture is failing. PulseAudio may not be running.');
-            }
-          } catch (enumError) {
-            console.error('Failed to enumerate devices:', enumError);
-          }
-          console.log('=== END AUDIO DEVICE DIAGNOSTIC ===');
-
           const stream: MediaStream = await (navigator.mediaDevices as any).getDisplayMedia({
             video: {
               frameRate: { ideal: 30, max: 30 }  // 30 fps is optimal for meetings

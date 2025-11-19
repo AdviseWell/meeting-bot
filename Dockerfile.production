@@ -4,7 +4,7 @@ FROM node:18
 # Set the working directory
 WORKDIR /usr/src/app
 
-# Install system dependencies, including WebGL support and PulseAudio for audio
+# Install system dependencies, including WebGL support
 RUN apt-get update && \
   apt-get install -y \
   ffmpeg \
@@ -27,9 +27,6 @@ RUN apt-get update && \
   libx11-dev \
   libxext-dev \
   dos2unix \
-  # PulseAudio for virtual audio device support
-  pulseaudio \
-  pulseaudio-utils \
   # ARM-specific packages (only for ARM64)
   $(if [ "$(dpkg --print-architecture)" = "arm64" ]; then echo "libgles2 libegl1 libwayland-egl1"; fi) \
   && rm -rf /var/lib/apt/lists/*
@@ -50,10 +47,9 @@ RUN wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | gpg --dearm
 # Create symlink for Playwright compatibility (ARM64 only)
 RUN if [ "$(dpkg --print-architecture)" = "arm64" ]; then ln -sf /usr/bin/chromium /usr/bin/google-chrome; fi
 
-# Create non-root user with a home directory and add to pulse-access group
+# Create non-root user with a home directory
 RUN groupadd -g 1001 nodejs && \
-    useradd -m -d /home/nodejs -r -u 1001 -g nodejs nodejs && \
-    usermod -aG pulse-access nodejs
+    useradd -m -d /home/nodejs -r -u 1001 -g nodejs nodejs
 
 # Copy Chrome policy to allow protocol launching
 RUN mkdir -p /etc/opt/chrome/policies/managed

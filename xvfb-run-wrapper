@@ -7,19 +7,7 @@ trap 'echo "sending SIGABRT to child"; kill -SIGABRT "$child" 2>/dev/null' SIGTE
 Xvfb :99 -screen 0 1280x720x24 &
 xvfb_pid=$!
 
-# Start PulseAudio daemon with virtual audio sink
-pulseaudio -D --exit-idle-time=-1 --system --disallow-exit --disallow-module-loading=0 2>/dev/null || \
-pulseaudio -D --exit-idle-time=-1 2>/dev/null
-
-# Create virtual audio sink and source for Chrome to use
-pactl load-module module-null-sink sink_name=DummyOutput sink_properties=device.description="Virtual_Sink" 2>/dev/null
-pactl load-module module-virtual-source source_name=VirtualMic master=DummyOutput.monitor 2>/dev/null
-
-# Set default audio devices
-pacmd set-default-sink DummyOutput 2>/dev/null
-pacmd set-default-source VirtualMic 2>/dev/null
-
-# Wait a moment for Xvfb and PulseAudio to start
+# Wait a moment for Xvfb to start
 sleep 1
 
 # Start your application

@@ -69,6 +69,8 @@ async function createBrowserContext(url: string, correlationId: string): Promise
   const browserArgs: string[] = [
     '--enable-usermedia-screen-capturing',
     '--allow-http-screen-capture',
+    '--auto-select-desktop-capture-source=Entire screen',
+    '--auto-select-tab-capture-source-by-title=Microsoft Teams',
     '--no-sandbox',
     '--disable-setuid-sandbox',
     '--disable-web-security',
@@ -93,7 +95,6 @@ async function createBrowserContext(url: string, correlationId: string): Promise
     '--disable-prompt-on-repost',
     '--disable-domain-reliability',
     '--disable-component-update',
-    '--autoplay-policy=no-user-gesture-required',
   ];
 
   const browser = await launchBrowserWithTimeout(

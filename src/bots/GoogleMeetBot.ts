@@ -70,14 +70,6 @@ export class GoogleMeetBot extends MeetBotBase {
 
     this.page = await createBrowserContext(url, this._correlationId);
 
-    // Attach CDP session for detailed media logging
-    const client = await this.page.context().newCDPSession(this.page);
-    await client.send('Log.enable');
-    client.on('Log.entryAdded', (entry) => {
-      if (entry.entry.source === 'network' || entry.entry.source === 'other') return;
-      this._logger.info('CDP Log:', entry);
-    });
-
     this._logger.info('Navigating to Google Meet URL...');
     await this.page.goto(url, { waitUntil: 'domcontentloaded' });
 
@@ -439,88 +431,25 @@ export class GoogleMeetBot extends MeetBotBase {
             return;
           }
 
-          let stream: MediaStream;
-          try {
-            stream = await (navigator.mediaDevices as any).getDisplayMedia({
-              video: {
-                frameRate: { ideal: 30, max: 60 }  // 30 fps is optimal for meetings
-              },
-              audio: {
-                autoGainControl: false,
-                channels: 2,
-                channelCount: 2,
-                echoCancellation: false,
-                noiseSuppression: false,
-                sampleRate: 48000,  // 48 kHz sample rate for professional audio quality
-                sampleSize: 16,     // 16-bit audio depth
-              },
-              systemAudio: 'include',
-              suppressLocalAudioPlayback: false,
-              preferCurrentTab: true,
-            });
-          } catch (err) {
-            console.error('Initial getDisplayMedia failed', err);
-            return;
-          }
+          const stream: MediaStream = await (navigator.mediaDevices as any).getDisplayMedia({
+            video: {
+              frameRate: { ideal: 30, max: 60 }  // 30 fps is optimal for meetings
+            },
+            audio: {
+              autoGainControl: false,
+              channels: 2,
+              channelCount: 2,
+              echoCancellation: false,
+              noiseSuppression: false,
+              sampleRate: 48000,  // 48 kHz sample rate for professional audio quality
+              sampleSize: 16,     // 16-bit audio depth
+            },
+            preferCurrentTab: true,
+          });
 
-          // Retry logic for audio track capture
-          let audioTracks = stream.getAudioTracks();
-          let attempts = 0;
-          const maxAudioAttempts = 3;
-          
-          // Ensure tab is in focus before retrying
-          if (audioTracks.length === 0) {
-             console.log('Attempting to focus window before audio retry...');
-             window.focus();
-             document.body.click();
-          }
-
-          while (audioTracks.length === 0 && attempts < maxAudioAttempts) {
-             console.warn(`Attempt ${attempts + 1}: No audio tracks found. Retrying capture in 1s...`);
-             await new Promise(resolve => setTimeout(resolve, 1000));
-             
-             // Stop previous stream tracks to be clean
-             stream.getTracks().forEach(t => t.stop());
-
-             try {
-               // Re-request the media stream
-               stream = await (navigator.mediaDevices as any).getDisplayMedia({
-                 video: { frameRate: { ideal: 30, max: 60 } },
-                 audio: {
-                   autoGainControl: false,
-                   channels: 2,
-                   echoCancellation: false,
-                   noiseSuppression: false,
-                   sampleRate: 48000,
-                   sampleSize: 16,
-                 },
-                 systemAudio: 'include',
-                 suppressLocalAudioPlayback: false,
-                 preferCurrentTab: true,
-               });
-               
-               audioTracks = stream.getAudioTracks();
-             } catch(e) {
-               console.error('Retry capture failed', e);
-             }
-             attempts++;
-          }
-
+          // Check if we actually got audio tracks
+          const audioTracks = stream.getAudioTracks();
           const hasAudioTracks = audioTracks.length > 0;
-          console.log('=== GOOGLE MEET AUDIO CAPTURE DIAGNOSTIC ===');
-          console.log('Audio tracks count:', audioTracks.length);
-          console.log('Video tracks count:', stream.getVideoTracks().length);
-          if (hasAudioTracks) {
-            const audioSettings = audioTracks[0].getSettings();
-            console.log('Audio track settings:', JSON.stringify(audioSettings));
-            console.log('Audio track state:', audioTracks[0].readyState);
-            console.log('Audio track enabled:', audioTracks[0].enabled);
-            console.log('Audio track muted:', audioTracks[0].muted);
-          } else {
-            console.error('❌ CRITICAL: No audio tracks captured by getDisplayMedia!');
-            console.error('Recording will be silent - transcription will return sample text');
-          }
-          console.log('=== END DIAGNOSTIC ===');
 
           if (!hasAudioTracks) {
             console.warn('No audio tracks available for silence detection. Will rely only on presence detection.');

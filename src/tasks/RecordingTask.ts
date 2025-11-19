@@ -63,77 +63,17 @@ export class RecordingTask extends Task<null, void> {
             return;
           }
 
-          let stream: MediaStream;
-          try {
-             stream = await (navigator.mediaDevices as any).getDisplayMedia({
-              video: {
-                frameRate: { ideal: 30, max: 60 }  // 30 fps is optimal for meetings
-              },
-              audio: {
-                autoGainControl: false,
-                channels: 2,
-                channelCount: 2,
-                echoCancellation: false,
-                noiseSuppression: false,
-                sampleRate: 48000,  // 48 kHz sample rate for professional audio quality
-                sampleSize: 16,     // 16-bit audio depth
-                suppressLocalAudioPlayback: false,  // Prevent audio muting
-              },
-              systemAudio: 'include',  // Explicitly request system audio
-              preferCurrentTab: true,
-            });
-          } catch(err) {
-             console.error('MediaDevices or getDisplayMedia failed', err);
-             return;
-          }
-
-          // Diagnostic logging for audio capture
-          let audioTracks = stream.getAudioTracks();
-          
-          // Retry logic if no audio tracks
-          let attempts = 0;
-          const maxAudioAttempts = 3;
-          while (audioTracks.length === 0 && attempts < maxAudioAttempts) {
-             console.warn(`Attempt ${attempts + 1}: No audio tracks found in generic recording task. Retrying...`);
-             await new Promise(resolve => setTimeout(resolve, 1000));
-             stream.getTracks().forEach(t => t.stop());
-             try {
-               stream = await (navigator.mediaDevices as any).getDisplayMedia({
-                 video: true,
-                 audio: {
-                   autoGainControl: false,
-                   channels: 2,
-                   channelCount: 2,
-                   echoCancellation: false,
-                   noiseSuppression: false,
-                   sampleRate: 48000,
-                   sampleSize: 16,
-                 },
-                 systemAudio: 'include',  // Explicitly request system audio
-                 suppressLocalAudioPlayback: false,  // Prevent audio muting
-                 preferCurrentTab: true,
-               });
-               audioTracks = stream.getAudioTracks();
-             } catch(e) {
-               console.error('Retry capture failed', e);
-             }
-             attempts++;
-          }
-
-          const videoTracks = stream.getVideoTracks();
-          console.log('=== ZOOM/GENERIC AUDIO CAPTURE DIAGNOSTIC ===');
-          console.log('Audio tracks count:', audioTracks.length);
-          console.log('Video tracks count:', videoTracks.length);
-          if (audioTracks.length > 0) {
-            const audioSettings = audioTracks[0].getSettings();
-            console.log('Audio track settings:', JSON.stringify(audioSettings));
-            console.log('Audio track state:', audioTracks[0].readyState);
-            console.log('Audio track enabled:', audioTracks[0].enabled);
-          } else {
-            console.error('❌ CRITICAL: No audio tracks captured by getDisplayMedia!');
-            console.error('Recording will be silent - transcription will return sample text');
-          }
-          console.log('=== END DIAGNOSTIC ===');
+          const stream: MediaStream = await (navigator.mediaDevices as any).getDisplayMedia({
+            video: true,
+            audio: {
+              autoGainControl: false,
+              channels: 2,
+              channelCount: 2,
+              echoCancellation: false,
+              noiseSuppression: false,
+            },
+            preferCurrentTab: true,
+          });
 
           let options: MediaRecorderOptions = {};
           if (MediaRecorder.isTypeSupported(primaryMimeType)) {
