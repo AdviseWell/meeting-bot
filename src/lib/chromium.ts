@@ -79,6 +79,9 @@ async function createBrowserContext(url: string, correlationId: string): Promise
     `--window-size=${size.width},${size.height}`,
     '--auto-accept-this-tab-capture',
     '--enable-features=MediaRecorder',
+    // Disable crash reporting to prevent SIGTRAP issues
+    '--disable-crash-reporter',
+    '--disable-breakpad',
     // Performance optimizations
     '--disable-extensions',
     '--disable-component-extensions-with-background-pages',
