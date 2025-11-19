@@ -7,21 +7,47 @@ trap 'echo "sending SIGABRT to child"; kill -SIGABRT "$child" 2>/dev/null; kill 
 echo "Starting PulseAudio..."
 pulseaudio --start --exit-idle-time=-1 --log-target=stderr &
 pulse_pid=$!
-sleep 2
+
+# Wait for PulseAudio to be ready (check if server is accepting connections)
+echo "Waiting for PulseAudio to be ready..."
+for i in {1..10}; do
+    if pactl info &>/dev/null; then
+        echo "PulseAudio is ready"
+        break
+    fi
+    echo "Waiting for PulseAudio... attempt $i/10"
+    sleep 1
+done
+
+# Verify PulseAudio is actually ready
+if ! pactl info &>/dev/null; then
+    echo "ERROR: PulseAudio failed to start properly"
+    exit 1
+fi
 
 # Load a dummy output module (null sink) for audio to flow through
 echo "Loading PulseAudio null sink..."
 pactl load-module module-null-sink sink_name=dummy_output sink_properties=device.description="Virtual_Dummy_Output"
 pactl set-default-sink dummy_output
 
+# Verify the sink was created
+if ! pactl list sinks | grep -q "dummy_output"; then
+    echo "ERROR: Failed to create dummy_output sink"
+    exit 1
+fi
+
+echo "PulseAudio setup complete"
+
 # Start Xvfb
+echo "Starting Xvfb..."
 Xvfb :99 -screen 0 1280x720x24 &
 xvfb_pid=$!
 
-# Wait a moment for Xvfb to start
-sleep 1
+# Wait for Xvfb to start
+sleep 2
 
 # Start your application
+echo "Starting application..."
 DISPLAY=:99 "$@" &
 child=$!
 
@@ -33,7 +59,7 @@ child_exit_code=$?
 # Cleanup processes
 echo "Cleaning up processes..."
 kill -TERM "$xvfb_pid" 2>/dev/null
-wait "$xvfb_pid"
+wait "$xvfb_pid" 2>/dev/null
 
 pulseaudio --kill 2>/dev/null
 kill -TERM "$pulse_pid" 2>/dev/null
