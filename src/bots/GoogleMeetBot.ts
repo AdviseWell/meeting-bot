@@ -42,33 +42,18 @@ export class GoogleMeetBot extends MeetBotBase {
       await this.joinMeeting({ url, name, bearerToken, teamId, timezone, userId, eventId, botId, uploader, pushState });
 
       // Finish the upload from the temp video
-      let uploadResult = false;
-      try {
-        uploadResult = await handleUpload();
-      } catch (uploadError) {
-        this._logger.warn('Upload failed, but recording was successful', { uploadError });
-      }
+      const uploadResult = await handleUpload();
 
       if (_state.includes('finished') && !uploadResult) {
         _state.splice(_state.indexOf('finished'), 1, 'failed');
       }
 
-      // Try to update status, but don't fail if it doesn't work
-      try {
-        await patchBotStatus({ botId, eventId, provider: 'google', status: _state, token: bearerToken }, this._logger);
-      } catch (statusError) {
-        this._logger.warn('Status update failed, but continuing anyway', { statusError });
-      }
+      await patchBotStatus({ botId, eventId, provider: 'google', status: _state, token: bearerToken }, this._logger);
     } catch (error) {
       if (!_state.includes('finished'))
         _state.push('failed');
 
-      // Try to update status, but don't fail if it doesn't work
-      try {
-        await patchBotStatus({ botId, eventId, provider: 'google', status: _state, token: bearerToken }, this._logger);
-      } catch (statusError) {
-        this._logger.warn('Status update failed during error handling', { statusError });
-      }
+      await patchBotStatus({ botId, eventId, provider: 'google', status: _state, token: bearerToken }, this._logger);
 
       if (error instanceof WaitingAtLobbyRetryError) {
         await handleWaitingAtLobbyError({ token: bearerToken, botId, eventId, provider: 'google', error }, this._logger);
@@ -479,40 +464,40 @@ export class GoogleMeetBot extends MeetBotBase {
 
           // Ensure tab is in focus before retrying
           if (audioTracks.length === 0) {
-            console.log('Attempting to focus window before audio retry...');
-            window.focus();
-            document.body.click();
+             console.log('Attempting to focus window before audio retry...');
+             window.focus();
+             document.body.click();
           }
 
           while (audioTracks.length === 0 && attempts < maxAudioAttempts) {
-            console.warn(`Attempt ${attempts + 1}: No audio tracks found. Retrying capture in 1s...`);
-            await new Promise(resolve => setTimeout(resolve, 1000));
+             console.warn(`Attempt ${attempts + 1}: No audio tracks found. Retrying capture in 1s...`);
+             await new Promise(resolve => setTimeout(resolve, 1000));
 
-            // Stop previous stream tracks to be clean
-            stream.getTracks().forEach(t => t.stop());
+             // Stop previous stream tracks to be clean
+             stream.getTracks().forEach(t => t.stop());
 
-            try {
-              // Re-request the media stream
-              stream = await (navigator.mediaDevices as any).getDisplayMedia({
-                video: { frameRate: { ideal: 30, max: 60 } },
-                audio: {
-                  autoGainControl: false,
-                  channels: 2,
-                  echoCancellation: false,
-                  noiseSuppression: false,
-                  sampleRate: 48000,
-                  sampleSize: 16,
-                },
-                systemAudio: 'include',
-                suppressLocalAudioPlayback: false,
-                preferCurrentTab: true,
-              });
+             try {
+               // Re-request the media stream
+               stream = await (navigator.mediaDevices as any).getDisplayMedia({
+                 video: { frameRate: { ideal: 30, max: 60 } },
+                 audio: {
+                   autoGainControl: false,
+                   channels: 2,
+                   echoCancellation: false,
+                   noiseSuppression: false,
+                   sampleRate: 48000,
+                   sampleSize: 16,
+                 },
+                 systemAudio: 'include',
+                 suppressLocalAudioPlayback: false,
+                 preferCurrentTab: true,
+               });
 
-              audioTracks = stream.getAudioTracks();
-            } catch (e) {
-              console.error('Retry capture failed', e);
-            }
-            attempts++;
+               audioTracks = stream.getAudioTracks();
+             } catch(e) {
+               console.error('Retry capture failed', e);
+             }
+             attempts++;
           }
 
           const hasAudioTracks = audioTracks.length > 0;

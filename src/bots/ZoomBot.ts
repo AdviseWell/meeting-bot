@@ -51,30 +51,15 @@ export class ZoomBot extends BotBase {
     try {
       const pushState = (st: BotStatus) => _state.push(st);
       await this.joinMeeting({ url, name, bearerToken, teamId, timezone, userId, eventId, botId, pushState, uploader });
-
-      // Try to update status, but don't fail if it doesn't work
-      try {
-        await patchBotStatus({ botId, eventId, provider: 'zoom', status: _state, token: bearerToken }, this._logger);
-      } catch (statusError) {
-        this._logger.warn('Status update failed, but continuing anyway', { statusError });
-      }
+      await patchBotStatus({ botId, eventId, provider: 'zoom', status: _state, token: bearerToken }, this._logger);
 
       // Finish the upload from the temp video
-      try {
-        await handleUpload();
-      } catch (uploadError) {
-        this._logger.warn('Upload failed, but recording was successful', { uploadError });
-      }
+      await handleUpload();
     } catch (error) {
       if (!_state.includes('finished'))
         _state.push('failed');
 
-      // Try to update status, but don't fail if it doesn't work
-      try {
-        await patchBotStatus({ botId, eventId, provider: 'zoom', status: _state, token: bearerToken }, this._logger);
-      } catch (statusError) {
-        this._logger.warn('Status update failed during error handling', { statusError });
-      }
+      await patchBotStatus({ botId, eventId, provider: 'zoom', status: _state, token: bearerToken }, this._logger);
 
       if (error instanceof WaitingAtLobbyRetryError) {
         await handleWaitingAtLobbyError({ token: bearerToken, botId, eventId, provider: 'zoom', error }, this._logger);
