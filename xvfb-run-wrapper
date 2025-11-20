@@ -43,11 +43,22 @@ echo "Loading PulseAudio null sink..."
 pactl load-module module-null-sink sink_name=dummy_output sink_properties=device.description="Virtual_Dummy_Output"
 pactl set-default-sink dummy_output
 
+# Set volume to 100% and unmute (critical - sinks may start muted or at 0%)
+echo "Setting audio volume to 100%..."
+pactl set-sink-volume dummy_output 100%
+pactl set-sink-mute dummy_output 0
+
+# Also set the monitor source (what Chrome will capture from) to 100%
+pactl set-source-volume dummy_output.monitor 100%
+pactl set-source-mute dummy_output.monitor 0
+
 # Verify the sink was created
 if ! pactl list sinks | grep -q "dummy_output"; then
     echo "ERROR: Failed to create dummy_output sink"
     exit 1
 fi
+
+echo "PulseAudio audio levels set to 100% (unmuted)"
 
 echo "PulseAudio setup complete"
 

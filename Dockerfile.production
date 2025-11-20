@@ -61,6 +61,11 @@ RUN mkdir -p /home/nodejs/.config/pulse && \
     echo "enable-remixing = yes" >> /home/nodejs/.config/pulse/daemon.conf && \
     echo "remixing-use-all-sink-channels = yes" >> /home/nodejs/.config/pulse/daemon.conf && \
     echo "exit-idle-time = -1" >> /home/nodejs/.config/pulse/daemon.conf && \
+    echo "flat-volumes = yes" >> /home/nodejs/.config/pulse/daemon.conf && \
+    echo "# Client config for volume defaults" > /home/nodejs/.config/pulse/client.conf && \
+    echo "autospawn = no" >> /home/nodejs/.config/pulse/client.conf && \
+    echo "default-sink-volume = 65536" >> /home/nodejs/.config/pulse/client.conf && \
+    echo "default-source-volume = 65536" >> /home/nodejs/.config/pulse/client.conf && \
     chown -R nodejs:nodejs /home/nodejs/.config/pulse
 
 # Copy Chrome policy to allow protocol launching
