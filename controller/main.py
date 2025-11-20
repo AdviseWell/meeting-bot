@@ -261,7 +261,15 @@ class MeetingController:
                 volume_mounts=[
                     client.V1VolumeMount(
                         name="recordings", mount_path="/usr/src/app/dist/_tempvideo"
-                    )
+                    ),
+                    # Mount shared memory for Chrome (prevents crashes)
+                    client.V1VolumeMount(
+                        name="dshm", mount_path="/dev/shm"
+                    ),
+                    # Mount tmp for XDG and PulseAudio runtime directories
+                    client.V1VolumeMount(
+                        name="tmp", mount_path="/tmp"
+                    ),
                 ],
                 resources=client.V1ResourceRequirements(
                     requests={
@@ -315,10 +323,26 @@ class MeetingController:
                     priority_class_name="high-priority",
                     containers=[meeting_bot_container, manager_container],
                     service_account_name=self.job_service_account,
+                    # Security context for audio/video capture
+                    security_context=client.V1PodSecurityContext(
+                        run_as_user=1001,  # nodejs user
+                        run_as_group=1001,
+                        fs_group=1001,  # Ensures volume mounts have correct permissions
+                    ),
                     volumes=[
                         client.V1Volume(
                             name="recordings", empty_dir=client.V1EmptyDirVolumeSource()
-                        )
+                        ),
+                        # Shared memory for Chrome
+                        client.V1Volume(
+                            name="dshm",
+                            empty_dir=client.V1EmptyDirVolumeSource(medium="Memory", size_limit="2Gi")
+                        ),
+                        # Temporary storage for runtime dirs (XDG, PulseAudio)
+                        client.V1Volume(
+                            name="tmp",
+                            empty_dir=client.V1EmptyDirVolumeSource()
+                        ),
                     ],
                 ),
             )
