@@ -104,11 +104,7 @@ async function createBrowserContext(url: string, correlationId: string): Promise
     async () => await chromium.launch({
       headless: false,
       args: browserArgs,
-      ignoreDefaultArgs: ['--mute-audio', '--enable-crash-reporter'],
-      env: {
-        ...process.env,
-        CHROME_CRASHPAD_PIPE_NAME: '',  // Disable crashpad pipe
-      },
+      ignoreDefaultArgs: ['--mute-audio'],
       executablePath: config.chromeExecutablePath,
     }),
     60000,

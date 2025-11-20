@@ -80,7 +80,14 @@ RUN npx playwright install --with-deps
 COPY . .
 
 # Set environment variables
-ENV NODE_ENV=production
+ENV NODE_ENV=production \
+    XDG_CONFIG_HOME=/tmp/chrome/config \
+    XDG_CACHE_HOME=/tmp/chrome/cache \
+    XDG_RUNTIME_DIR=/tmp/chrome/runtime
+
+# Create XDG directories for Chrome/Chromium (prevents crashpad handler crash)
+RUN mkdir -p /tmp/chrome/config /tmp/chrome/cache /tmp/chrome/runtime && \
+    chmod -R 777 /tmp/chrome
 
 # Set xvfb-run-wrapper permissions
 RUN dos2unix /usr/src/app/xvfb-run-wrapper && \
