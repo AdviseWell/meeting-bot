@@ -326,6 +326,19 @@ class MeetingMonitor:
                 shutil.copy2(source_path, temp_path)
                 logger.info(f"✅ Recording copied successfully")
                 
+                # Also copy WAV backup file if it exists
+                wav_files = glob.glob(f"{recording_dir}/backup_*.wav")
+                if wav_files:
+                    wav_source = wav_files[0]
+                    wav_filename = os.path.basename(wav_source)
+                    wav_temp_path = os.path.join(temp_dir, wav_filename)
+                    
+                    logger.info(f"📋 Copying WAV backup to temp directory: {wav_temp_path}")
+                    shutil.copy2(wav_source, wav_temp_path)
+                    logger.info(f"✅ WAV backup copied successfully ({os.path.getsize(wav_source) / (1024*1024):.2f} MB)")
+                else:
+                    logger.debug(f"No WAV backup file found in {recording_dir}")
+                
                 return temp_path
             
             # Check if job failed
