@@ -320,6 +320,8 @@ export class MicrosoftTeamsBot extends MeetBotBase {
               sampleRate: 48000,  // 48 kHz sample rate for professional audio quality
               sampleSize: 16,     // 16-bit audio depth
             },
+            systemAudio: 'include',
+            suppressLocalAudioPlayback: false,
             preferCurrentTab: true,
           });
 

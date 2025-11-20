@@ -79,6 +79,10 @@ async function createBrowserContext(url: string, correlationId: string): Promise
     `--window-size=${size.width},${size.height}`,
     '--auto-accept-this-tab-capture',
     '--enable-features=MediaRecorder',
+    // Audio capture flags - CRITICAL for getDisplayMedia audio
+    '--autoplay-policy=no-user-gesture-required',
+    '--allow-running-insecure-content',
+    '--disable-features=AudioServiceOutOfProcess',
     // Disable crash reporting to prevent SIGTRAP issues
     '--disable-crash-reporter',
     '--disable-breakpad',
