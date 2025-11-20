@@ -182,50 +182,6 @@ class MeetingManager:
                 f"Missing required environment variables: {', '.join(missing)}"
             )
 
-    def _find_wav_backup(self, recording_path: str) -> Optional[str]:
-        """
-        Find the WAV backup file corresponding to a recording.
-        
-        The WAV backup is created by PulseAudio recorder with pattern:
-        [outputDir]/[userId]/backup_[tempFileId].wav
-        
-        Since we don't have direct access to userId and tempFileId here,
-        we look in the same directory as the recording for any backup_*.wav file.
-        
-        Args:
-            recording_path: Path to the WEBM recording file
-            
-        Returns:
-            Path to WAV backup file if found, None otherwise
-        """
-        import glob
-        
-        try:
-            recording_dir = os.path.dirname(recording_path)
-            
-            # Look for backup_*.wav files in the same directory
-            wav_pattern = os.path.join(recording_dir, "backup_*.wav")
-            wav_files = glob.glob(wav_pattern)
-            
-            if wav_files:
-                # Return the first match (should only be one per recording)
-                wav_path = wav_files[0]
-                
-                # Verify file exists and has content
-                if os.path.exists(wav_path) and os.path.getsize(wav_path) > 1024:
-                    logger.info(f"Found valid WAV backup: {wav_path} ({os.path.getsize(wav_path)} bytes)")
-                    return wav_path
-                else:
-                    logger.warning(f"Found WAV backup but it's too small or empty: {wav_path}")
-                    return None
-            else:
-                logger.debug(f"No WAV backup files found in {recording_dir}")
-                return None
-                
-        except Exception as e:
-            logger.warning(f"Error searching for WAV backup: {e}")
-            return None
-
     def process_meeting(self) -> bool:
         """
         Process the meeting recording job
@@ -264,7 +220,7 @@ class MeetingManager:
 
             logger.info(f"Meeting completed. Recording at: {recording_path}")
 
-            # Step 3: Upload original WEBM file and WAV backup to GCS (before conversion)
+            # Step 3: Upload original WEBM file to GCS (before conversion)
             logger.info("Step 3: Uploading original WEBM file to GCS...")
             webm_uploaded = self.storage_client.upload_file(
                 recording_path, f"{self.gcs_path}/recording.webm"
@@ -273,21 +229,6 @@ class MeetingManager:
                 logger.info(f"✅ Original WEBM uploaded to gs://{self.gcs_bucket}/{self.gcs_path}/recording.webm")
             else:
                 logger.warning("Failed to upload original WEBM file (non-fatal)")
-
-            # Step 3.5: Upload WAV backup file if it exists
-            logger.info("Step 3.5: Checking for WAV backup audio file...")
-            wav_backup_path = self._find_wav_backup(recording_path)
-            if wav_backup_path:
-                logger.info(f"Found WAV backup at: {wav_backup_path}")
-                wav_uploaded = self.storage_client.upload_file(
-                    wav_backup_path, f"{self.gcs_path}/backup_audio.wav"
-                )
-                if wav_uploaded:
-                    logger.info(f"✅ WAV backup uploaded to gs://{self.gcs_bucket}/{self.gcs_path}/backup_audio.wav")
-                else:
-                    logger.warning("Failed to upload WAV backup file (non-fatal)")
-            else:
-                logger.info("No WAV backup file found (this is normal if PulseAudio recording is disabled)")
 
             # Step 4: Convert media files
             logger.info("Step 4: Converting media files...")

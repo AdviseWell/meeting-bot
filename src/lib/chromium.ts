@@ -83,8 +83,9 @@ async function createBrowserContext(url: string, correlationId: string): Promise
     '--autoplay-policy=no-user-gesture-required',
     '--allow-running-insecure-content',
     '--disable-features=AudioServiceOutOfProcess',
-    // Auto-grant media permissions (without creating fake video devices)
+    // Fake audio devices for containerized environments (NO REAL AUDIO HARDWARE)
     '--use-fake-ui-for-media-stream',
+    '--use-fake-device-for-media-stream',
     '--allow-file-access-from-files',
     // Disable crash reporting to prevent SIGTRAP issues
     '--disable-crash-reporter',
