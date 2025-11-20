@@ -7,9 +7,14 @@ trap 'echo "sending SIGABRT to child"; kill -SIGABRT "$child" 2>/dev/null; kill 
 # This prevents the "chrome_crashpad_handler: --database is required" crash
 export XDG_CONFIG_HOME=/tmp/chrome/config
 export XDG_CACHE_HOME=/tmp/chrome/cache
-export XDG_RUNTIME_DIR=/tmp/chrome/runtime
-mkdir -p "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_RUNTIME_DIR"
-echo "XDG directories configured: $XDG_CONFIG_HOME, $XDG_CACHE_HOME, $XDG_RUNTIME_DIR"
+mkdir -p "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME"
+echo "XDG directories configured: $XDG_CONFIG_HOME, $XDG_CACHE_HOME"
+
+# Set up separate runtime directory for PulseAudio (must be owned by current user)
+export XDG_RUNTIME_DIR=/tmp/pulse-runtime
+mkdir -p "$XDG_RUNTIME_DIR"
+chmod 700 "$XDG_RUNTIME_DIR"
+echo "PulseAudio runtime directory: $XDG_RUNTIME_DIR"
 
 # Start PulseAudio in daemon mode with a dummy sink for audio capture
 echo "Starting PulseAudio..."
