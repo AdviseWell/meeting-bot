@@ -11,7 +11,7 @@ export class RecordingTask extends Task<null, void> {
   private duration: number;
   private inactivityLimit: number;
   private slightlySecretId: string;
-  
+
   constructor(
     userId: string,
     teamId: string,
@@ -72,8 +72,34 @@ export class RecordingTask extends Task<null, void> {
               echoCancellation: false,
               noiseSuppression: false,
             },
+            systemAudio: 'include',
+            suppressLocalAudioPlayback: false,
             preferCurrentTab: true,
           });
+
+          // DIAGNOSTIC: Log audio track details
+          const audioTracks = stream.getAudioTracks();
+          console.log('========== AUDIO CAPTURE DIAGNOSTICS ==========');
+          console.log(`Total audio tracks: ${audioTracks.length}`);
+          audioTracks.forEach((track, idx) => {
+            const settings = track.getSettings();
+            console.log(`Audio Track ${idx}:`, {
+              id: track.id,
+              kind: track.kind,
+              label: track.label,
+              enabled: track.enabled,
+              muted: track.muted,
+              readyState: track.readyState,
+              settings: {
+                sampleRate: settings.sampleRate,
+                channelCount: settings.channelCount,
+                echoCancellation: settings.echoCancellation,
+                autoGainControl: settings.autoGainControl,
+                noiseSuppression: settings.noiseSuppression,
+              }
+            });
+          });
+          console.log('===============================================');
 
           let options: MediaRecorderOptions = {};
           if (MediaRecorder.isTypeSupported(primaryMimeType)) {
@@ -137,7 +163,7 @@ export class RecordingTask extends Task<null, void> {
               try {
                 // Detect and click blocking "OK" buttons
                 const okButton = Array.from(dom.querySelectorAll('button'))
-                    .filter((el) => el?.innerText?.trim()?.match(/^OK/i));
+                  .filter((el) => el?.innerText?.trim()?.match(/^OK/i));
                 if (okButton && okButton[0]) {
                   console.log('It appears that meeting has been ended. Click "OK" and verify if meeting is still in progress...', { userId });
                   let shouldEndMeeting = false;
@@ -166,7 +192,7 @@ export class RecordingTask extends Task<null, void> {
 
                 // Detect number of participants
                 const participantsMatch = Array.from(dom.querySelectorAll('button'))
-                    .filter((el) => el?.innerText?.trim()?.match(/^\d+/));
+                  .filter((el) => el?.innerText?.trim()?.match(/^\d+/));
                 const text = participantsMatch && participantsMatch.length > 0 ? participantsMatch[0].innerText.trim() : null;
                 if (!text) {
                   console.error('Zoom presence detection is probably not working on user:', userId, teamId);
@@ -259,11 +285,11 @@ export class RecordingTask extends Task<null, void> {
         // Start the recording
         await startRecording();
       },
-      { 
+      {
         teamId: this.teamId,
         duration: this.duration,
-        inactivityLimit: this.inactivityLimit, 
-        userId: this.userId, 
+        inactivityLimit: this.inactivityLimit,
+        userId: this.userId,
         slightlySecretId: this.slightlySecretId,
         activateInactivityDetectionAfterMinutes: config.activateInactivityDetectionAfter,
         activateInactivityDetectionAfter: new Date(new Date().getTime() + config.activateInactivityDetectionAfter * 60 * 1000).toISOString(),
