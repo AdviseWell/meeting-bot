@@ -13,8 +13,6 @@ import { uploadDebugImage } from '../services/bugService';
 import { Logger } from 'winston';
 import { handleWaitingAtLobbyError } from './MeetBotBase';
 import { ZOOM_REQUEST_DENIED } from '../constants';
-import { PulseAudioRecorder } from '../lib/pulseaudioRecorder';
-import path from 'path';
 
 class BotBase extends AbstractMeetBot {
   protected page: Page;
@@ -472,29 +470,31 @@ export class ZoomBot extends BotBase {
     const processingTime = 0.2 * 60 * 1000;
     const waitingPromise: WaitPromise = getWaitingPromise(processingTime + duration);
 
-    // Initialize PulseAudio backup recorder
-    let pulseRecorder: PulseAudioRecorder | null = null;
-    const tempFolder = path.join(process.cwd(), 'dist', '_tempvideo');
-    const tempFileId = this.slightlySecretId.toString();
+    // Initialize PulseAudio backup recorder - DISABLED: Using browser-based audio capture instead
+    // let pulseRecorder: PulseAudioRecorder | null = null;
+    // const tempFolder = path.join(process.cwd(), 'dist', '_tempvideo');
+    // const tempFileId = this.slightlySecretId.toString();
 
-    try {
-      const isPulseAudioAvailable = await PulseAudioRecorder.checkPulseAudioAvailable(this._logger);
-      if (isPulseAudioAvailable) {
-        pulseRecorder = new PulseAudioRecorder({
-          userId,
-          tempFileId,
-          outputDir: tempFolder,
-          sampleRate: 48000,
-          channels: 2,
-          logger: this._logger
-        });
-        await pulseRecorder.startRecording();
-      } else {
-        this._logger.warn('PulseAudio not available, skipping backup recording', { userId });
-      }
-    } catch (error) {
-      this._logger.error('Failed to start PulseAudio backup recorder, continuing without it', { userId, error });
-    }
+    // try {
+    //   const isPulseAudioAvailable = await PulseAudioRecorder.checkPulseAudioAvailable(this._logger);
+    //   if (isPulseAudioAvailable) {
+    //     pulseRecorder = new PulseAudioRecorder({
+    //       userId,
+    //       tempFileId,
+    //       outputDir: tempFolder,
+    //       sampleRate: 48000,
+    //       channels: 2,
+    //       logger: this._logger
+    //     });
+    //     await pulseRecorder.startRecording();
+    //   } else {
+    //     this._logger.warn('PulseAudio not available, skipping backup recording', { userId });
+    //   }
+    // } catch (error) {
+    //   this._logger.error('Failed to start PulseAudio backup recorder, continuing without it', { userId, error });
+    // }
+
+    this._logger.info('Using browser-based audio capture - PulseAudio backup disabled');
 
     this._logger.info('Setting up the recording connect functions');
     const chores = new ContextBridgeTask(
@@ -521,27 +521,29 @@ export class ZoomBot extends BotBase {
 
     this._logger.info('Waiting for recording duration:', config.maxRecordingDuration, 'minutes...');
     waitingPromise.promise.then(async () => {
-      // Stop PulseAudio backup recorder
-      if (pulseRecorder) {
-        try {
-          await pulseRecorder.stopRecording();
-          const hasValidRecording = await pulseRecorder.hasValidRecording();
-          if (hasValidRecording) {
-            this._logger.info('PulseAudio backup recording completed successfully', {
-              userId,
-              outputPath: pulseRecorder.getOutputPath()
-            });
-            // TODO: Implement upload logic for backup audio file
-            // For now, just log that the file is available
-          } else {
-            this._logger.warn('PulseAudio backup recording is empty or invalid', { userId });
-          }
-          // Optionally delete the backup file after verification
-          // await pulseRecorder.deleteRecording();
-        } catch (error) {
-          this._logger.error('Error stopping PulseAudio backup recorder', { userId, error });
-        }
-      }
+      // PulseAudio backup recorder disabled - using browser-based audio capture
+      // if (pulseRecorder) {
+      //   try {
+      //     await pulseRecorder.stopRecording();
+      //     const hasValidRecording = await pulseRecorder.hasValidRecording();
+      //     if (hasValidRecording) {
+      //       this._logger.info('PulseAudio backup recording completed successfully', {
+      //         userId,
+      //         outputPath: pulseRecorder.getOutputPath()
+      //       });
+      //       // TODO: Implement upload logic for backup audio file
+      //       // For now, just log that the file is available
+      //     } else {
+      //       this._logger.warn('PulseAudio backup recording is empty or invalid', { userId });
+      //     }
+      //     // Optionally delete the backup file after verification
+      //     // await pulseRecorder.deleteRecording();
+      //   } catch (error) {
+      //     this._logger.error('Error stopping PulseAudio backup recorder', { userId, error });
+      //   }
+      // }
+
+      this._logger.info('Browser-based audio capture completed - no PulseAudio cleanup needed');
 
       this._logger.info('Closing the browser...');
       await this.page.context().browser()?.close();

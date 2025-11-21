@@ -16,45 +16,58 @@ mkdir -p "$XDG_RUNTIME_DIR"
 chmod 700 "$XDG_RUNTIME_DIR"
 echo "PulseAudio runtime directory: $XDG_RUNTIME_DIR"
 
-# Start PulseAudio in daemon mode with a dummy sink for audio capture
+# Set PulseAudio environment variables for Chrome
+export PULSE_SERVER=unix:/tmp/pulse-runtime/pulse/native
+export PULSE_COOKIE=/tmp/pulse-runtime/pulse/cookie
+echo "PulseAudio environment variables set for Chrome: PULSE_SERVER=$PULSE_SERVER"
+
+# Start PulseAudio in daemon mode with modules pre-loaded (container-friendly startup)
 echo "Starting PulseAudio..."
-pulseaudio --start --exit-idle-time=-1 --log-target=stderr &
+pulseaudio --daemonize --system=false --exit-idle-time=-1 --log-target=stderr \
+    --use-pid-file=false --disallow-exit --disallow-module-loading=false \
+    --load="module-null-sink sink_name=dummy_output sink_properties=device.description=Virtual_Dummy_Output" \
+    --load="module-virtual-source source_name=chrome_input master=dummy_output.monitor source_properties=device.description=Chrome_Audio_Input" &
 pulse_pid=$!
 
 # Wait for PulseAudio to be ready (check if server is accepting connections)
 echo "Waiting for PulseAudio to be ready..."
-for i in {1..10}; do
+for i in {1..15}; do
     if pactl info &>/dev/null; then
         echo "PulseAudio is ready"
         break
     fi
-    echo "Waiting for PulseAudio... attempt $i/10"
+    echo "Waiting for PulseAudio... attempt $i/15"
     sleep 1
 done
 
 # Verify PulseAudio is actually ready
 if ! pactl info &>/dev/null; then
     echo "ERROR: PulseAudio failed to start properly"
+    ps aux | grep pulse
+    journalctl -n 20 --no-pager 2>/dev/null || echo "No journalctl available"
     exit 1
 fi
 
-# Load a dummy output module (null sink) for audio to flow through
-echo "Loading PulseAudio null sink..."
-pactl load-module module-null-sink sink_name=dummy_output sink_properties=device.description="Virtual_Dummy_Output"
+# Set default sink and source (modules already loaded above)
+echo "Setting default audio devices..."
 pactl set-default-sink dummy_output
+pactl set-default-source chrome_input
 
 # Set volume to 100% and unmute (critical - sinks may start muted or at 0%)
 echo "Setting audio volume to 100%..."
 pactl set-sink-volume dummy_output 100%
 pactl set-sink-mute dummy_output 0
+pactl set-source-volume chrome_input 100%
+pactl set-source-mute chrome_input 0
 
-# Also set the monitor source (what Chrome will capture from) to 100%
-pactl set-source-volume dummy_output.monitor 100%
-pactl set-source-mute dummy_output.monitor 0
-
-# Verify the sink was created
+# Verify the sink and source were created
 if ! pactl list sinks | grep -q "dummy_output"; then
     echo "ERROR: Failed to create dummy_output sink"
+    exit 1
+fi
+
+if ! pactl list sources | grep -q "chrome_input"; then
+    echo "ERROR: Failed to create chrome_input source"
     exit 1
 fi
 

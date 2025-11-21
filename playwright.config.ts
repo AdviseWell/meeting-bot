@@ -12,7 +12,7 @@ import { defineConfig, devices } from '@playwright/test';
  */
 export default defineConfig({
   testDir: './tests',
-  timeout: 60*60*1000, // 1 hour
+  timeout: 60 * 60 * 1000, // 1 hour
   /* Run tests in files in parallel */
   fullyParallel: true,
   /* Fail the build on CI if you accidentally left test.only in the source code. */
@@ -30,6 +30,9 @@ export default defineConfig({
 
     /* Collect trace when retrying the failed test. See https://playwright.dev/docs/trace-viewer */
     trace: 'on-first-retry',
+
+    /* Accept downloads */
+    acceptDownloads: true,
   },
 
   /* Configure projects for major browsers */
@@ -51,7 +54,24 @@ export default defineConfig({
     // },
     {
       name: 'Google Chrome',
-      use: { ...devices['Desktop Chrome'], channel: 'chrome' },
+      use: {
+        ...devices['Desktop Chrome'],
+        channel: 'chrome',
+        launchOptions: {
+          args: [
+            '--audio-backend=pulseaudio',
+            '--enable-usermedia-screen-capturing',
+            '--auto-select-desktop-capture-source=Entire screen',
+            '--auto-accept-this-tab-capture',
+            '--autoplay-policy=no-user-gesture-required',
+            '--disable-background-timer-throttling',
+            '--disable-backgrounding-occluded-windows',
+            '--disable-renderer-backgrounding',
+            '--no-sandbox',
+            '--disable-dev-shm-usage',
+          ],
+        },
+      },
     },
   ],
 

@@ -83,6 +83,7 @@ async function createBrowserContext(url: string, correlationId: string): Promise
     '--autoplay-policy=no-user-gesture-required',
     '--allow-running-insecure-content',
     '--disable-features=AudioServiceOutOfProcess',
+    '--audio-backend=pulseaudio',
     // Disable crash reporting to prevent SIGTRAP issues
     '--disable-crash-reporter',
     '--disable-breakpad',

@@ -11,7 +11,7 @@ export class RecordingTask extends Task<null, void> {
   private duration: number;
   private inactivityLimit: number;
   private slightlySecretId: string;
-  
+
   constructor(
     userId: string,
     teamId: string,
@@ -51,6 +51,7 @@ export class RecordingTask extends Task<null, void> {
             return btoa(binary);
           }
           const base64 = arrayBufferToBase64(chunk);
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           await (window as any).screenAppSendData(slightlySecretId, base64);
         };
 
@@ -63,15 +64,10 @@ export class RecordingTask extends Task<null, void> {
             return;
           }
 
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const stream: MediaStream = await (navigator.mediaDevices as any).getDisplayMedia({
             video: true,
-            audio: {
-              autoGainControl: false,
-              channels: 2,
-              channelCount: 2,
-              echoCancellation: false,
-              noiseSuppression: false,
-            },
+            audio: true, // Enable tab audio capture to record actual meeting audio
             preferCurrentTab: true,
           });
 
@@ -118,6 +114,7 @@ export class RecordingTask extends Task<null, void> {
             }
 
             // Begin browser cleanup
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
             (window as any).screenAppMeetEnd(slightlySecretId);
           };
 
@@ -137,7 +134,7 @@ export class RecordingTask extends Task<null, void> {
               try {
                 // Detect and click blocking "OK" buttons
                 const okButton = Array.from(dom.querySelectorAll('button'))
-                    .filter((el) => el?.innerText?.trim()?.match(/^OK/i));
+                  .filter((el) => el?.innerText?.trim()?.match(/^OK/i));
                 if (okButton && okButton[0]) {
                   console.log('It appears that meeting has been ended. Click "OK" and verify if meeting is still in progress...', { userId });
                   let shouldEndMeeting = false;
@@ -166,7 +163,7 @@ export class RecordingTask extends Task<null, void> {
 
                 // Detect number of participants
                 const participantsMatch = Array.from(dom.querySelectorAll('button'))
-                    .filter((el) => el?.innerText?.trim()?.match(/^\d+/));
+                  .filter((el) => el?.innerText?.trim()?.match(/^\d+/));
                 const text = participantsMatch && participantsMatch.length > 0 ? participantsMatch[0].innerText.trim() : null;
                 if (!text) {
                   console.error('Zoom presence detection is probably not working on user:', userId, teamId);
@@ -259,11 +256,11 @@ export class RecordingTask extends Task<null, void> {
         // Start the recording
         await startRecording();
       },
-      { 
+      {
         teamId: this.teamId,
         duration: this.duration,
-        inactivityLimit: this.inactivityLimit, 
-        userId: this.userId, 
+        inactivityLimit: this.inactivityLimit,
+        userId: this.userId,
         slightlySecretId: this.slightlySecretId,
         activateInactivityDetectionAfterMinutes: config.activateInactivityDetectionAfter,
         activateInactivityDetectionAfter: new Date(new Date().getTime() + config.activateInactivityDetectionAfter * 60 * 1000).toISOString(),
