@@ -66,19 +66,39 @@ export class RecordingTask extends Task<null, void> {
 
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const stream: MediaStream = await (navigator.mediaDevices as any).getDisplayMedia({
-            video: true,
-            audio: true, // Enable tab audio capture to record actual meeting audio
+            video: {
+              frameRate: { ideal: 30, max: 30 }  // 30 fps is optimal for meetings
+            },
+            audio: {
+              autoGainControl: false,
+              channels: 2,
+              channelCount: 2,
+              echoCancellation: false,
+              noiseSuppression: false,
+              sampleRate: 48000,  // 48 kHz sample rate for professional audio quality
+              sampleSize: 16,     // 16-bit audio depth
+            },
+            systemAudio: 'include',
+            suppressLocalAudioPlayback: false,
             preferCurrentTab: true,
           });
 
           let options: MediaRecorderOptions = {};
           if (MediaRecorder.isTypeSupported(primaryMimeType)) {
-            console.log(`Media Recorder will use ${primaryMimeType} codecs...`);
-            options = { mimeType: primaryMimeType };
+            console.log(`Media Recorder will use ${primaryMimeType} codecs with ultra quality...`);
+            options = {
+              mimeType: primaryMimeType,
+              videoBitsPerSecond: 15000000,  // 15 Mbps for ultra high quality video
+              audioBitsPerSecond: 768000     // 768 kbps for ultra high quality audio
+            };
           }
           else {
             console.warn(`Media Recorder did not find primary mime type codecs ${primaryMimeType}, Using fallback codecs ${secondaryMimeType}`);
-            options = { mimeType: secondaryMimeType };
+            options = {
+              mimeType: secondaryMimeType,
+              videoBitsPerSecond: 15000000,  // 15 Mbps for ultra high quality video
+              audioBitsPerSecond: 768000     // 768 kbps for ultra high quality audio
+            };
           }
 
           const mediaRecorder = new MediaRecorder(stream, { ...options });
@@ -90,9 +110,12 @@ export class RecordingTask extends Task<null, void> {
             }
             try {
               const arrayBuffer = await event.data.arrayBuffer();
-              await sendChunkToServer(arrayBuffer);
+              // Fire-and-forget to prevent blocking MediaRecorder
+              sendChunkToServer(arrayBuffer).catch(error => {
+                console.error('Error uploading chunk:', error.message, error);
+              });
             } catch (error) {
-              console.error('Error uploading chunk:', error.message, error);
+              console.error('Error processing chunk:', error.message, error);
             }
           };
 
