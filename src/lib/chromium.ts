@@ -74,16 +74,16 @@ async function createBrowserContext(url: string, correlationId: string): Promise
     '--no-sandbox',
     '--disable-setuid-sandbox',
     '--disable-web-security',
-    '--use-gl=angle',
-    '--use-angle=swiftshader',
+    '--disable-gpu',  // Disable GPU on headless/K8s environments
+    '--disable-software-rasterizer',  // Use CPU rasterizer optimized for headless
     `--window-size=${size.width},${size.height}`,
     '--auto-accept-this-tab-capture',
     '--enable-features=MediaRecorder',
     // Audio capture flags - CRITICAL for getDisplayMedia audio
     '--autoplay-policy=no-user-gesture-required',
     '--allow-running-insecure-content',
-    '--disable-features=AudioServiceOutOfProcess',
-    '--audio-backend=pulseaudio',
+    // Enable hardware audio processing for better performance
+    '--enable-features=AudioServiceOutOfProcess',  // Run audio in separate process
     // Disable crash reporting to prevent SIGTRAP issues
     '--disable-crash-reporter',
     '--disable-breakpad',
