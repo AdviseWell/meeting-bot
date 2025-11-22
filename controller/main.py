@@ -273,12 +273,12 @@ class MeetingController:
                 ],
                 resources=client.V1ResourceRequirements(
                     requests={
-                        "cpu": "2000m",  # 2 CPU cores
+                        "cpu": "3000m",  # 2 CPU cores for smooth audio/video processing
                         "memory": "2Gi",  # 2 GB memory
                     },
                     limits={
-                        "cpu": "3000m",  # 50% higher (3 CPU cores)
-                        "memory": "3Gi",  # 50% higher (3 GB)
+                        "cpu": "4000m",  # 4 CPU cores (doubled for better performance)
+                        "memory": "3Gi",  # 4 GB memory (increased for high-quality recording)
                     },
                 ),
             )
