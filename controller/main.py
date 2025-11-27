@@ -316,6 +316,9 @@ class MeetingController:
                     labels={
                         "app": "meeting-bot-manager",
                         "meeting-id": meeting_id[:63],  # K8s label value max length
+                    },
+                    annotations={
+                        "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
                     }
                 ),
                 spec=client.V1PodSpec(
