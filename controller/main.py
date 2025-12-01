@@ -301,11 +301,11 @@ class MeetingController:
                 resources=client.V1ResourceRequirements(
                     requests={
                         "cpu": "2500m",  # 2.5 CPU cores
-                        "memory": "512Mi",  # 512 MB memory
+                        "memory": "1Gi",  # 1 GB memory (doubled)
                     },
                     limits={
                         "cpu": "3750m",  # 50% higher (3.75 CPU cores)
-                        "memory": "768Mi",  # 50% higher (768 MB)
+                        "memory": "1536Mi",  # 1.5 GB memory (doubled)
                     },
                 ),
             )
