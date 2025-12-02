@@ -71,6 +71,8 @@ async function createBrowserContext(url: string, correlationId: string): Promise
     '--allow-http-screen-capture',
     '--auto-select-desktop-capture-source=Entire screen',
     '--auto-select-tab-capture-source-by-title=Microsoft Teams',
+    '--use-fake-device-for-media-stream',
+    '--use-fake-ui-for-media-stream',
     '--no-sandbox',
     '--disable-setuid-sandbox',
     '--disable-web-security',
@@ -119,11 +121,13 @@ async function createBrowserContext(url: string, correlationId: string): Promise
   const linuxX11UserAgent = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36';
 
   const context = await browser.newContext({
-    permissions: [],
+    permissions: ['microphone', 'camera'],
     viewport: size,
     ignoreHTTPSErrors: true,
     userAgent: linuxX11UserAgent,
   });
+
+  await context.grantPermissions(['microphone', 'camera'], { origin: url });
 
   const page = await context.newPage();
 
