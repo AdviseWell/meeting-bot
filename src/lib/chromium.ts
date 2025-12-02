@@ -121,13 +121,13 @@ async function createBrowserContext(url: string, correlationId: string): Promise
   const linuxX11UserAgent = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36';
 
   const context = await browser.newContext({
-    permissions: ['microphone', 'camera'],
+    permissions: ['microphone'],
     viewport: size,
     ignoreHTTPSErrors: true,
     userAgent: linuxX11UserAgent,
   });
 
-  await context.grantPermissions(['microphone', 'camera'], { origin: url });
+  await context.grantPermissions(['microphone'], { origin: url });
 
   const page = await context.newPage();
 
