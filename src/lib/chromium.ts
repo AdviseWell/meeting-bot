@@ -71,8 +71,6 @@ async function createBrowserContext(url: string, correlationId: string): Promise
     '--allow-http-screen-capture',
     '--auto-select-desktop-capture-source=Entire screen',
     '--auto-select-tab-capture-source-by-title=Microsoft Teams',
-    '--use-fake-device-for-media-stream',
-    '--use-fake-ui-for-media-stream',
     '--no-sandbox',
     '--disable-setuid-sandbox',
     '--disable-web-security',
@@ -105,6 +103,10 @@ async function createBrowserContext(url: string, correlationId: string): Promise
     '--disable-prompt-on-repost',
     '--disable-domain-reliability',
     '--disable-component-update',
+    // CRITICAL: Create virtual mic and camera (required for K8s audio to work)
+    '--use-fake-device-for-media-stream',
+    // Auto-accept permission prompts for ALLOWED permissions only
+    '--use-fake-ui-for-media-stream',
   ];
 
   const browser = await launchBrowserWithTimeout(
