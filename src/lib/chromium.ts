@@ -103,10 +103,6 @@ async function createBrowserContext(url: string, correlationId: string): Promise
     '--disable-prompt-on-repost',
     '--disable-domain-reliability',
     '--disable-component-update',
-    // CRITICAL: Create virtual mic and camera (required for K8s audio to work)
-    '--use-fake-device-for-media-stream',
-    // Auto-accept permission prompts for ALLOWED permissions only
-    '--use-fake-ui-for-media-stream',
   ];
 
   const browser = await launchBrowserWithTimeout(
@@ -123,13 +119,11 @@ async function createBrowserContext(url: string, correlationId: string): Promise
   const linuxX11UserAgent = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36';
 
   const context = await browser.newContext({
-    permissions: ['microphone'],
+    permissions: [],
     viewport: size,
     ignoreHTTPSErrors: true,
     userAgent: linuxX11UserAgent,
   });
-
-  await context.grantPermissions(['microphone'], { origin: url });
 
   const page = await context.newPage();
 
