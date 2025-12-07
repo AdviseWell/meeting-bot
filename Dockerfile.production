@@ -10,7 +10,7 @@ COPY package*.json ./
 # Install Node dependencies before system packages
 RUN npm ci --only=production && npm cache clean --force
 
-# Install minimal system dependencies (removed PulseAudio, mesa-utils, wget, gnupg, dos2unix)
+# Install minimal system dependencies
 RUN apt-get update && \
   apt-get install -y \
   ffmpeg \
@@ -26,6 +26,7 @@ RUN apt-get update && \
   libgl1-mesa-glx \
   xvfb \
   curl \
+  gnupg \
   xorg \
   xserver-xorg \
   libx11-dev \
