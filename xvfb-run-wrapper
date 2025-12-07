@@ -39,5 +39,9 @@ echo "Cleaning up processes..."
 kill -TERM "$xvfb_pid" 2>/dev/null
 wait "$xvfb_pid" 2>/dev/null
 
+pulseaudio --kill 2>/dev/null
+kill -TERM "$pulse_pid" 2>/dev/null
+wait "$pulse_pid" 2>/dev/null
+
 # Exit with the application's exit code
 exit "$child_exit_code"

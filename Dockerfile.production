@@ -89,5 +89,5 @@ EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
   CMD curl -f http://localhost:3000/health || exit 1
 
-# Run the application with custom wrapper
-CMD ["/usr/src/app/xvfb-run-wrapper", "node", "dist/index.js"] 
+# Run the application with simplified wrapper
+CMD ["xvfb-run", "--server-args=-screen 0 1280x720x24 -ac -nolisten tcp -dpi 96 +extension RANDR", "node", "dist/index.js"] 
