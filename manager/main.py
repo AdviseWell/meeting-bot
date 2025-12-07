@@ -46,7 +46,9 @@ class MeetingManager:
         # Required environment variables for the meeting job
         self.meeting_url = os.environ.get("MEETING_URL")
         self.meeting_id = os.environ.get("MEETING_ID")
-        self.fs_meeting_id = os.environ.get("FS_MEETING_ID")  # Firestore-specific meeting ID
+        self.fs_meeting_id = os.environ.get(
+            "FS_MEETING_ID"
+        )  # Firestore-specific meeting ID
         self.gcs_path = os.environ.get("GCS_PATH")
 
         # Optional meeting metadata
@@ -111,21 +113,25 @@ class MeetingManager:
                     bearer_token=bearer_token,
                     user_id=user_id,
                     bot_id=bot_id,
-                    event_id=event_id
+                    event_id=event_id,
                 )
-                
+
                 # Use auto-generated values
                 metadata["bearerToken"] = auto_generated["bearer_token"]
                 metadata["userId"] = auto_generated["user_id"]
                 metadata["botId"] = auto_generated["bot_id"]
-                
+
                 # Also update meeting_id if it wasn't provided
                 if not self.meeting_id:
                     metadata["meeting_id"] = auto_generated["meeting_id"]
-                    
-                logger.info(f"Auto-generated fields: userId={metadata['userId']}, botId={metadata['botId']}, bearerToken={'***' if metadata['bearerToken'] else 'NONE'}")
+
+                logger.info(
+                    f"Auto-generated fields: userId={metadata['userId']}, botId={metadata['botId']}, bearerToken={'***' if metadata['bearerToken'] else 'NONE'}"
+                )
             except Exception as e:
-                logger.warning(f"Could not auto-generate fields: {e}. Using fallback values.")
+                logger.warning(
+                    f"Could not auto-generate fields: {e}. Using fallback values."
+                )
                 # Fallback to original behavior
                 metadata["bearerToken"] = bearer_token or ""
                 metadata["userId"] = user_id or "system"
@@ -185,38 +191,42 @@ class MeetingManager:
     def _find_wav_backup(self, recording_path: str) -> Optional[str]:
         """
         Find the WAV backup file corresponding to a recording.
-        
+
         The meeting-bot creates WAV backup files using PulseAudio with the pattern:
         [outputDir]/[userId]/backup_[tempFileId].wav
-        
+
         Args:
             recording_path: Path to the main recording file (WEBM)
-            
+
         Returns:
             Path to WAV backup file if found and valid, None otherwise
         """
         import glob
-        
+
         try:
             recording_dir = os.path.dirname(recording_path)
             wav_pattern = os.path.join(recording_dir, "backup_*.wav")
             wav_files = glob.glob(wav_pattern)
-            
+
             if not wav_files:
-                logger.debug(f"No WAV backup files found matching pattern: {wav_pattern}")
+                logger.debug(
+                    f"No WAV backup files found matching pattern: {wav_pattern}"
+                )
                 return None
-            
+
             # Use the first match (there should only be one per recording)
             wav_path = wav_files[0]
-            
+
             # Validate file exists and has content (> 1KB)
             if os.path.exists(wav_path) and os.path.getsize(wav_path) > 1024:
-                logger.info(f"Found WAV backup: {wav_path} ({os.path.getsize(wav_path)} bytes)")
+                logger.info(
+                    f"Found WAV backup: {wav_path} ({os.path.getsize(wav_path)} bytes)"
+                )
                 return wav_path
             else:
                 logger.warning(f"WAV backup file too small or empty: {wav_path}")
                 return None
-                
+
         except Exception as e:
             logger.warning(f"Error searching for WAV backup: {e}")
             return None
@@ -268,11 +278,13 @@ class MeetingManager:
             if not webm_uploaded:
                 logger.error("Failed to upload WEBM file")
                 return False
-            
+
             logger.info(f"✅ WEBM uploaded to gs://{self.gcs_bucket}/{webm_gcs_path}")
 
             # Step 4: SKIP CONVERSION - Use WebM directly for transcription
-            logger.info("Step 4: Skipping MP4/M4A conversion (using WebM directly for transcription)")
+            logger.info(
+                "Step 4: Skipping MP4/M4A conversion (using WebM directly for transcription)"
+            )
             logger.info("This saves significant processing time during initialization")
 
             # Step 5: Transcribe audio using Gemini with WebM file (optional, non-fatal)
@@ -287,20 +299,32 @@ class MeetingManager:
                     return False
 
                 webm_size = os.path.getsize(recording_path)
-                logger.info(f"WebM file size: {webm_size} bytes ({webm_size / (1024 * 1024):.2f} MB)")
+                logger.info(
+                    f"WebM file size: {webm_size} bytes ({webm_size / (1024 * 1024):.2f} MB)"
+                )
 
                 # Validate file size is reasonable for a meeting recording
                 if webm_size < 1000:  # Less than 1KB is definitely empty
-                    logger.error(f"❌ WebM file too small ({webm_size} bytes) - file is empty or corrupted")
-                    logger.error("This indicates the meeting bot did not capture any audio")
+                    logger.error(
+                        f"❌ WebM file too small ({webm_size} bytes) - file is empty or corrupted"
+                    )
+                    logger.error(
+                        "This indicates the meeting bot did not capture any audio"
+                    )
                     logger.error("Check meeting-bot logs for recording errors")
                     return False
-                
+
                 if webm_size < 100000:  # Less than 100KB
-                    logger.warning(f"⚠️  WebM file is very small ({webm_size} bytes / {webm_size / 1024:.1f} KB)")
+                    logger.warning(
+                        f"⚠️  WebM file is very small ({webm_size} bytes / {webm_size / 1024:.1f} KB)"
+                    )
                     logger.warning("This is unusually small for a meeting recording")
-                    logger.warning("The recording may be incomplete or contain no actual audio")
-                    logger.warning("Proceeding with transcription, but results may be poor...")
+                    logger.warning(
+                        "The recording may be incomplete or contain no actual audio"
+                    )
+                    logger.warning(
+                        "Proceeding with transcription, but results may be poor..."
+                    )
 
                 # WebM already uploaded in Step 3, generate signed URL
                 # Uses IAM-based signing to keep files private
@@ -315,22 +339,24 @@ class MeetingManager:
 
                     try:
                         # Transcribe the audio with speaker diarization
-                        transcript_data = (
-                            self.transcription_client.transcribe_audio(
-                                audio_uri=audio_url,
-                                language_code="en-AU",  # Australian
-                                enable_speaker_diarization=True,
-                                enable_timestamps=False,
-                                enable_action_items=True,
-                            )
+                        transcript_data = self.transcription_client.transcribe_audio(
+                            audio_uri=audio_url,
+                            language_code="en-AU",  # Australian
+                            enable_speaker_diarization=True,
+                            enable_timestamps=False,
+                            enable_action_items=True,
                         )
 
                         if transcript_data:
                             # Check if transcription looks like sample/demo text
                             transcript_text = transcript_data.get("transcript", "")
                             if _is_sample_transcription(transcript_text):
-                                logger.warning("⚠️  Transcription appears to be sample/demo text, not actual meeting content")
-                                logger.warning("This may indicate the audio file was not processed correctly")
+                                logger.warning(
+                                    "⚠️  Transcription appears to be sample/demo text, not actual meeting content"
+                                )
+                                logger.warning(
+                                    "This may indicate the audio file was not processed correctly"
+                                )
                                 # Continue anyway - better to have sample text than no text
 
                             import tempfile
@@ -364,13 +390,19 @@ class MeetingManager:
 
                             # Store transcription text in Firestore
                             try:
-                                transcription_text = transcript_data.get("transcript", "")
+                                transcription_text = transcript_data.get(
+                                    "transcript", ""
+                                )
                                 if transcription_text:
                                     # Use FS_MEETING_ID if provided, otherwise fall back to MEETING_ID
-                                    firestore_meeting_id = self.fs_meeting_id or self.meeting_id
+                                    firestore_meeting_id = (
+                                        self.fs_meeting_id or self.meeting_id
+                                    )
                                     if firestore_meeting_id:
-                                        firestore_stored = self.firestore_client.set_transcription(
-                                            firestore_meeting_id, transcription_text
+                                        firestore_stored = (
+                                            self.firestore_client.set_transcription(
+                                                firestore_meeting_id, transcription_text
+                                            )
                                         )
                                         if firestore_stored:
                                             logger.info(
@@ -389,8 +421,12 @@ class MeetingManager:
                                         "No transcription text available to store in Firestore"
                                     )
                             except Exception as firestore_err:
-                                logger.exception(f"Error storing transcription in Firestore: {firestore_err}")
-                                logger.warning("Continuing despite Firestore storage failure")
+                                logger.exception(
+                                    f"Error storing transcription in Firestore: {firestore_err}"
+                                )
+                                logger.warning(
+                                    "Continuing despite Firestore storage failure"
+                                )
 
                         else:
                             logger.warning(
@@ -398,7 +434,9 @@ class MeetingManager:
                             )
                     except Exception as e:
                         logger.exception(f"Transcription failed (non-fatal): {e}")
-                        logger.warning("Continuing with upload despite transcription failure")
+                        logger.warning(
+                            "Continuing with upload despite transcription failure"
+                        )
                     finally:
                         # Always try to revoke public access
                         # (in case fallback made it public)
@@ -526,11 +564,15 @@ def _is_sample_transcription(transcript_text: str) -> bool:
         "I'm the director of operations",
         "new project that we're going to be launching",
         "Speaker 1 (*Male*):",
-        "Speaker 2 (*Female*):"
+        "Speaker 2 (*Female*):",
     ]
 
     # Check if multiple sample indicators are present
-    found_indicators = sum(1 for indicator in sample_indicators if indicator.lower() in transcript_text.lower())
+    found_indicators = sum(
+        1
+        for indicator in sample_indicators
+        if indicator.lower() in transcript_text.lower()
+    )
 
     # Also check for generic business meeting patterns that suggest sample content
     generic_patterns = [
@@ -538,10 +580,12 @@ def _is_sample_transcription(transcript_text: str) -> bool:
         "really excited about this new project",
         "director of operations",
         "customer touchpoints",
-        "pilot program in q3"
+        "pilot program in q3",
     ]
 
-    found_patterns = sum(1 for pattern in generic_patterns if pattern.lower() in transcript_text.lower())
+    found_patterns = sum(
+        1 for pattern in generic_patterns if pattern.lower() in transcript_text.lower()
+    )
 
     # If we find 3+ indicators OR 2+ patterns, likely sample text
     return found_indicators >= 3 or found_patterns >= 2
