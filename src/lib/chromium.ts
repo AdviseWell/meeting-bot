@@ -82,6 +82,10 @@ async function createBrowserContext(url: string, correlationId: string): Promise
     // Audio capture flags - CRITICAL for getDisplayMedia audio
     '--autoplay-policy=no-user-gesture-required',
     '--allow-running-insecure-content',
+    // Performance optimizations for faster startup
+    '--disable-dev-shm-usage',  // Use /tmp instead of /dev/shm when needed
+    '--metrics-recording-only',
+    '--safebrowsing-disable-auto-update',
     // Enable hardware audio processing for better performance
     '--enable-features=AudioServiceOutOfProcess',  // Run audio in separate process
     // Disable crash reporting to prevent SIGTRAP issues

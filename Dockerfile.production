@@ -1,10 +1,16 @@
 # Use the official Node.js image as a base image
-FROM node:18
+FROM node:18-slim
 
 # Set the working directory
 WORKDIR /usr/src/app
 
-# Install system dependencies, including WebGL support and PulseAudio
+# Copy package files first for better layer caching
+COPY package*.json ./
+
+# Install Node dependencies before system packages
+RUN npm ci --only=production && npm cache clean --force
+
+# Install minimal system dependencies (removed PulseAudio, mesa-utils, wget, gnupg, dos2unix)
 RUN apt-get update && \
   apt-get install -y \
   ffmpeg \
@@ -18,81 +24,50 @@ RUN apt-get update && \
   libgbm-dev \
   libgl1-mesa-dri \
   libgl1-mesa-glx \
-  mesa-utils \
   xvfb \
-  wget \
-  gnupg \
+  curl \
   xorg \
   xserver-xorg \
   libx11-dev \
   libxext-dev \
-  dos2unix \
-  pulseaudio \
-  pulseaudio-utils \
   # ARM-specific packages (only for ARM64)
   $(if [ "$(dpkg --print-architecture)" = "arm64" ]; then echo "libgles2 libegl1 libwayland-egl1"; fi) \
   && rm -rf /var/lib/apt/lists/*
 
-# Install Google Chrome
-RUN wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-linux-signing-key.gpg && \
-  ARCH=$(dpkg --print-architecture) && \
+# Install Google Chrome (conditional based on architecture)
+RUN ARCH=$(dpkg --print-architecture) && \
   if [ "$ARCH" = "amd64" ]; then \
-    echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-linux-signing-key.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list; \
-  elif [ "$ARCH" = "arm64" ]; then \
-    echo "deb [arch=arm64 signed-by=/usr/share/keyrings/google-linux-signing-key.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list; \
+    curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome-keyring.gpg && \
+    echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome-keyring.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list && \
+    apt-get update && apt-get install -y google-chrome-stable; \
   else \
-    echo "deb [signed-by=/usr/share/keyrings/google-linux-signing-key.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list; \
+    apt-get update && apt-get install -y chromium; \
+    ln -sf /usr/bin/chromium /usr/bin/google-chrome; \
   fi && \
-  apt-get update && apt-get install -y google-chrome-stable || apt-get install -y chromium && \
   rm -rf /var/lib/apt/lists/*
-
-# Create symlink for Playwright compatibility (ARM64 only)
-RUN if [ "$(dpkg --print-architecture)" = "arm64" ]; then ln -sf /usr/bin/chromium /usr/bin/google-chrome; fi
 
 # Create non-root user with a home directory
 RUN groupadd -g 1001 nodejs && \
     useradd -m -d /home/nodejs -r -u 1001 -g nodejs nodejs
 
-# Configure PulseAudio for containerized environment
-RUN mkdir -p /home/nodejs/.config/pulse && \
-    echo "default-sample-rate = 48000" > /home/nodejs/.config/pulse/daemon.conf && \
-    echo "alternate-sample-rate = 44100" >> /home/nodejs/.config/pulse/daemon.conf && \
-    echo "default-sample-channels = 2" >> /home/nodejs/.config/pulse/daemon.conf && \
-    echo "enable-remixing = yes" >> /home/nodejs/.config/pulse/daemon.conf && \
-    echo "remixing-use-all-sink-channels = yes" >> /home/nodejs/.config/pulse/daemon.conf && \
-    echo "exit-idle-time = -1" >> /home/nodejs/.config/pulse/daemon.conf && \
-    echo "flat-volumes = yes" >> /home/nodejs/.config/pulse/daemon.conf && \
-    echo "# Client config for volume defaults" > /home/nodejs/.config/pulse/client.conf && \
-    echo "autospawn = no" >> /home/nodejs/.config/pulse/client.conf && \
-    echo "default-sink-volume = 65536" >> /home/nodejs/.config/pulse/client.conf && \
-    echo "default-source-volume = 65536" >> /home/nodejs/.config/pulse/client.conf && \
-    chown -R nodejs:nodejs /home/nodejs/.config/pulse
-
 # Copy Chrome policy to allow protocol launching
 RUN mkdir -p /etc/opt/chrome/policies/managed
 COPY --chown=nodejs:nodejs auto_launch_protocols.json /etc/opt/chrome/policies/managed/auto_launch_protocols.json
-    
-# Copy package files
-COPY package*.json ./
 
-# Install all dependencies (including dev dependencies for build)
-RUN npm ci && npm cache clean --force
+# Copy application code
+COPY --chown=nodejs:nodejs . .
 
-# Install Playwright and its dependencies
-RUN npx playwright install --with-deps
+# Build TypeScript
+RUN npm run build
 
-# Copy source code
-COPY . .
+# Install ONLY Chromium deps (skip full browser download)
+RUN npx playwright install-deps chromium
+
+# Set xvfb-run-wrapper permissions
+RUN chmod +x /usr/src/app/xvfb-run-wrapper
 
 # Set environment variables
 ENV NODE_ENV=production
-
-# Set xvfb-run-wrapper permissions
-RUN dos2unix /usr/src/app/xvfb-run-wrapper && \
-    chmod +x /usr/src/app/xvfb-run-wrapper
-
-# Build the TypeScript code
-RUN npm run build
 
 USER root
 RUN mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix
@@ -103,14 +78,15 @@ RUN mkdir -p /usr/src/app/dist/_tempvideo \
 # Switch to non-root user
 USER nodejs
 
+# Set Chrome executable path
+ENV CHROME_BIN=/usr/bin/google-chrome
+
 # Expose the port your app runs on
 EXPOSE 3000
 
 # Health check
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD node -e "require('http').get('http://localhost:3000/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) })" || exit 1
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+  CMD curl -f http://localhost:3000/health || exit 1
 
-# Set the entry point
-ENTRYPOINT ["/usr/src/app/xvfb-run-wrapper"]
-
-CMD ["node", "dist/index.js"] 
+# Run the application with simplified wrapper
+CMD ["xvfb-run", "--server-args=-screen 0 1280x720x24 -ac -nolisten tcp -dpi 96 +extension RANDR", "node", "dist/index.js"] 

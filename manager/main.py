@@ -259,108 +259,55 @@ class MeetingManager:
 
             logger.info(f"Meeting completed. Recording at: {recording_path}")
 
-            # Step 3: Upload original WEBM file to GCS (before conversion)
-            logger.info("Step 3: Uploading original WEBM file to GCS...")
+            # Step 3: Upload original WEBM file to GCS
+            logger.info("Step 3: Uploading WEBM file to GCS...")
+            webm_gcs_path = f"{self.gcs_path}/recording.webm"
             webm_uploaded = self.storage_client.upload_file(
-                recording_path, f"{self.gcs_path}/recording.webm"
+                recording_path, webm_gcs_path
             )
-            if webm_uploaded:
-                logger.info(f"✅ Original WEBM uploaded to gs://{self.gcs_bucket}/{self.gcs_path}/recording.webm")
-            else:
-                logger.warning("Failed to upload original WEBM file (non-fatal)")
-
-            # Step 3.5: Upload WAV backup file if it exists
-            logger.info("Step 3.5: Checking for WAV backup audio file...")
-            wav_backup_path = self._find_wav_backup(recording_path)
-            if wav_backup_path:
-                logger.info(f"Found WAV backup at: {wav_backup_path}")
-                wav_uploaded = self.storage_client.upload_file(
-                    wav_backup_path, f"{self.gcs_path}/backup_audio.wav"
-                )
-                if wav_uploaded:
-                    logger.info(f"✅ WAV backup uploaded to gs://{self.gcs_bucket}/{self.gcs_path}/backup_audio.wav")
-                else:
-                    logger.warning("Failed to upload WAV backup file (non-fatal)")
-            else:
-                logger.info("No WAV backup file found (this is normal if PulseAudio recording was not enabled)")
-
-            # Step 4: Convert media files
-            logger.info("Step 4: Converting media files...")
-            mp4_path, m4a_path = self.media_converter.convert(recording_path)
-            if not mp4_path or not m4a_path:
-                logger.error("Media conversion failed")
+            if not webm_uploaded:
+                logger.error("Failed to upload WEBM file")
                 return False
+            
+            logger.info(f"✅ WEBM uploaded to gs://{self.gcs_bucket}/{webm_gcs_path}")
 
-            logger.info(f"Conversion complete - MP4: {mp4_path}, M4A: {m4a_path}")
+            # Step 4: SKIP CONVERSION - Use WebM directly for transcription
+            logger.info("Step 4: Skipping MP4/M4A conversion (using WebM directly for transcription)")
+            logger.info("This saves significant processing time during initialization")
 
-            # Step 5: Transcribe audio using Gemini (optional, non-fatal)
-            logger.info("Step 5: Transcribing audio with Gemini...")
+            # Step 5: Transcribe audio using Gemini with WebM file (optional, non-fatal)
+            logger.info("Step 5: Transcribing audio with Gemini using WebM file...")
             transcript_txt_path = None
             transcript_json_path = None
 
             try:
-                # Validate M4A file before upload
-                if not os.path.exists(m4a_path):
-                    logger.error(f"M4A file not found: {m4a_path}")
+                # Validate WebM file
+                if not os.path.exists(recording_path):
+                    logger.error(f"WebM file not found: {recording_path}")
                     return False
 
-                m4a_size = os.path.getsize(m4a_path)
-                logger.info(f"M4A file size: {m4a_size} bytes ({m4a_size / (1024 * 1024):.2f} MB)")
+                webm_size = os.path.getsize(recording_path)
+                logger.info(f"WebM file size: {webm_size} bytes ({webm_size / (1024 * 1024):.2f} MB)")
 
                 # Validate file size is reasonable for a meeting recording
-                # Typical sizes: 1min ~500KB-2MB, 5min ~2-10MB, 30min ~10-50MB
-                if m4a_size < 1000:  # Less than 1KB is definitely empty
-                    logger.error(f"❌ M4A file too small ({m4a_size} bytes) - file is empty or corrupted")
+                if webm_size < 1000:  # Less than 1KB is definitely empty
+                    logger.error(f"❌ WebM file too small ({webm_size} bytes) - file is empty or corrupted")
                     logger.error("This indicates the meeting bot did not capture any audio")
                     logger.error("Check meeting-bot logs for recording errors")
                     return False
                 
-                if m4a_size < 100000:  # Less than 100KB (~10 seconds of audio)
-                    logger.warning(f"⚠️  M4A file is very small ({m4a_size} bytes / {m4a_size / 1024:.1f} KB)")
+                if webm_size < 100000:  # Less than 100KB
+                    logger.warning(f"⚠️  WebM file is very small ({webm_size} bytes / {webm_size / 1024:.1f} KB)")
                     logger.warning("This is unusually small for a meeting recording")
-                    logger.warning("Expected: >500KB for 1 minute, >2MB for 5 minutes")
                     logger.warning("The recording may be incomplete or contain no actual audio")
                     logger.warning("Proceeding with transcription, but results may be poor...")
 
-                # Verify audio content using pydub
-                try:
-                    from pydub import AudioSegment
-                    audio = AudioSegment.from_file(m4a_path, format="m4a")
-                    duration_ms = len(audio)
-                    duration_sec = duration_ms / 1000
-                    duration_min = duration_sec / 60
-                    
-                    logger.info(f"📊 Audio file duration: {duration_min:.2f} minutes ({duration_sec:.1f} seconds)")
-                    
-                    # Check if duration is reasonable
-                    if duration_sec < 5:
-                        logger.error(f"❌ Audio duration is too short ({duration_sec:.1f}s)")
-                        logger.error("Recording appears to be nearly empty - likely no meeting audio was captured")
-                        logger.error("This will result in sample/placeholder text from Gemini")
-                        # Continue anyway to see what happens
-                    
-                    # Check for silent audio (all samples near zero)
-                    max_amplitude = audio.max
-                    if max_amplitude < 100:  # Very quiet audio
-                        logger.warning(f"⚠️  Audio appears to be silent or nearly silent (max amplitude: {max_amplitude})")
-                        logger.warning("The recording may not contain actual speech")
-                        
-                except ImportError:
-                    logger.warning("pydub not available - skipping audio content validation")
-                except Exception as e:
-                    logger.warning(f"Could not analyze audio file: {e}")
-
-                # Upload the M4A file to GCS first
-                m4a_gcs_path = f"{self.gcs_path}/audio.m4a"
-                m4a_uploaded = self.storage_client.upload_file(m4a_path, m4a_gcs_path)
-
-                if m4a_uploaded:
-                    # Generate signed URL for Gemini to access audio
-                    # Uses IAM-based signing to keep files private
-                    # Falls back to public URL if IAM permissions missing
-                    audio_url = self.storage_client.get_signed_url(
-                        m4a_gcs_path, expiration_minutes=120  # 2 hours
-                    )
+                # WebM already uploaded in Step 3, generate signed URL
+                # Uses IAM-based signing to keep files private
+                # Falls back to public URL if IAM permissions missing
+                audio_url = self.storage_client.get_signed_url(
+                    webm_gcs_path, expiration_minutes=120  # 2 hours
+                )
 
                     if audio_url:
                         logger.info(f"Generated signed URL for audio: {audio_url[:50]}...")
@@ -453,36 +400,21 @@ class MeetingManager:
                             # Always try to revoke public access
                             # (in case fallback made it public)
                             try:
-                                self.storage_client.revoke_public_access(m4a_gcs_path)
+                                self.storage_client.revoke_public_access(webm_gcs_path)
                             except Exception as revoke_err:
                                 logger.debug(
                                     f"Could not revoke public access "
                                     f"(may not be public): {revoke_err}"
                                 )
                     else:
-                        logger.warning("Failed to generate signed URL for audio file")
-                else:
-                    logger.warning(
-                        "Failed to upload M4A to GCS, " "skipping transcription step"
-                    )
+                        logger.warning("Failed to generate signed URL for WebM file")
 
             except Exception as e:
                 logger.exception(f"Transcription failed (non-fatal): {e}")
                 logger.warning("Continuing with upload despite transcription failure")
 
-            # Step 6: Upload remaining files to GCS
-            logger.info("Step 6: Uploading remaining files to GCS...")
-
-            # Upload video
-            mp4_uploaded = self.storage_client.upload_file(
-                mp4_path, f"{self.gcs_path}/video.mp4"
-            )
-
-            # Upload audio (if not already uploaded for transcription)
-            if not m4a_uploaded:
-                m4a_uploaded = self.storage_client.upload_file(
-                    m4a_path, f"{self.gcs_path}/audio.m4a"
-                )
+            # Step 6: Upload transcript files to GCS
+            logger.info("Step 6: Uploading transcript files to GCS...")
 
             # Upload transcripts if available
             transcript_txt_uploaded = False
@@ -496,28 +428,27 @@ class MeetingManager:
                     transcript_json_path, f"{self.gcs_path}/transcript.json"
                 )
 
-            if mp4_uploaded and m4a_uploaded:
-                logger.info(
-                    f"Successfully uploaded files to gs://{self.gcs_bucket}/{self.gcs_path}/"
-                )
-                if transcript_txt_uploaded and transcript_json_uploaded:
-                    logger.info(f"✅ Transcripts also uploaded successfully")
+            # WebM already uploaded in Step 3
+            logger.info(
+                f"Successfully uploaded files to gs://{self.gcs_bucket}/{self.gcs_path}/"
+            )
+            if transcript_txt_uploaded and transcript_json_uploaded:
+                logger.info(f"✅ Transcripts also uploaded successfully")
 
-                # Cleanup local files
-                self.media_converter.cleanup(recording_path, mp4_path, m4a_path)
+            # Cleanup local files
+            if os.path.exists(recording_path):
+                os.remove(recording_path)
+                logger.debug(f"Removed local recording: {recording_path}")
 
-                # Cleanup transcript files
-                if transcript_txt_path and os.path.exists(transcript_txt_path):
-                    os.remove(transcript_txt_path)
-                    logger.debug(f"Removed local transcript: {transcript_txt_path}")
-                if transcript_json_path and os.path.exists(transcript_json_path):
-                    os.remove(transcript_json_path)
-                    logger.debug(f"Removed local transcript: {transcript_json_path}")
+            # Cleanup transcript files
+            if transcript_txt_path and os.path.exists(transcript_txt_path):
+                os.remove(transcript_txt_path)
+                logger.debug(f"Removed local transcript: {transcript_txt_path}")
+            if transcript_json_path and os.path.exists(transcript_json_path):
+                os.remove(transcript_json_path)
+                logger.debug(f"Removed local transcript: {transcript_json_path}")
 
-                return True
-            else:
-                logger.error("Failed to upload one or more files to GCS")
-                return False
+            return True
 
         except Exception as e:
             logger.exception(f"Error processing meeting: {e}")
