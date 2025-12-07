@@ -58,14 +58,11 @@ COPY --chown=nodejs:nodejs auto_launch_protocols.json /etc/opt/chrome/policies/m
 # Copy application code
 COPY --chown=nodejs:nodejs . .
 
-# Build TypeScript
-RUN npm run build
+# Build TypeScript with increased heap size to avoid OOM errors
+RUN NODE_OPTIONS="--max-old-space-size=2048" npm run build
 
-# Remove dev dependencies to reduce image size
+# Remove dev dependencies to reduce image size (Playwright not needed since we use system Chrome)
 RUN npm prune --production
-
-# Install ONLY Chromium deps (skip full browser download)
-RUN npx playwright install-deps chromium
 
 # Set xvfb-run-wrapper permissions
 RUN chmod +x /usr/src/app/xvfb-run-wrapper
