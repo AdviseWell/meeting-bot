@@ -309,105 +309,108 @@ class MeetingManager:
                     webm_gcs_path, expiration_minutes=120  # 2 hours
                 )
 
-                    if audio_url:
-                        logger.info(f"Generated signed URL for audio: {audio_url[:50]}...")
-                        logger.info("Transcribing audio with Gemini...")
+                if audio_url:
+                    logger.info(f"Generated signed URL for audio: {audio_url[:50]}...")
+                    logger.info("Transcribing audio with Gemini...")
 
-                        try:
-                            # Transcribe the audio with speaker diarization
-                            transcript_data = (
-                                self.transcription_client.transcribe_audio(
-                                    audio_uri=audio_url,
-                                    language_code="en-AU",  # Australian
-                                    enable_speaker_diarization=True,
-                                    enable_timestamps=False,
-                                    enable_action_items=True,
-                                )
+                    try:
+                        # Transcribe the audio with speaker diarization
+                        transcript_data = (
+                            self.transcription_client.transcribe_audio(
+                                audio_uri=audio_url,
+                                language_code="en-AU",  # Australian
+                                enable_speaker_diarization=True,
+                                enable_timestamps=False,
+                                enable_action_items=True,
+                            )
+                        )
+
+                        if transcript_data:
+                            # Check if transcription looks like sample/demo text
+                            transcript_text = transcript_data.get("transcript", "")
+                            if _is_sample_transcription(transcript_text):
+                                logger.warning("⚠️  Transcription appears to be sample/demo text, not actual meeting content")
+                                logger.warning("This may indicate the audio file was not processed correctly")
+                                # Continue anyway - better to have sample text than no text
+
+                            import tempfile
+
+                            # Save transcript as TXT
+                            transcript_txt_path = os.path.join(
+                                tempfile.gettempdir(),
+                                f"{self.meeting_id}_transcript.txt",
+                            )
+                            self.transcription_client.save_transcript(
+                                transcript_data,
+                                transcript_txt_path,
+                                format="txt",
                             )
 
-                            if transcript_data:
-                                # Check if transcription looks like sample/demo text
-                                transcript_text = transcript_data.get("transcript", "")
-                                if _is_sample_transcription(transcript_text):
-                                    logger.warning("⚠️  Transcription appears to be sample/demo text, not actual meeting content")
-                                    logger.warning("This may indicate the audio file was not processed correctly")
-                                    # Continue anyway - better to have sample text than no text
+                            # Save transcript as JSON
+                            transcript_json_path = os.path.join(
+                                tempfile.gettempdir(),
+                                f"{self.meeting_id}_transcript.json",
+                            )
+                            self.transcription_client.save_transcript(
+                                transcript_data,
+                                transcript_json_path,
+                                format="json",
+                            )
 
-                                import tempfile
+                            logger.info(
+                                f"✅ Transcription complete! "
+                                f"Words: {transcript_data['word_count']}"
+                            )
 
-                                # Save transcript as TXT
-                                transcript_txt_path = os.path.join(
-                                    tempfile.gettempdir(),
-                                    f"{self.meeting_id}_transcript.txt",
-                                )
-                                self.transcription_client.save_transcript(
-                                    transcript_data,
-                                    transcript_txt_path,
-                                    format="txt",
-                                )
-
-                                # Save transcript as JSON
-                                transcript_json_path = os.path.join(
-                                    tempfile.gettempdir(),
-                                    f"{self.meeting_id}_transcript.json",
-                                )
-                                self.transcription_client.save_transcript(
-                                    transcript_data,
-                                    transcript_json_path,
-                                    format="json",
-                                )
-
-                                logger.info(
-                                    f"✅ Transcription complete! "
-                                    f"Words: {transcript_data['word_count']}"
-                                )
-
-                                # Store transcription text in Firestore
-                                try:
-                                    transcription_text = transcript_data.get("transcript", "")
-                                    if transcription_text:
-                                        # Use FS_MEETING_ID if provided, otherwise fall back to MEETING_ID
-                                        firestore_meeting_id = self.fs_meeting_id or self.meeting_id
-                                        if firestore_meeting_id:
-                                            firestore_stored = self.firestore_client.set_transcription(
-                                                firestore_meeting_id, transcription_text
+                            # Store transcription text in Firestore
+                            try:
+                                transcription_text = transcript_data.get("transcript", "")
+                                if transcription_text:
+                                    # Use FS_MEETING_ID if provided, otherwise fall back to MEETING_ID
+                                    firestore_meeting_id = self.fs_meeting_id or self.meeting_id
+                                    if firestore_meeting_id:
+                                        firestore_stored = self.firestore_client.set_transcription(
+                                            firestore_meeting_id, transcription_text
+                                        )
+                                        if firestore_stored:
+                                            logger.info(
+                                                f"✅ Transcription stored in Firestore for meeting: {firestore_meeting_id}"
                                             )
-                                            if firestore_stored:
-                                                logger.info(
-                                                    f"✅ Transcription stored in Firestore for meeting: {firestore_meeting_id}"
-                                                )
-                                            else:
-                                                logger.warning(
-                                                    "Failed to store transcription in Firestore"
-                                                )
                                         else:
                                             logger.warning(
-                                                "No meeting ID available for Firestore storage (neither FS_MEETING_ID nor MEETING_ID set)"
+                                                "Failed to store transcription in Firestore"
                                             )
                                     else:
                                         logger.warning(
-                                            "No transcription text available to store in Firestore"
+                                            "No meeting ID available for Firestore storage (neither FS_MEETING_ID nor MEETING_ID set)"
                                         )
-                                except Exception as firestore_err:
-                                    logger.exception(f"Error storing transcription in Firestore: {firestore_err}")
-                                    logger.warning("Continuing despite Firestore storage failure")
+                                else:
+                                    logger.warning(
+                                        "No transcription text available to store in Firestore"
+                                    )
+                            except Exception as firestore_err:
+                                logger.exception(f"Error storing transcription in Firestore: {firestore_err}")
+                                logger.warning("Continuing despite Firestore storage failure")
 
-                            else:
-                                logger.warning(
-                                    "Transcription completed but no results " "returned"
-                                )
-                        finally:
-                            # Always try to revoke public access
-                            # (in case fallback made it public)
-                            try:
-                                self.storage_client.revoke_public_access(webm_gcs_path)
-                            except Exception as revoke_err:
-                                logger.debug(
-                                    f"Could not revoke public access "
-                                    f"(may not be public): {revoke_err}"
-                                )
-                    else:
-                        logger.warning("Failed to generate signed URL for WebM file")
+                        else:
+                            logger.warning(
+                                "Transcription completed but no results " "returned"
+                            )
+                    except Exception as e:
+                        logger.exception(f"Transcription failed (non-fatal): {e}")
+                        logger.warning("Continuing with upload despite transcription failure")
+                    finally:
+                        # Always try to revoke public access
+                        # (in case fallback made it public)
+                        try:
+                            self.storage_client.revoke_public_access(webm_gcs_path)
+                        except Exception as revoke_err:
+                            logger.debug(
+                                f"Could not revoke public access "
+                                f"(may not be public): {revoke_err}"
+                            )
+                else:
+                    logger.warning("Failed to generate signed URL for WebM file")
 
             except Exception as e:
                 logger.exception(f"Transcription failed (non-fatal): {e}")
