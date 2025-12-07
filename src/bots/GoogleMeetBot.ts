@@ -14,6 +14,8 @@ import { uploadDebugImage } from '../services/bugService';
 import createBrowserContext from '../lib/chromium';
 import { GOOGLE_LOBBY_MODE_HOST_TEXT, GOOGLE_REQUEST_DENIED, GOOGLE_REQUEST_TIMEOUT } from '../constants';
 import { vp9MimeType, webmMimeType } from '../lib/recording';
+import { PulseAudioRecorder } from '../lib/pulseaudioRecorder';
+import path from 'path';
 
 export class GoogleMeetBot extends MeetBotBase {
   private _logger: Logger;
@@ -462,40 +464,40 @@ export class GoogleMeetBot extends MeetBotBase {
 
           // Ensure tab is in focus before retrying
           if (audioTracks.length === 0) {
-            console.log('Attempting to focus window before audio retry...');
-            window.focus();
-            document.body.click();
+             console.log('Attempting to focus window before audio retry...');
+             window.focus();
+             document.body.click();
           }
 
           while (audioTracks.length === 0 && attempts < maxAudioAttempts) {
-            console.warn(`Attempt ${attempts + 1}: No audio tracks found. Retrying capture in 1s...`);
-            await new Promise(resolve => setTimeout(resolve, 1000));
+             console.warn(`Attempt ${attempts + 1}: No audio tracks found. Retrying capture in 1s...`);
+             await new Promise(resolve => setTimeout(resolve, 1000));
 
-            // Stop previous stream tracks to be clean
-            stream.getTracks().forEach(t => t.stop());
+             // Stop previous stream tracks to be clean
+             stream.getTracks().forEach(t => t.stop());
 
-            try {
-              // Re-request the media stream
-              stream = await (navigator.mediaDevices as any).getDisplayMedia({
-                video: { frameRate: { ideal: 30, max: 60 } },
-                audio: {
-                  autoGainControl: false,
-                  channels: 2,
-                  echoCancellation: false,
-                  noiseSuppression: false,
-                  sampleRate: 48000,
-                  sampleSize: 16,
-                },
-                systemAudio: 'include',
-                suppressLocalAudioPlayback: false,
-                preferCurrentTab: true,
-              });
+             try {
+               // Re-request the media stream
+               stream = await (navigator.mediaDevices as any).getDisplayMedia({
+                 video: { frameRate: { ideal: 30, max: 60 } },
+                 audio: {
+                   autoGainControl: false,
+                   channels: 2,
+                   echoCancellation: false,
+                   noiseSuppression: false,
+                   sampleRate: 48000,
+                   sampleSize: 16,
+                 },
+                 systemAudio: 'include',
+                 suppressLocalAudioPlayback: false,
+                 preferCurrentTab: true,
+               });
 
-              audioTracks = stream.getAudioTracks();
-            } catch (e) {
-              console.error('Retry capture failed', e);
-            }
-            attempts++;
+               audioTracks = stream.getAudioTracks();
+             } catch(e) {
+               console.error('Retry capture failed', e);
+             }
+             attempts++;
           }
 
           const hasAudioTracks = audioTracks.length > 0;
@@ -869,7 +871,52 @@ export class GoogleMeetBot extends MeetBotBase {
     const processingTime = 0.2 * 60 * 1000;
     const waitingPromise: WaitPromise = getWaitingPromise(processingTime + duration);
 
+    // Initialize PulseAudio backup recorder
+    let pulseRecorder: PulseAudioRecorder | null = null;
+    const tempFolder = path.join(process.cwd(), 'dist', '_tempvideo');
+    const tempFileId = this.slightlySecretId;
+
+    try {
+      const isPulseAudioAvailable = await PulseAudioRecorder.checkPulseAudioAvailable(this._logger);
+      if (isPulseAudioAvailable) {
+        pulseRecorder = new PulseAudioRecorder({
+          userId,
+          tempFileId,
+          outputDir: tempFolder,
+          sampleRate: 48000,
+          channels: 2,
+          logger: this._logger
+        });
+        await pulseRecorder.startRecording();
+      } else {
+        this._logger.warn('PulseAudio not available, skipping backup recording', { userId });
+      }
+    } catch (error) {
+      this._logger.error('Failed to start PulseAudio backup recorder, continuing without it', { userId, error });
+    }
+
     waitingPromise.promise.then(async () => {
+      // Stop PulseAudio backup recorder
+      if (pulseRecorder) {
+        try {
+          await pulseRecorder.stopRecording();
+          const hasValidRecording = await pulseRecorder.hasValidRecording();
+          if (hasValidRecording) {
+            this._logger.info('PulseAudio backup recording completed successfully', {
+              userId,
+              outputPath: pulseRecorder.getOutputPath()
+            });
+            // TODO: Implement upload logic for backup audio file
+            // For now, just log that the file is available
+          } else {
+            this._logger.warn('PulseAudio backup recording is empty or invalid', { userId });
+          }
+          // Optionally delete the backup file after verification
+          // await pulseRecorder.deleteRecording();
+        } catch (error) {
+          this._logger.error('Error stopping PulseAudio backup recorder', { userId, error });
+        }
+      }
 
       this._logger.info('Closing the browser...');
       await this.page.context().browser()?.close();

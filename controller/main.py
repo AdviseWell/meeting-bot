@@ -263,9 +263,13 @@ class MeetingController:
                         name="recordings", mount_path="/usr/src/app/dist/_tempvideo"
                     ),
                     # Mount shared memory for Chrome (prevents crashes)
-                    client.V1VolumeMount(name="dshm", mount_path="/dev/shm"),
-                    # Mount tmp for XDG runtime directories
-                    client.V1VolumeMount(name="tmp", mount_path="/tmp"),
+                    client.V1VolumeMount(
+                        name="dshm", mount_path="/dev/shm"
+                    ),
+                    # Mount tmp for XDG and PulseAudio runtime directories
+                    client.V1VolumeMount(
+                        name="tmp", mount_path="/tmp"
+                    ),
                 ],
                 resources=client.V1ResourceRequirements(
                     requests={
@@ -315,7 +319,7 @@ class MeetingController:
                     },
                     annotations={
                         "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
-                    },
+                    }
                 ),
                 spec=client.V1PodSpec(
                     restart_policy="Never",
@@ -332,16 +336,15 @@ class MeetingController:
                         client.V1Volume(
                             name="recordings", empty_dir=client.V1EmptyDirVolumeSource()
                         ),
-                        # Shared memory for Chrome (reduced from 2Gi to 512Mi)
+                        # Shared memory for Chrome
                         client.V1Volume(
                             name="dshm",
-                            empty_dir=client.V1EmptyDirVolumeSource(
-                                medium="Memory", size_limit="512Mi"
-                            ),
+                            empty_dir=client.V1EmptyDirVolumeSource(medium="Memory", size_limit="2Gi")
                         ),
-                        # Temporary storage for runtime dirs (XDG)
+                        # Temporary storage for runtime dirs (XDG, PulseAudio)
                         client.V1Volume(
-                            name="tmp", empty_dir=client.V1EmptyDirVolumeSource()
+                            name="tmp",
+                            empty_dir=client.V1EmptyDirVolumeSource()
                         ),
                     ],
                 ),

@@ -101,8 +101,6 @@ class TranscriptionClient:
                 mime_type = "audio/wav"
             elif audio_uri.endswith(".ogg"):
                 mime_type = "audio/ogg"
-            elif audio_uri.endswith(".webm"):
-                mime_type = "video/webm"  # WebM can contain both audio and video
 
             logger.info(
                 f"Downloaded {len(audio_bytes)} bytes ({len(audio_bytes) / (1024 * 1024):.2f} MB)"
@@ -110,9 +108,7 @@ class TranscriptionClient:
 
             # Validate audio file has content
             if len(audio_bytes) < 1000:  # Less than 1KB is likely empty/corrupted
-                logger.error(
-                    f"Audio file too small ({len(audio_bytes)} bytes) - likely empty or corrupted"
-                )
+                logger.error(f"Audio file too small ({len(audio_bytes)} bytes) - likely empty or corrupted")
                 return None
 
             # Convert to optimized format
@@ -122,9 +118,7 @@ class TranscriptionClient:
 
             # Validate converted audio
             if len(audio_bytes) < 1000:
-                logger.error(
-                    f"Converted audio file too small ({len(audio_bytes)} bytes) - conversion failed"
-                )
+                logger.error(f"Converted audio file too small ({len(audio_bytes)} bytes) - conversion failed")
                 return None
 
             # Build transcription options
@@ -166,9 +160,7 @@ class TranscriptionClient:
 
             # Debug: Log Gemini response details
             logger.info(f"Gemini response received in {processing_time_ms}ms")
-            logger.debug(
-                f"Gemini response text (first 500 chars): {gemini_response.text[:500]}"
-            )
+            logger.debug(f"Gemini response text (first 500 chars): {gemini_response.text[:500]}")
 
             # Extract and parse response
             transcript_text = gemini_response.text
@@ -177,7 +169,7 @@ class TranscriptionClient:
             if transcript_text.strip().upper() == "NO SPEECH DETECTED":
                 logger.warning("Gemini detected no speech in the audio file")
                 return None
-
+            
             # Check for common sample text patterns that indicate Gemini generated placeholder content
             sample_patterns = [
                 "just to confirm, we're going with the revised plan",
@@ -187,29 +179,21 @@ class TranscriptionClient:
                 "speaker 1 (male):",
                 "speaker 2 (female):",
             ]
-
-            found_sample_patterns = sum(
-                1
-                for pattern in sample_patterns
-                if pattern.lower() in transcript_text.lower()
-            )
-
+            
+            found_sample_patterns = sum(1 for pattern in sample_patterns if pattern.lower() in transcript_text.lower())
+            
             if found_sample_patterns >= 2:
                 logger.error("❌ SAMPLE TEXT DETECTED IN TRANSCRIPTION!")
-                logger.error(
-                    "Gemini returned sample/placeholder text instead of actual transcription"
-                )
+                logger.error("Gemini returned sample/placeholder text instead of actual transcription")
                 logger.error("This typically means:")
                 logger.error("  1. The audio file is empty or nearly empty")
                 logger.error("  2. The audio file contains no discernible speech")
                 logger.error("  3. The audio file is corrupted or invalid")
                 logger.error("  4. The meeting bot failed to capture actual audio")
                 logger.error("")
-                logger.error(
-                    "ACTION REQUIRED: Check the meeting bot recording process!"
-                )
+                logger.error("ACTION REQUIRED: Check the meeting bot recording process!")
                 logger.error("The M4A file likely contains no actual meeting audio.")
-
+            
             sections = self._parse_transcription_sections(transcript_text, options)
 
             # Build result in expected format
@@ -253,18 +237,13 @@ class TranscriptionClient:
                 "audio/m4a": "m4a",
                 "audio/ogg": "ogg",
                 "audio/webm": "webm",
-                "video/webm": "webm",  # WebM files (audio+video)
             }
 
             audio_format = format_map.get(mime_type, "mp3")
             original_size = len(audio_bytes)
 
-            logger.info(
-                f"Converting audio from {audio_format} ({mime_type}) to optimized format"
-            )
-            logger.info(
-                f"Original audio size: {original_size} bytes ({original_size / (1024 * 1024):.2f} MB)"
-            )
+            logger.info(f"Converting audio from {audio_format} ({mime_type}) to optimized format")
+            logger.info(f"Original audio size: {original_size} bytes ({original_size / (1024 * 1024):.2f} MB)")
 
             # Load audio
             audio = AudioSegment.from_file(BytesIO(audio_bytes), format=audio_format)
@@ -305,7 +284,7 @@ class TranscriptionClient:
             "IMPORTANT: Only transcribe what you actually hear in the audio. Do NOT generate sample text, placeholder content, or fictional conversations.",
             "If you cannot clearly hear speech in the audio, respond with 'NO SPEECH DETECTED' only.",
             "",
-            "Please analyze the following audio file and provide:",
+            "Please analyze the following audio file and provide:"
         ]
 
         section_number = 1
