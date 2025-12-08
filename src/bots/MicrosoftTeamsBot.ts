@@ -120,6 +120,24 @@ export class MicrosoftTeamsBot extends MeetBotBase {
 
     await dismissDeviceCheck();
 
+    // Check if microphone is muted and mute if necessary
+    try {
+      this._logger.info('Checking microphone mute status...');
+      const micToggle = await this.page.locator('input[data-tid="toggle-mute"]').first();
+      const dataCid = await micToggle.getAttribute('data-cid');
+
+      if (dataCid === 'toggle-mute-true') {
+        this._logger.info('Microphone is unmuted, clicking to mute...');
+        await micToggle.click();
+        await this.page.waitForTimeout(2000); // Wait for state to update
+      } else {
+        this._logger.info('Microphone is already muted');
+      }
+    } catch (error) {
+      this._logger.info('Could not check/toggle microphone mute status', { error });
+    }
+
+    // Fill in the name field
     this._logger.info('Filling the input field with the name...');
     await this.page.fill('input[type="text"]', name ? name : 'ScreenApp Notetaker');
 
