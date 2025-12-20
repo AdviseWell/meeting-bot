@@ -101,6 +101,9 @@ class TranscriptionClient:
                 mime_type = "audio/wav"
             elif audio_uri.endswith(".ogg"):
                 mime_type = "audio/ogg"
+            elif audio_uri.endswith(".webm"):
+                # Meeting recordings are typically video/webm containers with an audio track
+                mime_type = "video/webm"
 
             logger.info(
                 f"Downloaded {len(audio_bytes)} bytes ({len(audio_bytes) / (1024 * 1024):.2f} MB)"
@@ -192,7 +195,7 @@ class TranscriptionClient:
                 logger.error("  4. The meeting bot failed to capture actual audio")
                 logger.error("")
                 logger.error("ACTION REQUIRED: Check the meeting bot recording process!")
-                logger.error("The M4A file likely contains no actual meeting audio.")
+                logger.error("The audio file likely contains no actual meeting audio.")
             
             sections = self._parse_transcription_sections(transcript_text, options)
 
@@ -237,6 +240,8 @@ class TranscriptionClient:
                 "audio/m4a": "m4a",
                 "audio/ogg": "ogg",
                 "audio/webm": "webm",
+                "video/webm": "webm",
+                "video/mp4": "mp4",
             }
 
             audio_format = format_map.get(mime_type, "mp3")

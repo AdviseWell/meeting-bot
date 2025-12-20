@@ -6,20 +6,18 @@ This manager processes a single meeting recording job:
 1. Reads job details from environment variables
 2. Initiates meeting join via meeting-bot API
 3. Monitors meeting status
-4. Converts recordings (MP4 + M4A)
-5. Uploads to GCS
+4. Uploads the original WEBM to GCS
+5. Transcribes using the WEBM (optional)
 
 Designed to run as a Kubernetes Job, spawned by the controller.
 """
 
 import os
 import sys
-import time
 import logging
-from typing import Optional, Dict
+from typing import Dict
 
 from meeting_monitor import MeetingMonitor
-from media_converter import MediaConverter
 from storage_client import StorageClient, FirestoreClient
 from transcription_client import TranscriptionClient
 from meeting_utils import auto_generate_missing_fields
@@ -64,7 +62,6 @@ class MeetingManager:
 
         # Initialize clients
         self.meeting_monitor = MeetingMonitor(self.meeting_bot_api)
-        self.media_converter = MediaConverter()
         self.storage_client = StorageClient(self.gcs_bucket)
         self.firestore_client = FirestoreClient(self.firestore_database)
         self.transcription_client = TranscriptionClient(
@@ -182,45 +179,6 @@ class MeetingManager:
                 f"Missing required environment variables: {', '.join(missing)}"
             )
 
-    def _find_wav_backup(self, recording_path: str) -> Optional[str]:
-        """
-        Find the WAV backup file corresponding to a recording.
-        
-        The meeting-bot creates WAV backup files using PulseAudio with the pattern:
-        [outputDir]/[userId]/backup_[tempFileId].wav
-        
-        Args:
-            recording_path: Path to the main recording file (WEBM)
-            
-        Returns:
-            Path to WAV backup file if found and valid, None otherwise
-        """
-        import glob
-        
-        try:
-            recording_dir = os.path.dirname(recording_path)
-            wav_pattern = os.path.join(recording_dir, "backup_*.wav")
-            wav_files = glob.glob(wav_pattern)
-            
-            if not wav_files:
-                logger.debug(f"No WAV backup files found matching pattern: {wav_pattern}")
-                return None
-            
-            # Use the first match (there should only be one per recording)
-            wav_path = wav_files[0]
-            
-            # Validate file exists and has content (> 1KB)
-            if os.path.exists(wav_path) and os.path.getsize(wav_path) > 1024:
-                logger.info(f"Found WAV backup: {wav_path} ({os.path.getsize(wav_path)} bytes)")
-                return wav_path
-            else:
-                logger.warning(f"WAV backup file too small or empty: {wav_path}")
-                return None
-                
-        except Exception as e:
-            logger.warning(f"Error searching for WAV backup: {e}")
-            return None
-
     def process_meeting(self) -> bool:
         """
         Process the meeting recording job
@@ -259,232 +217,153 @@ class MeetingManager:
 
             logger.info(f"Meeting completed. Recording at: {recording_path}")
 
-            # Step 3: Upload original WEBM file to GCS (before conversion)
+            # Step 3: Upload original WEBM file to GCS (required)
             logger.info("Step 3: Uploading original WEBM file to GCS...")
-            webm_uploaded = self.storage_client.upload_file(
-                recording_path, f"{self.gcs_path}/recording.webm"
-            )
-            if webm_uploaded:
-                logger.info(f"✅ Original WEBM uploaded to gs://{self.gcs_bucket}/{self.gcs_path}/recording.webm")
-            else:
-                logger.warning("Failed to upload original WEBM file (non-fatal)")
-
-            # Step 3.5: Upload WAV backup file if it exists
-            logger.info("Step 3.5: Checking for WAV backup audio file...")
-            wav_backup_path = self._find_wav_backup(recording_path)
-            if wav_backup_path:
-                logger.info(f"Found WAV backup at: {wav_backup_path}")
-                wav_uploaded = self.storage_client.upload_file(
-                    wav_backup_path, f"{self.gcs_path}/backup_audio.wav"
-                )
-                if wav_uploaded:
-                    logger.info(f"✅ WAV backup uploaded to gs://{self.gcs_bucket}/{self.gcs_path}/backup_audio.wav")
-                else:
-                    logger.warning("Failed to upload WAV backup file (non-fatal)")
-            else:
-                logger.info("No WAV backup file found (this is normal if PulseAudio recording was not enabled)")
-
-            # Step 4: Convert media files
-            logger.info("Step 4: Converting media files...")
-            mp4_path, m4a_path = self.media_converter.convert(recording_path)
-            if not mp4_path or not m4a_path:
-                logger.error("Media conversion failed")
+            if not os.path.exists(recording_path):
+                logger.error(f"Recording file not found: {recording_path}")
                 return False
 
-            logger.info(f"Conversion complete - MP4: {mp4_path}, M4A: {m4a_path}")
+            webm_size = os.path.getsize(recording_path)
+            logger.info(
+                f"WEBM file size: {webm_size} bytes ({webm_size / (1024 * 1024):.2f} MB)"
+            )
+            if webm_size < 1000:
+                logger.error(
+                    f"❌ WEBM file too small ({webm_size} bytes) - file is empty or corrupted"
+                )
+                return False
 
-            # Step 5: Transcribe audio using Gemini (optional, non-fatal)
-            logger.info("Step 5: Transcribing audio with Gemini...")
+            webm_gcs_path = f"{self.gcs_path}/recording.webm"
+            webm_uploaded = self.storage_client.upload_file(recording_path, webm_gcs_path)
+            if not webm_uploaded:
+                logger.error("Failed to upload original WEBM file")
+                return False
+
+            logger.info(
+                f"✅ Original WEBM uploaded to gs://{self.gcs_bucket}/{webm_gcs_path}"
+            )
+
+            # Step 4: Transcribe using the WEBM (optional, non-fatal)
+            logger.info("Step 4: Transcribing WEBM with Gemini...")
             transcript_txt_path = None
             transcript_json_path = None
 
             try:
-                # Validate M4A file before upload
-                if not os.path.exists(m4a_path):
-                    logger.error(f"M4A file not found: {m4a_path}")
-                    return False
+                # Generate signed URL for Gemini to access the WEBM
+                # Uses IAM-based signing to keep files private
+                # Falls back to public URL if IAM permissions missing
+                recording_url = self.storage_client.get_signed_url(
+                    webm_gcs_path, expiration_minutes=120  # 2 hours
+                )
 
-                m4a_size = os.path.getsize(m4a_path)
-                logger.info(f"M4A file size: {m4a_size} bytes ({m4a_size / (1024 * 1024):.2f} MB)")
-
-                # Validate file size is reasonable for a meeting recording
-                # Typical sizes: 1min ~500KB-2MB, 5min ~2-10MB, 30min ~10-50MB
-                if m4a_size < 1000:  # Less than 1KB is definitely empty
-                    logger.error(f"❌ M4A file too small ({m4a_size} bytes) - file is empty or corrupted")
-                    logger.error("This indicates the meeting bot did not capture any audio")
-                    logger.error("Check meeting-bot logs for recording errors")
-                    return False
-                
-                if m4a_size < 100000:  # Less than 100KB (~10 seconds of audio)
-                    logger.warning(f"⚠️  M4A file is very small ({m4a_size} bytes / {m4a_size / 1024:.1f} KB)")
-                    logger.warning("This is unusually small for a meeting recording")
-                    logger.warning("Expected: >500KB for 1 minute, >2MB for 5 minutes")
-                    logger.warning("The recording may be incomplete or contain no actual audio")
-                    logger.warning("Proceeding with transcription, but results may be poor...")
-
-                # Verify audio content using pydub
-                try:
-                    from pydub import AudioSegment
-                    audio = AudioSegment.from_file(m4a_path, format="m4a")
-                    duration_ms = len(audio)
-                    duration_sec = duration_ms / 1000
-                    duration_min = duration_sec / 60
-                    
-                    logger.info(f"📊 Audio file duration: {duration_min:.2f} minutes ({duration_sec:.1f} seconds)")
-                    
-                    # Check if duration is reasonable
-                    if duration_sec < 5:
-                        logger.error(f"❌ Audio duration is too short ({duration_sec:.1f}s)")
-                        logger.error("Recording appears to be nearly empty - likely no meeting audio was captured")
-                        logger.error("This will result in sample/placeholder text from Gemini")
-                        # Continue anyway to see what happens
-                    
-                    # Check for silent audio (all samples near zero)
-                    max_amplitude = audio.max
-                    if max_amplitude < 100:  # Very quiet audio
-                        logger.warning(f"⚠️  Audio appears to be silent or nearly silent (max amplitude: {max_amplitude})")
-                        logger.warning("The recording may not contain actual speech")
-                        
-                except ImportError:
-                    logger.warning("pydub not available - skipping audio content validation")
-                except Exception as e:
-                    logger.warning(f"Could not analyze audio file: {e}")
-
-                # Upload the M4A file to GCS first
-                m4a_gcs_path = f"{self.gcs_path}/audio.m4a"
-                m4a_uploaded = self.storage_client.upload_file(m4a_path, m4a_gcs_path)
-
-                if m4a_uploaded:
-                    # Generate signed URL for Gemini to access audio
-                    # Uses IAM-based signing to keep files private
-                    # Falls back to public URL if IAM permissions missing
-                    audio_url = self.storage_client.get_signed_url(
-                        m4a_gcs_path, expiration_minutes=120  # 2 hours
+                if recording_url:
+                    logger.info(
+                        f"Generated signed URL for WEBM: {recording_url[:50]}..."
                     )
+                    logger.info("Transcribing WEBM with Gemini...")
 
-                    if audio_url:
-                        logger.info(f"Generated signed URL for audio: {audio_url[:50]}...")
-                        logger.info("Transcribing audio with Gemini...")
+                    try:
+                        transcript_data = self.transcription_client.transcribe_audio(
+                            audio_uri=recording_url,
+                            language_code="en-AU",  # Australian
+                            enable_speaker_diarization=True,
+                            enable_timestamps=False,
+                            enable_action_items=True,
+                        )
 
-                        try:
-                            # Transcribe the audio with speaker diarization
-                            transcript_data = (
-                                self.transcription_client.transcribe_audio(
-                                    audio_uri=audio_url,
-                                    language_code="en-AU",  # Australian
-                                    enable_speaker_diarization=True,
-                                    enable_timestamps=False,
-                                    enable_action_items=True,
+                        if transcript_data:
+                            transcript_text = transcript_data.get("transcript", "")
+                            if _is_sample_transcription(transcript_text):
+                                logger.warning(
+                                    "⚠️  Transcription appears to be sample/demo text, not actual meeting content"
                                 )
+                                logger.warning(
+                                    "This may indicate the WEBM contains no speech or audio capture failed"
+                                )
+
+                            import tempfile
+
+                            transcript_txt_path = os.path.join(
+                                tempfile.gettempdir(),
+                                f"{self.meeting_id}_transcript.txt",
+                            )
+                            self.transcription_client.save_transcript(
+                                transcript_data,
+                                transcript_txt_path,
+                                format="txt",
                             )
 
-                            if transcript_data:
-                                # Check if transcription looks like sample/demo text
-                                transcript_text = transcript_data.get("transcript", "")
-                                if _is_sample_transcription(transcript_text):
-                                    logger.warning("⚠️  Transcription appears to be sample/demo text, not actual meeting content")
-                                    logger.warning("This may indicate the audio file was not processed correctly")
-                                    # Continue anyway - better to have sample text than no text
+                            transcript_json_path = os.path.join(
+                                tempfile.gettempdir(),
+                                f"{self.meeting_id}_transcript.json",
+                            )
+                            self.transcription_client.save_transcript(
+                                transcript_data,
+                                transcript_json_path,
+                                format="json",
+                            )
 
-                                import tempfile
+                            logger.info(
+                                f"✅ Transcription complete! Words: {transcript_data['word_count']}"
+                            )
 
-                                # Save transcript as TXT
-                                transcript_txt_path = os.path.join(
-                                    tempfile.gettempdir(),
-                                    f"{self.meeting_id}_transcript.txt",
-                                )
-                                self.transcription_client.save_transcript(
-                                    transcript_data,
-                                    transcript_txt_path,
-                                    format="txt",
-                                )
-
-                                # Save transcript as JSON
-                                transcript_json_path = os.path.join(
-                                    tempfile.gettempdir(),
-                                    f"{self.meeting_id}_transcript.json",
-                                )
-                                self.transcription_client.save_transcript(
-                                    transcript_data,
-                                    transcript_json_path,
-                                    format="json",
-                                )
-
-                                logger.info(
-                                    f"✅ Transcription complete! "
-                                    f"Words: {transcript_data['word_count']}"
-                                )
-
-                                # Store transcription text in Firestore
-                                try:
-                                    transcription_text = transcript_data.get("transcript", "")
-                                    if transcription_text:
-                                        # Use FS_MEETING_ID if provided, otherwise fall back to MEETING_ID
-                                        firestore_meeting_id = self.fs_meeting_id or self.meeting_id
-                                        if firestore_meeting_id:
-                                            firestore_stored = self.firestore_client.set_transcription(
+                            # Store transcription text in Firestore
+                            try:
+                                transcription_text = transcript_data.get("transcript", "")
+                                if transcription_text:
+                                    firestore_meeting_id = (
+                                        self.fs_meeting_id or self.meeting_id
+                                    )
+                                    if firestore_meeting_id:
+                                        firestore_stored = (
+                                            self.firestore_client.set_transcription(
                                                 firestore_meeting_id, transcription_text
                                             )
-                                            if firestore_stored:
-                                                logger.info(
-                                                    f"✅ Transcription stored in Firestore for meeting: {firestore_meeting_id}"
-                                                )
-                                            else:
-                                                logger.warning(
-                                                    "Failed to store transcription in Firestore"
-                                                )
+                                        )
+                                        if firestore_stored:
+                                            logger.info(
+                                                f"✅ Transcription stored in Firestore for meeting: {firestore_meeting_id}"
+                                            )
                                         else:
                                             logger.warning(
-                                                "No meeting ID available for Firestore storage (neither FS_MEETING_ID nor MEETING_ID set)"
+                                                "Failed to store transcription in Firestore"
                                             )
                                     else:
                                         logger.warning(
-                                            "No transcription text available to store in Firestore"
+                                            "No meeting ID available for Firestore storage (neither FS_MEETING_ID nor MEETING_ID set)"
                                         )
-                                except Exception as firestore_err:
-                                    logger.exception(f"Error storing transcription in Firestore: {firestore_err}")
-                                    logger.warning("Continuing despite Firestore storage failure")
-
-                            else:
+                                else:
+                                    logger.warning(
+                                        "No transcription text available to store in Firestore"
+                                    )
+                            except Exception as firestore_err:
+                                logger.exception(
+                                    f"Error storing transcription in Firestore: {firestore_err}"
+                                )
                                 logger.warning(
-                                    "Transcription completed but no results " "returned"
+                                    "Continuing despite Firestore storage failure"
                                 )
-                        finally:
-                            # Always try to revoke public access
-                            # (in case fallback made it public)
-                            try:
-                                self.storage_client.revoke_public_access(m4a_gcs_path)
-                            except Exception as revoke_err:
-                                logger.debug(
-                                    f"Could not revoke public access "
-                                    f"(may not be public): {revoke_err}"
-                                )
-                    else:
-                        logger.warning("Failed to generate signed URL for audio file")
+                        else:
+                            logger.warning(
+                                "Transcription completed but no results returned"
+                            )
+                    finally:
+                        try:
+                            self.storage_client.revoke_public_access(webm_gcs_path)
+                        except Exception as revoke_err:
+                            logger.debug(
+                                "Could not revoke public access (may not be public): "
+                                f"{revoke_err}"
+                            )
                 else:
-                    logger.warning(
-                        "Failed to upload M4A to GCS, " "skipping transcription step"
-                    )
+                    logger.warning("Failed to generate signed URL for WEBM")
 
             except Exception as e:
                 logger.exception(f"Transcription failed (non-fatal): {e}")
                 logger.warning("Continuing with upload despite transcription failure")
 
-            # Step 6: Upload remaining files to GCS
-            logger.info("Step 6: Uploading remaining files to GCS...")
-
-            # Upload video
-            mp4_uploaded = self.storage_client.upload_file(
-                mp4_path, f"{self.gcs_path}/video.mp4"
-            )
-
-            # Upload audio (if not already uploaded for transcription)
-            if not m4a_uploaded:
-                m4a_uploaded = self.storage_client.upload_file(
-                    m4a_path, f"{self.gcs_path}/audio.m4a"
-                )
-
-            # Upload transcripts if available
+            # Step 5: Upload transcripts if available
+            logger.info("Step 5: Uploading transcripts to GCS (if available)...")
             transcript_txt_uploaded = False
             transcript_json_uploaded = False
             if transcript_txt_path and os.path.exists(transcript_txt_path):
@@ -496,28 +375,28 @@ class MeetingManager:
                     transcript_json_path, f"{self.gcs_path}/transcript.json"
                 )
 
-            if mp4_uploaded and m4a_uploaded:
-                logger.info(
-                    f"Successfully uploaded files to gs://{self.gcs_bucket}/{self.gcs_path}/"
-                )
-                if transcript_txt_uploaded and transcript_json_uploaded:
-                    logger.info(f"✅ Transcripts also uploaded successfully")
+            logger.info(
+                f"Successfully uploaded recording to gs://{self.gcs_bucket}/{self.gcs_path}/"
+            )
+            if transcript_txt_uploaded and transcript_json_uploaded:
+                logger.info("✅ Transcripts also uploaded successfully")
 
-                # Cleanup local files
-                self.media_converter.cleanup(recording_path, mp4_path, m4a_path)
+            # Cleanup local files (recording + transcripts)
+            try:
+                if os.path.exists(recording_path):
+                    os.remove(recording_path)
+                    logger.info(f"Cleaned up file: {recording_path}")
+            except Exception as cleanup_err:
+                logger.warning(f"Failed to cleanup file {recording_path}: {cleanup_err}")
 
-                # Cleanup transcript files
-                if transcript_txt_path and os.path.exists(transcript_txt_path):
-                    os.remove(transcript_txt_path)
-                    logger.debug(f"Removed local transcript: {transcript_txt_path}")
-                if transcript_json_path and os.path.exists(transcript_json_path):
-                    os.remove(transcript_json_path)
-                    logger.debug(f"Removed local transcript: {transcript_json_path}")
+            if transcript_txt_path and os.path.exists(transcript_txt_path):
+                os.remove(transcript_txt_path)
+                logger.debug(f"Removed local transcript: {transcript_txt_path}")
+            if transcript_json_path and os.path.exists(transcript_json_path):
+                os.remove(transcript_json_path)
+                logger.debug(f"Removed local transcript: {transcript_json_path}")
 
-                return True
-            else:
-                logger.error("Failed to upload one or more files to GCS")
-                return False
+            return True
 
         except Exception as e:
             logger.exception(f"Error processing meeting: {e}")
