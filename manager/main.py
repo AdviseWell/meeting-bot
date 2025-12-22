@@ -72,23 +72,37 @@ class MeetingManager:
         self.meeting_monitor = MeetingMonitor(self.meeting_bot_api)
         self.storage_client = StorageClient(self.gcs_bucket)
         self.firestore_client = FirestoreClient(self.firestore_database)
-        self.transcription_client = TranscriptionClient(
-            project_id="aw-gemini-api-central"
-        )
 
         # Transcription mode:
-        # - gemini (default): current behavior
-        # - offline: whisper.cpp + offline diarization
+        # - offline (default): whisper.cpp + offline diarization
+        # - gemini: use Gemini for transcription (requires cloud access)
         # - none: skip transcription entirely
         self.transcription_mode = (
-            os.environ.get("TRANSCRIPTION_MODE", "gemini").strip().lower()
+            os.environ.get("TRANSCRIPTION_MODE", "offline").strip().lower()
         )
+
+        # Only initialize Gemini client when explicitly requested. This avoids
+        # accidental cloud usage when the intention is to run fully offline.
+        self.transcription_client = None
+        if self.transcription_mode == "gemini":
+            self.transcription_client = TranscriptionClient(
+                project_id=os.environ.get(
+                    "GEMINI_PROJECT_ID", "aw-gemini-api-central"
+                )
+            )
 
         # Offline pipeline options (only used when TRANSCRIPTION_MODE=offline)
         self.offline_language = os.environ.get(
             "OFFLINE_TRANSCRIPTION_LANGUAGE", "en"
         ).strip()
-        self.offline_max_speakers = int(os.environ.get("OFFLINE_MAX_SPEAKERS", "6"))
+        self.offline_max_speakers = int(
+            os.environ.get("OFFLINE_MAX_SPEAKERS", "6")
+        )
+
+        logger.info(
+            "Transcription backend selected: %s",
+            self.transcription_mode,
+        )
 
     def _load_metadata(self) -> Dict:
         """Load metadata from environment variables for meeting-bot API"""
@@ -363,6 +377,11 @@ class MeetingManager:
 
             if self.transcription_mode == "gemini":
                 try:
+                    if not self.transcription_client:
+                        raise RuntimeError(
+                            "TRANSCRIPTION_MODE=gemini but Gemini client "
+                            "was not initialized"
+                        )
                     target_gcs_path = audio_gcs_path or webm_gcs_path
                     logger.info(
                         f"Transcription target: gs://{self.gcs_bucket}/{target_gcs_path}"
