@@ -1,5 +1,6 @@
 node_modules/
 /test-results/
+test-results/container-e2e/
 /playwright-report/
 /blob-report/
 /playwright/.cache/

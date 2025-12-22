@@ -1,7 +1,29 @@
 node_modules
 dist
+.git
+.venv
+test-results
+playwright-report
+
+# Large optional diarization model artifacts.
+#
+# NOTE: The manager Docker image can be built with fully offline diarization
+# by copying these assets into the image. CI can supply them via an artifact.
+#
+# If you want to keep local docker builds light, you can uncomment these.
+# (In CI/production prebaked builds, keep them INCLUDED.)
+# tools/speechbrain/spkrec-ecapa-voxceleb/*.ckpt
+# tools/speechbrain/spkrec-ecapa-voxceleb/*.bin
+# tools/speechbrain/spkrec-ecapa-voxceleb/*.pt
+node_modules
+dist
 *.log
 .DS_Store
 .git
 .gitignore
 .vscode
+
+# Offline whisper.cpp: required for TRANSCRIPTION_MODE=offline.
+# If you want to exclude these from local dev build contexts, uncomment.
+# tools/whisper.cpp/build/bin/whisper-cli
+# tools/whisper.cpp/models/*.bin

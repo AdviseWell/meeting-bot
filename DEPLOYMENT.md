@@ -199,6 +199,40 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
 3. **Image not found**: Verify the image name and tag are correct
 4. **Health check failures**: Check application logs for startup issues
 
+## 🗣️ Offline diarization (prebaked Docker)
+
+The repository includes a fully offline transcription + diarization script at
+`scripts/whisper_diarize.py`.
+
+To make diarization work **without** runtime downloads (no Hugging Face fetch),
+prebake the SpeechBrain ECAPA model artifacts into the Docker image.
+
+### Manager image (`Dockerfile.manager`)
+
+The manager Dockerfile:
+
+1. Installs the optional offline diarization dependencies (Torch, SpeechBrain,
+   scikit-learn).
+2. Copies diarization model artifacts from the build context into the image at:
+
+`/app/tools/speechbrain/spkrec-ecapa-voxceleb/`
+
+`scripts/whisper_diarize.py` expects these files to exist in that directory:
+
+- `hyperparams.yaml`
+- `embedding_model.ckpt`
+- (optional) `mean_var_norm_emb.ckpt`
+
+The repo contains a placeholder directory at:
+
+`tools/speechbrain/spkrec-ecapa-voxceleb/`
+
+Populate it during CI (for example by downloading an internal artifact), then
+build/push your manager image.
+
+> Note: do not commit model weights to git unless licensing and your repo
+> policies allow it.
+
 ### Debug Commands
 
 ```bash
@@ -269,4 +303,4 @@ For high availability, consider:
 
 ### Contributing
 
-We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) for details on how to get involved with the project. 
+We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) for details on how to get involved with the project.

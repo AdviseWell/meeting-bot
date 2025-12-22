@@ -154,6 +154,167 @@ jobs:
           echo ""
 
 
+  build-manager:
+    runs-on: ubuntu-latest
+    outputs:
+      manager_digest: ${{ steps.manager_docker_build.outputs.digest }}
+      manager_tags: ${{ steps.manager_meta.outputs.tags }}
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Authenticate with Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          project_id: ${{ github.ref_name == 'main' && vars.GCP_PROJECT_CODE_PROD || vars.GCP_PROJECT_CODE_DEV }}
+          workload_identity_provider: ${{ github.ref_name == 'main' && vars.GCP_WIF_POOL_PROD || vars.GCP_WIF_POOL_DEV }}
+          service_account: ${{ github.ref_name == 'main' && vars.CICD_SERVICE_ACCOUNT_ADVISEWELLCO_PROD || vars.CICD_SERVICE_ACCOUNT_ADVISEWELLCO_DEV }}
+          create_credentials_file: true
+          export_environment_variables: true
+
+      - name: Set up Google Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Set Google Artifact Registry URL
+        id: manager_gar
+        run: |
+          if [[ "${{ github.ref_name }}" == "main" ]]; then
+            echo "REGISTRY=${{ env.GAR_LOCATION }}-docker.pkg.dev/aw-production-4df9/${{ env.GAR_REPOSITORY }}" >> $GITHUB_ENV
+            echo "registry=${{ env.GAR_LOCATION }}-docker.pkg.dev/aw-production-4df9/${{ env.GAR_REPOSITORY }}" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref_name }}" == "develop" ]]; then
+            echo "REGISTRY=${{ env.GAR_LOCATION }}-docker.pkg.dev/aw-development-7226/${{ env.GAR_REPOSITORY }}" >> $GITHUB_ENV
+            echo "registry=${{ env.GAR_LOCATION }}-docker.pkg.dev/aw-development-7226/${{ env.GAR_REPOSITORY }}" >> $GITHUB_OUTPUT
+          else
+            echo "REGISTRY=${{ env.GAR_LOCATION }}-docker.pkg.dev/aw-development-7226/${{ env.GAR_REPOSITORY }}" >> $GITHUB_ENV
+            echo "registry=${{ env.GAR_LOCATION }}-docker.pkg.dev/aw-development-7226/${{ env.GAR_REPOSITORY }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Google Artifact Registry
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+        run: |
+          gcloud auth configure-docker ${{ env.GAR_LOCATION }}-docker.pkg.dev --quiet
+
+      # Get version/tag only on main push
+      - name: Get version from package.json
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        id: pkg
+        run: |
+          VERSION=$(jq -r .version package.json)
+          TAG="v$VERSION"
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "TAG=$TAG" >> $GITHUB_ENV
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+      - name: Extract metadata for manager
+        id: manager_meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/manager
+          tags: |
+            ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && format('type=raw,value={0}', env.TAG) || '' }}
+            type=ref,event=branch
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build and push manager Docker image
+        id: manager_docker_build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile.manager
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop') }}
+          tags: ${{ steps.manager_meta.outputs.tags }}
+          labels: ${{ steps.manager_meta.outputs.labels }}
+          cache-from: type=gha,scope=manager
+          cache-to: type=gha,mode=max,scope=manager
+
+      # PR-only: run a cheap smoke check to catch dependency mismatches
+      # (e.g., SpeechBrain <-> huggingface_hub API incompatibilities) without
+      # requiring GCS or running whisper/diarization.
+      - name: Smoke test manager image (imports + versions)
+        if: github.event_name == 'pull_request'
+        run: |
+          IMAGE="${{ env.REGISTRY }}/manager:sha-${{ github.sha }}"
+          echo "Running smoke test against $IMAGE"
+          docker run --rm "$IMAGE" python - <<'PY'
+          import importlib
+          import pkgutil
+          
+          # Ensure our offline pipeline module is importable
+          import offline_pipeline  # noqa: F401
+          
+          # Ensure SpeechBrain and HF hub are present and compatible
+          import speechbrain  # noqa: F401
+          import huggingface_hub
+          
+          print('speechbrain', speechbrain.__version__)
+          print('huggingface_hub', huggingface_hub.__version__)
+          
+          # Quick sanity: signature still contains a token parameter name that
+          # SpeechBrain 1.0.x expects (use_auth_token). If not, we fail fast.
+          from huggingface_hub import hf_hub_download
+          import inspect
+          params = inspect.signature(hf_hub_download).parameters
+          if 'use_auth_token' not in params and 'token' not in params:
+            raise SystemExit('hf_hub_download has no auth token param? Unexpected signature.')
+          
+          # Confirm whisper-cli exists in image (offline mode expects it)
+          import os
+          from pathlib import Path
+          whisper_cli = Path('/app/tools/whisper.cpp/build/bin/whisper-cli')
+          if not whisper_cli.exists():
+            raise SystemExit(f'missing whisper-cli at {whisper_cli}')
+          
+          # Confirm whisper model exists
+          model = Path('/app/tools/whisper.cpp/models/ggml-base.en.bin')
+          if not model.exists():
+            raise SystemExit(f'missing whisper model at {model}')
+          
+          print('manager smoke check: OK')
+          PY
+
+      - name: Output Manager Image Reference
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+        run: |
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "📦 MANAGER IMAGE BUILT AND PUSHED"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo ""
+          echo "Git SHA: $(git rev-parse --short=8 HEAD)"
+          echo "Branch:  ${{ github.ref_name }}"
+          echo ""
+          echo "Image Digest: ${{ steps.manager_docker_build.outputs.digest }}"
+          echo ""
+          echo "Available Tags:"
+          echo "${{ steps.manager_meta.outputs.tags }}" | while read tag; do
+            if [[ -n "$tag" ]]; then
+              echo "  • $tag"
+            fi
+          done
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "🔗 COPY THIS FOR TERRAFORM/KUBERNETES:"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          FIRST_TAG=$(echo "${{ steps.manager_meta.outputs.tags }}" | head -n1)
+          REGISTRY=$(echo "$FIRST_TAG" | cut -d'/' -f1)
+          REPO=$(echo "$FIRST_TAG" | cut -d':' -f1 | cut -d'/' -f2-)
+          echo ""
+          echo "${REGISTRY}/${REPO}@${{ steps.manager_docker_build.outputs.digest }}"
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo ""
+
+
   build-controller:
     runs-on: ubuntu-latest
     outputs:
@@ -271,66 +432,6 @@ jobs:
           echo ""
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo ""
-
-  build-manager:
-    runs-on: ubuntu-latest
-    outputs:
-      manager_digest: ${{ steps.manager_docker_build.outputs.digest }}
-      manager_tags: ${{ steps.manager_meta.outputs.tags }}
-    permissions:
-      contents: read
-      packages: write
-      id-token: write
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Authenticate with Google Cloud
-        uses: google-github-actions/auth@v2
-        with:
-          project_id: ${{ github.ref_name == 'main' && vars.GCP_PROJECT_CODE_PROD || vars.GCP_PROJECT_CODE_DEV }}
-          workload_identity_provider: ${{ github.ref_name == 'main' && vars.GCP_WIF_POOL_PROD || vars.GCP_WIF_POOL_DEV }}
-          service_account: ${{ github.ref_name == 'main' && vars.CICD_SERVICE_ACCOUNT_ADVISEWELLCO_PROD || vars.CICD_SERVICE_ACCOUNT_ADVISEWELLCO_DEV }}
-          create_credentials_file: true
-          export_environment_variables: true
-
-      - name: Set up Google Cloud SDK
-        uses: google-github-actions/setup-gcloud@v2
-
-      - name: Set Google Artifact Registry URL
-        id: manager_gar
-        run: |
-          if [[ "${{ github.ref_name }}" == "main" ]]; then
-            echo "REGISTRY=${{ env.GAR_LOCATION }}-docker.pkg.dev/aw-production-4df9/${{ env.GAR_REPOSITORY }}" >> $GITHUB_ENV
-            echo "registry=${{ env.GAR_LOCATION }}-docker.pkg.dev/aw-production-4df9/${{ env.GAR_REPOSITORY }}" >> $GITHUB_OUTPUT
-          elif [[ "${{ github.ref_name }}" == "develop" ]]; then
-            echo "REGISTRY=${{ env.GAR_LOCATION }}-docker.pkg.dev/aw-development-7226/${{ env.GAR_REPOSITORY }}" >> $GITHUB_ENV
-            echo "registry=${{ env.GAR_LOCATION }}-docker.pkg.dev/aw-development-7226/${{ env.GAR_REPOSITORY }}" >> $GITHUB_OUTPUT
-          else
-            echo "REGISTRY=${{ env.GAR_LOCATION }}-docker.pkg.dev/aw-development-7226/${{ env.GAR_REPOSITORY }}" >> $GITHUB_ENV
-            echo "registry=${{ env.GAR_LOCATION }}-docker.pkg.dev/aw-development-7226/${{ env.GAR_REPOSITORY }}" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      # Only login to registry if we will push
-      - name: Log in to Google Artifact Registry
-        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
-        run: |
-          gcloud auth configure-docker ${{ env.GAR_LOCATION }}-docker.pkg.dev --quiet
-
-      # Get version/tag only on main push
-      - name: Get version from package.json
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        id: pkg
-        run: |
-          VERSION=$(jq -r .version package.json)
-          TAG="v$VERSION"
-          echo "VERSION=$VERSION" >> $GITHUB_ENV
-          echo "TAG=$TAG" >> $GITHUB_ENV
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
 
       # Generate Docker tags for manager
       - name: Extract metadata for manager

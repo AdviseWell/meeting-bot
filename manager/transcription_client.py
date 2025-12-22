@@ -10,6 +10,7 @@ import os
 import time
 import logging
 import json
+import math
 from typing import Optional, Dict, Any, List, Tuple
 from google import genai
 from google.genai.types import HttpOptions, Part
@@ -81,29 +82,58 @@ class TranscriptionClient:
             logger.info(f"Starting Gemini transcription for: {audio_uri}")
 
             # Download audio file
-            if audio_uri.startswith("gs://"):
-                # For GCS URIs, convert to signed URL or download via GCS client
-                logger.error(
-                    "Direct GCS URIs not supported - please provide signed URL"
-                )
-                return None
+            if os.path.exists(audio_uri):
+                logger.info("Loading audio from local file...")
+                with open(audio_uri, "rb") as f:
+                    audio_bytes = f.read()
 
-            logger.info("Downloading audio file...")
-            response = requests.get(audio_uri, timeout=60)
-            response.raise_for_status()
-            audio_bytes = response.content
+                # Guess mime type from extension
+                mime_type = "audio/mp4"
+                if audio_uri.endswith(".mp3"):
+                    mime_type = "audio/mpeg"
+                elif audio_uri.endswith(".wav"):
+                    mime_type = "audio/wav"
+                elif audio_uri.endswith(".ogg"):
+                    mime_type = "audio/ogg"
+                elif audio_uri.endswith(".webm"):
+                    mime_type = "video/webm"
+                elif audio_uri.endswith(".mp4"):
+                    mime_type = "video/mp4"
 
-            # Detect MIME type from URL or default to m4a
-            mime_type = "audio/mp4"  # M4A files use audio/mp4 MIME type
-            if audio_uri.endswith(".mp3"):
-                mime_type = "audio/mpeg"
-            elif audio_uri.endswith(".wav"):
-                mime_type = "audio/wav"
-            elif audio_uri.endswith(".ogg"):
-                mime_type = "audio/ogg"
-            elif audio_uri.endswith(".webm"):
-                # Meeting recordings are typically video/webm containers with an audio track
-                mime_type = "video/webm"
+            elif audio_uri.startswith("gs://"):
+                # For GCS URIs, download bytes directly via GCS client.
+                audio_bytes = self._download_gcs_uri(audio_uri)
+                if audio_bytes is None:
+                    return None
+                # Detect MIME type from file extension
+                mime_type = "audio/mp4"  # default
+                if audio_uri.endswith(".mp3"):
+                    mime_type = "audio/mpeg"
+                elif audio_uri.endswith(".wav"):
+                    mime_type = "audio/wav"
+                elif audio_uri.endswith(".ogg"):
+                    mime_type = "audio/ogg"
+                elif audio_uri.endswith(".webm"):
+                    mime_type = "video/webm"
+                elif audio_uri.endswith(".mp4"):
+                    mime_type = "video/mp4"
+            else:
+                logger.info("Downloading audio file...")
+                response = requests.get(audio_uri, timeout=60)
+                response.raise_for_status()
+                audio_bytes = response.content
+
+                # Detect MIME type from URL or default to m4a
+                mime_type = "audio/mp4"  # M4A files use audio/mp4 MIME type
+                if audio_uri.endswith(".mp3"):
+                    mime_type = "audio/mpeg"
+                elif audio_uri.endswith(".wav"):
+                    mime_type = "audio/wav"
+                elif audio_uri.endswith(".ogg"):
+                    mime_type = "audio/ogg"
+                elif audio_uri.endswith(".webm"):
+                    # Meeting recordings are typically video/webm containers with an audio track
+                    mime_type = "video/webm"
 
             logger.info(
                 f"Downloaded {len(audio_bytes)} bytes ({len(audio_bytes) / (1024 * 1024):.2f} MB)"
@@ -111,17 +141,22 @@ class TranscriptionClient:
 
             # Validate audio file has content
             if len(audio_bytes) < 1000:  # Less than 1KB is likely empty/corrupted
-                logger.error(f"Audio file too small ({len(audio_bytes)} bytes) - likely empty or corrupted")
+                logger.error(
+                    f"Audio file too small ({len(audio_bytes)} bytes) - likely empty or corrupted"
+                )
                 return None
 
-            # Convert to optimized format
+            # Convert to optimized format (best effort). If ffmpeg isn't available,
+            # this may fall back to the original container which can be very large.
             audio_bytes, optimized_mime_type = self._convert_to_optimized_format(
                 audio_bytes, mime_type
             )
 
             # Validate converted audio
             if len(audio_bytes) < 1000:
-                logger.error(f"Converted audio file too small ({len(audio_bytes)} bytes) - conversion failed")
+                logger.error(
+                    f"Converted audio file too small ({len(audio_bytes)} bytes) - conversion failed"
+                )
                 return None
 
             # Build transcription options
@@ -147,32 +182,51 @@ class TranscriptionClient:
                 data=audio_bytes, mime_type=optimized_mime_type
             )
 
-            # Generate transcription with Gemini
+            # Generate transcription with Gemini.
+            # Long meetings can exceed the model's input limits. If that happens,
+            # fall back to chunked transcription.
             start_time = time.time()
-            gemini_response = self.client.models.generate_content(
-                model="gemini-2.5-flash",  # Latest high-performance model
-                contents=[prompt, audio_part],
-                config={
-                    "temperature": 0.1,  # Low temperature for accuracy
-                    "max_output_tokens": 65536,  # Max for Gemini 2.5 Flash
-                    "response_mime_type": "text/plain",
-                },
-            )
+            try:
+                gemini_response = self.client.models.generate_content(
+                    model="gemini-2.5-flash",  # Latest high-performance model
+                    contents=[prompt, audio_part],
+                    config={
+                        "temperature": 0.1,  # Low temperature for accuracy
+                        "max_output_tokens": 65536,  # Max for Gemini 2.5 Flash
+                        "response_mime_type": "text/plain",
+                    },
+                )
+                transcript_text = gemini_response.text
+            except Exception as e:
+                # Heuristic: token/input-too-large errors should trigger chunking.
+                msg = str(e)
+                if "input token count" in msg.lower() or "131072" in msg:
+                    logger.warning(
+                        "Gemini request exceeded input limits; falling back to "
+                        "chunked transcription."
+                    )
+                    return self._transcribe_in_chunks(
+                        audio_bytes=audio_bytes,
+                        mime_type=optimized_mime_type,
+                        language_code=language_code,
+                        enable_speaker_diarization=enable_speaker_diarization,
+                        enable_timestamps=enable_timestamps,
+                        enable_action_items=enable_action_items,
+                    )
+                raise
 
             processing_time_ms = int((time.time() - start_time) * 1000)
 
-            # Debug: Log Gemini response details
             logger.info(f"Gemini response received in {processing_time_ms}ms")
-            logger.debug(f"Gemini response text (first 500 chars): {gemini_response.text[:500]}")
-
-            # Extract and parse response
-            transcript_text = gemini_response.text
+            logger.debug(
+                "Gemini response text (first 500 chars): " f"{transcript_text[:500]}"
+            )
 
             # Check for no speech detected
             if transcript_text.strip().upper() == "NO SPEECH DETECTED":
                 logger.warning("Gemini detected no speech in the audio file")
                 return None
-            
+
             # Check for common sample text patterns that indicate Gemini generated placeholder content
             sample_patterns = [
                 "just to confirm, we're going with the revised plan",
@@ -182,21 +236,29 @@ class TranscriptionClient:
                 "speaker 1 (male):",
                 "speaker 2 (female):",
             ]
-            
-            found_sample_patterns = sum(1 for pattern in sample_patterns if pattern.lower() in transcript_text.lower())
-            
+
+            found_sample_patterns = sum(
+                1
+                for pattern in sample_patterns
+                if pattern.lower() in transcript_text.lower()
+            )
+
             if found_sample_patterns >= 2:
                 logger.error("❌ SAMPLE TEXT DETECTED IN TRANSCRIPTION!")
-                logger.error("Gemini returned sample/placeholder text instead of actual transcription")
+                logger.error(
+                    "Gemini returned sample/placeholder text instead of actual transcription"
+                )
                 logger.error("This typically means:")
                 logger.error("  1. The audio file is empty or nearly empty")
                 logger.error("  2. The audio file contains no discernible speech")
                 logger.error("  3. The audio file is corrupted or invalid")
                 logger.error("  4. The meeting bot failed to capture actual audio")
                 logger.error("")
-                logger.error("ACTION REQUIRED: Check the meeting bot recording process!")
+                logger.error(
+                    "ACTION REQUIRED: Check the meeting bot recording process!"
+                )
                 logger.error("The audio file likely contains no actual meeting audio.")
-            
+
             sections = self._parse_transcription_sections(transcript_text, options)
 
             # Build result in expected format
@@ -217,6 +279,250 @@ class TranscriptionClient:
 
         except Exception as e:
             logger.exception(f"Error during transcription: {e}")
+            return None
+
+    def _transcribe_in_chunks(
+        self,
+        audio_bytes: bytes,
+        mime_type: str,
+        language_code: str,
+        enable_speaker_diarization: bool,
+        enable_timestamps: bool,
+        enable_action_items: bool,
+        chunk_seconds: int = 480,
+        overlap_seconds: int = 10,
+    ) -> Optional[Dict]:
+        """Transcribe long audio by splitting into chunks.
+
+        This is a pragmatic fallback for long meetings that exceed model input
+        limits. We keep the prompt small per request and stitch transcripts.
+
+        Notes:
+        - Speaker diarization across chunks will not be globally consistent.
+        - Action items will be best-effort: we ask for action items only on the
+          final merge step.
+        """
+        try:
+            # Only attempt chunking when we can decode audio.
+            from pydub import AudioSegment
+
+            # Map mime_type to pydub format.
+            format_map = {
+                "audio/mpeg": "mp3",
+                "audio/mp3": "mp3",
+                "audio/wav": "wav",
+                "audio/flac": "flac",
+                "audio/mp4": "m4a",
+                "audio/m4a": "m4a",
+                "audio/ogg": "ogg",
+                "audio/webm": "webm",
+                "video/webm": "webm",
+                "video/mp4": "mp4",
+            }
+            audio_format = format_map.get(mime_type, None)
+            if not audio_format:
+                logger.error(f"Unsupported mime type for chunking: {mime_type}")
+                return None
+
+            # This requires ffmpeg/avlib. If not present, pydub will fail.
+            audio = AudioSegment.from_file(BytesIO(audio_bytes), format=audio_format)
+
+            # Downmix for speech.
+            audio = audio.set_channels(1).set_frame_rate(16000)
+
+            total_ms = len(audio)
+            chunk_ms = chunk_seconds * 1000
+            overlap_ms = overlap_seconds * 1000
+            num_chunks = int(math.ceil(total_ms / chunk_ms))
+
+            logger.info(
+                "Chunking audio for transcription: "
+                f"duration={total_ms/1000:.1f}s chunks={num_chunks} "
+                f"chunk_seconds={chunk_seconds}s overlap_seconds={overlap_seconds}s"
+            )
+
+            chunk_texts: List[str] = []
+            total_processing_ms = 0
+
+            for i in range(num_chunks):
+                start = max(0, i * chunk_ms - overlap_ms)
+                end = min(total_ms, (i + 1) * chunk_ms + overlap_ms)
+                chunk = audio[start:end]
+
+                buf = BytesIO()
+                # OGG/Opus is compact and speech-friendly.
+                chunk.export(buf, format="ogg", codec="libopus", bitrate="32k")
+                chunk_bytes = buf.getvalue()
+
+                options = {
+                    "fullTranscript": True,
+                    "timestamps": enable_timestamps,
+                    "speakerIdentification": enable_speaker_diarization,
+                    "summary": False,
+                    "actionItems": False,  # defer to final
+                    "customPrompt": None,
+                }
+
+                prompt = self._build_transcription_prompt(options, language_code)
+                audio_part = Part.from_bytes(data=chunk_bytes, mime_type="audio/ogg")
+
+                logger.info(
+                    f"Transcribing chunk {i+1}/{num_chunks} "
+                    f"({start/1000:.1f}s-{end/1000:.1f}s, {len(chunk_bytes)/(1024*1024):.2f}MB)"
+                )
+                start_time = time.time()
+
+                def _call_gemini(part: Part, max_tokens: int = 8192):
+                    return self.client.models.generate_content(
+                        model="gemini-2.5-flash",
+                        contents=[prompt, part],
+                        config={
+                            "temperature": 0.1,
+                            "max_output_tokens": max_tokens,
+                            "response_mime_type": "text/plain",
+                        },
+                    )
+
+                # Try once; if we still exceed input limits, shrink and retry.
+                try:
+                    resp = _call_gemini(audio_part)
+                except Exception as e:
+                    msg = str(e).lower()
+                    if "input token count" in msg or "131072" in msg:
+                        logger.warning(
+                            f"Chunk {i+1} still too large for input limits; "
+                            "retrying with a shorter chunk."
+                        )
+                        # Re-export a shorter window (half chunk) without overlap.
+                        short_end = min(total_ms, start + int(chunk_ms / 2))
+                        short_chunk = audio[start:short_end]
+                        buf = BytesIO()
+                        short_chunk.export(
+                            buf,
+                            format="ogg",
+                            codec="libopus",
+                            bitrate="24k",
+                        )
+                        short_part = Part.from_bytes(
+                            data=buf.getvalue(),
+                            mime_type="audio/ogg",
+                        )
+                        resp = _call_gemini(short_part, max_tokens=6144)
+                    else:
+                        raise
+                total_processing_ms += int((time.time() - start_time) * 1000)
+
+                resp_text = getattr(resp, "text", None)
+                if not resp_text:
+                    logger.warning(
+                        f"Gemini returned empty response text for chunk {i+1}; "
+                        "retrying once with a simpler prompt."
+                    )
+
+                    # Retry with diarization/action-items disabled to reduce output.
+                    retry_options = {
+                        "fullTranscript": True,
+                        "timestamps": False,
+                        "speakerIdentification": False,
+                        "summary": False,
+                        "actionItems": False,
+                        "customPrompt": None,
+                    }
+                    retry_prompt = self._build_transcription_prompt(
+                        retry_options, language_code
+                    )
+                    retry_resp = self.client.models.generate_content(
+                        model="gemini-2.5-flash",
+                        contents=[retry_prompt, audio_part],
+                        config={
+                            "temperature": 0.1,
+                            "max_output_tokens": 4096,
+                            "response_mime_type": "text/plain",
+                        },
+                    )
+                    resp_text = getattr(retry_resp, "text", None)
+                    if not resp_text:
+                        raise RuntimeError(
+                            f"Gemini returned empty response text for chunk {i+1}"
+                        )
+
+                chunk_texts.append(resp_text.strip())
+
+            merged_transcript = "\n\n".join(chunk_texts).strip()
+
+            # Optional: ask Gemini to extract action items from the merged
+            # transcript text (text-only, cheap, avoids re-uploading large audio).
+            sections: Dict[str, Any] = {"fullTranscript": merged_transcript}
+            action_items: Any = []
+            if enable_action_items:
+                prompt = (
+                    "You are a professional meeting assistant. "
+                    "Given the transcript below, extract a bullet list of action "
+                    "items, tasks, and decisions. If none, return an empty list.\n\n"
+                    "Transcript:\n" + merged_transcript
+                )
+                try:
+                    resp = self.client.models.generate_content(
+                        model="gemini-2.5-flash",
+                        contents=[prompt],
+                        config={
+                            "temperature": 0.1,
+                            "max_output_tokens": 2048,
+                            "response_mime_type": "text/plain",
+                        },
+                    )
+                    action_items = resp.text.strip()
+                    sections["actionItems"] = action_items
+                except Exception as e:
+                    logger.warning(f"Action item extraction failed: {e}")
+
+            result = {
+                "transcript": merged_transcript,
+                "segments": [],
+                "word_count": len(merged_transcript.split()),
+                "duration_seconds": float(total_ms) / 1000.0,
+                "processing_time_ms": total_processing_ms,
+                "model": "gemini-2.5-flash",
+                "sections": sections,
+            }
+            logger.info(
+                f"✅ Chunked transcription complete! {result['word_count']} words"
+            )
+            return result
+        except ImportError:
+            logger.error(
+                "Chunking requires pydub. It's installed, but ffmpeg may be missing."
+            )
+            return None
+        except Exception as e:
+            logger.exception(f"Chunked transcription failed: {e}")
+            return None
+
+    def _download_gcs_uri(self, gcs_uri: str) -> Optional[bytes]:
+        """Download a gs://bucket/path object into memory.
+
+        This is used by the local transcription runner so it doesn't need signed
+        URLs (which require service-account signing permissions).
+        """
+        try:
+            from google.cloud import storage
+
+            if not gcs_uri.startswith("gs://"):
+                raise ValueError("Expected gs:// URI")
+
+            without_scheme = gcs_uri[len("gs://") :]
+            bucket_name, _, blob_path = without_scheme.partition("/")
+            if not bucket_name or not blob_path:
+                raise ValueError("Invalid gs:// URI")
+
+            logger.info(f"Downloading from GCS: gs://{bucket_name}/{blob_path}")
+            client = storage.Client()
+            bucket = client.bucket(bucket_name)
+            blob = bucket.blob(blob_path)
+            data = blob.download_as_bytes()
+            return data
+        except Exception as e:
+            logger.exception(f"Failed to download GCS URI {gcs_uri}: {e}")
             return None
 
     def _convert_to_optimized_format(
@@ -247,8 +553,12 @@ class TranscriptionClient:
             audio_format = format_map.get(mime_type, "mp3")
             original_size = len(audio_bytes)
 
-            logger.info(f"Converting audio from {audio_format} ({mime_type}) to optimized format")
-            logger.info(f"Original audio size: {original_size} bytes ({original_size / (1024 * 1024):.2f} MB)")
+            logger.info(
+                f"Converting audio from {audio_format} ({mime_type}) to optimized format"
+            )
+            logger.info(
+                f"Original audio size: {original_size} bytes ({original_size / (1024 * 1024):.2f} MB)"
+            )
 
             # Load audio
             audio = AudioSegment.from_file(BytesIO(audio_bytes), format=audio_format)
@@ -289,7 +599,7 @@ class TranscriptionClient:
             "IMPORTANT: Only transcribe what you actually hear in the audio. Do NOT generate sample text, placeholder content, or fictional conversations.",
             "If you cannot clearly hear speech in the audio, respond with 'NO SPEECH DETECTED' only.",
             "",
-            "Please analyze the following audio file and provide:"
+            "Please analyze the following audio file and provide:",
         ]
 
         section_number = 1

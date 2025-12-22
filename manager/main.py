@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """
+
+# type: ignore
 Meeting Bot Manager - Job Execution
 
 This manager processes a single meeting recording job:
@@ -16,11 +18,15 @@ import os
 import sys
 import logging
 from typing import Dict
+import tempfile
+from pathlib import Path
 
 from meeting_monitor import MeetingMonitor
 from storage_client import StorageClient, FirestoreClient
 from transcription_client import TranscriptionClient
 from meeting_utils import auto_generate_missing_fields
+from media_converter import MediaConverter
+from offline_pipeline import transcribe_and_diarize_local_media
 
 # Configure logging
 logging.basicConfig(
@@ -44,7 +50,9 @@ class MeetingManager:
         # Required environment variables for the meeting job
         self.meeting_url = os.environ.get("MEETING_URL")
         self.meeting_id = os.environ.get("MEETING_ID")
-        self.fs_meeting_id = os.environ.get("FS_MEETING_ID")  # Firestore-specific meeting ID
+        self.fs_meeting_id = os.environ.get(
+            "FS_MEETING_ID"
+        )  # Firestore-specific meeting ID
         self.gcs_path = os.environ.get("GCS_PATH")
 
         # Optional meeting metadata
@@ -67,6 +75,20 @@ class MeetingManager:
         self.transcription_client = TranscriptionClient(
             project_id="aw-gemini-api-central"
         )
+
+        # Transcription mode:
+        # - gemini (default): current behavior
+        # - offline: whisper.cpp + offline diarization
+        # - none: skip transcription entirely
+        self.transcription_mode = (
+            os.environ.get("TRANSCRIPTION_MODE", "gemini").strip().lower()
+        )
+
+        # Offline pipeline options (only used when TRANSCRIPTION_MODE=offline)
+        self.offline_language = os.environ.get(
+            "OFFLINE_TRANSCRIPTION_LANGUAGE", "en"
+        ).strip()
+        self.offline_max_speakers = int(os.environ.get("OFFLINE_MAX_SPEAKERS", "6"))
 
     def _load_metadata(self) -> Dict:
         """Load metadata from environment variables for meeting-bot API"""
@@ -108,21 +130,25 @@ class MeetingManager:
                     bearer_token=bearer_token,
                     user_id=user_id,
                     bot_id=bot_id,
-                    event_id=event_id
+                    event_id=event_id,
                 )
-                
+
                 # Use auto-generated values
                 metadata["bearerToken"] = auto_generated["bearer_token"]
                 metadata["userId"] = auto_generated["user_id"]
                 metadata["botId"] = auto_generated["bot_id"]
-                
+
                 # Also update meeting_id if it wasn't provided
                 if not self.meeting_id:
                     metadata["meeting_id"] = auto_generated["meeting_id"]
-                    
-                logger.info(f"Auto-generated fields: userId={metadata['userId']}, botId={metadata['botId']}, bearerToken={'***' if metadata['bearerToken'] else 'NONE'}")
+
+                logger.info(
+                    f"Auto-generated fields: userId={metadata['userId']}, botId={metadata['botId']}, bearerToken={'***' if metadata['bearerToken'] else 'NONE'}"
+                )
             except Exception as e:
-                logger.warning(f"Could not auto-generate fields: {e}. Using fallback values.")
+                logger.warning(
+                    f"Could not auto-generate fields: {e}. Using fallback values."
+                )
                 # Fallback to original behavior
                 metadata["bearerToken"] = bearer_token or ""
                 metadata["userId"] = user_id or "system"
@@ -217,6 +243,37 @@ class MeetingManager:
 
             logger.info(f"Meeting completed. Recording at: {recording_path}")
 
+            # Step 2.5: Extract audio-only (preferred for transcription)
+            # This reduces upload size and significantly improves chances of a
+            # one-shot transcription staying within model input limits.
+            audio_path = None
+            try:
+                logger.info("Step 2.5: Extracting audio-only for transcription...")
+                converter = MediaConverter()
+                _, extracted_m4a = converter.convert(recording_path)
+                if extracted_m4a and os.path.exists(extracted_m4a):
+                    audio_size = os.path.getsize(extracted_m4a)
+                    logger.info(
+                        "Extracted audio size: "
+                        f"{audio_size} bytes ({audio_size / (1024 * 1024):.2f} MB)"
+                    )
+                    if audio_size >= 1000:
+                        audio_path = extracted_m4a
+                    else:
+                        logger.warning(
+                            "Extracted audio file is too small; will fall back "
+                            "to WEBM for transcription."
+                        )
+                else:
+                    logger.warning(
+                        "Audio extraction failed; will fall back to WEBM for "
+                        "transcription."
+                    )
+            except Exception as audio_err:
+                logger.warning(
+                    f"Audio extraction failed; continuing without it: {audio_err}"
+                )
+
             # Step 3: Upload original WEBM file to GCS (required)
             logger.info("Step 3: Uploading original WEBM file to GCS...")
             if not os.path.exists(recording_path):
@@ -234,7 +291,9 @@ class MeetingManager:
                 return False
 
             webm_gcs_path = f"{self.gcs_path}/recording.webm"
-            webm_uploaded = self.storage_client.upload_file(recording_path, webm_gcs_path)
+            webm_uploaded = self.storage_client.upload_file(
+                recording_path, webm_gcs_path
+            )
             if not webm_uploaded:
                 logger.error("Failed to upload original WEBM file")
                 return False
@@ -243,124 +302,195 @@ class MeetingManager:
                 f"✅ Original WEBM uploaded to gs://{self.gcs_bucket}/{webm_gcs_path}"
             )
 
-            # Step 4: Transcribe using the WEBM (optional, non-fatal)
-            logger.info("Step 4: Transcribing WEBM with Gemini...")
+            # Step 3.5: Upload extracted audio (optional but preferred)
+            audio_gcs_path = None
+            if audio_path and os.path.exists(audio_path):
+                logger.info("Step 3.5: Uploading extracted audio-only to GCS...")
+                audio_gcs_path = f"{self.gcs_path}/recording.m4a"
+                audio_uploaded = self.storage_client.upload_file(
+                    audio_path,
+                    audio_gcs_path,
+                    content_type="audio/mp4",
+                )
+                if audio_uploaded:
+                    logger.info(
+                        "✅ Audio-only uploaded to "
+                        f"gs://{self.gcs_bucket}/{audio_gcs_path}"
+                    )
+                else:
+                    logger.warning("Failed to upload extracted audio; will ignore")
+                    audio_gcs_path = None
+
+            # Step 4: Transcribe (optional, non-fatal)
+            # Prefer audio-only if available; fall back to WEBM.
             transcript_txt_path = None
             transcript_json_path = None
 
-            try:
-                # Generate signed URL for Gemini to access the WEBM
-                # Uses IAM-based signing to keep files private
-                # Falls back to public URL if IAM permissions missing
-                recording_url = self.storage_client.get_signed_url(
-                    webm_gcs_path, expiration_minutes=120  # 2 hours
+            if self.transcription_mode == "none":
+                logger.info("Step 4: Transcription skipped (TRANSCRIPTION_MODE=none)")
+            elif self.transcription_mode == "offline":
+                logger.info(
+                    "Step 4: Transcribing offline with whisper.cpp + diarization..."
+                )
+                try:
+                    # Prefer extracted audio when available.
+                    local_input = audio_path or recording_path
+                    out_dir = Path(tempfile.gettempdir())
+
+                    txt_path, json_path = transcribe_and_diarize_local_media(
+                        input_path=Path(local_input),
+                        out_dir=out_dir,
+                        meeting_id=self.meeting_id,
+                        language=self.offline_language,
+                        diarize=True,
+                        max_speakers=self.offline_max_speakers,
+                    )
+
+                    # Upload expects fixed filenames.
+                    transcript_txt_path = str(txt_path)
+                    transcript_json_path = str(json_path)
+                    logger.info(
+                        "✅ Offline transcription complete (%s, %s)",
+                        transcript_txt_path,
+                        transcript_json_path,
+                    )
+                except Exception as e:
+                    logger.exception("Offline transcription failed (non-fatal): %s", e)
+            else:
+                logger.info(
+                    "Step 4: Transcribing with Gemini (audio-only preferred)..."
                 )
 
-                if recording_url:
+            if self.transcription_mode == "gemini":
+                try:
+                    target_gcs_path = audio_gcs_path or webm_gcs_path
                     logger.info(
-                        f"Generated signed URL for WEBM: {recording_url[:50]}..."
+                        f"Transcription target: gs://{self.gcs_bucket}/{target_gcs_path}"
                     )
-                    logger.info("Transcribing WEBM with Gemini...")
 
-                    try:
-                        transcript_data = self.transcription_client.transcribe_audio(
-                            audio_uri=recording_url,
-                            language_code="en-AU",  # Australian
-                            enable_speaker_diarization=True,
-                            enable_timestamps=False,
-                            enable_action_items=True,
+                    # Generate signed URL for Gemini to access the file.
+                    recording_url = self.storage_client.get_signed_url(
+                        target_gcs_path,
+                        expiration_minutes=360,
+                    )
+
+                    if recording_url:
+                        logger.info(
+                            "Generated signed URL for transcription: %s...",
+                            recording_url[:50],
                         )
+                        logger.info("Transcribing with Gemini...")
 
-                        if transcript_data:
-                            transcript_text = transcript_data.get("transcript", "")
-                            if _is_sample_transcription(transcript_text):
-                                logger.warning(
-                                    "⚠️  Transcription appears to be sample/demo text, not actual meeting content"
+                        try:
+                            transcript_data = (
+                                self.transcription_client.transcribe_audio(
+                                    audio_uri=recording_url,
+                                    language_code="en-AU",
+                                    enable_speaker_diarization=True,
+                                    enable_timestamps=False,
+                                    enable_action_items=True,
                                 )
-                                logger.warning(
-                                    "This may indicate the WEBM contains no speech or audio capture failed"
-                                )
-
-                            import tempfile
-
-                            transcript_txt_path = os.path.join(
-                                tempfile.gettempdir(),
-                                f"{self.meeting_id}_transcript.txt",
-                            )
-                            self.transcription_client.save_transcript(
-                                transcript_data,
-                                transcript_txt_path,
-                                format="txt",
                             )
 
-                            transcript_json_path = os.path.join(
-                                tempfile.gettempdir(),
-                                f"{self.meeting_id}_transcript.json",
-                            )
-                            self.transcription_client.save_transcript(
-                                transcript_data,
-                                transcript_json_path,
-                                format="json",
-                            )
-
-                            logger.info(
-                                f"✅ Transcription complete! Words: {transcript_data['word_count']}"
-                            )
-
-                            # Store transcription text in Firestore
-                            try:
-                                transcription_text = transcript_data.get("transcript", "")
-                                if transcription_text:
-                                    firestore_meeting_id = (
-                                        self.fs_meeting_id or self.meeting_id
+                            if transcript_data:
+                                transcript_text = transcript_data.get("transcript", "")
+                                if _is_sample_transcription(transcript_text):
+                                    logger.warning(
+                                        "⚠️  Transcription appears to be sample/demo text, not actual meeting content"
                                     )
-                                    if firestore_meeting_id:
-                                        firestore_stored = (
-                                            self.firestore_client.set_transcription(
-                                                firestore_meeting_id, transcription_text
-                                            )
+                                    logger.warning(
+                                        "This may indicate the WEBM contains no speech or audio capture failed"
+                                    )
+
+                                transcript_txt_path = os.path.join(
+                                    tempfile.gettempdir(),
+                                    f"{self.meeting_id}_transcript.txt",
+                                )
+                                self.transcription_client.save_transcript(
+                                    transcript_data,
+                                    transcript_txt_path,
+                                    format="txt",
+                                )
+
+                                transcript_json_path = os.path.join(
+                                    tempfile.gettempdir(),
+                                    f"{self.meeting_id}_transcript.json",
+                                )
+                                self.transcription_client.save_transcript(
+                                    transcript_data,
+                                    transcript_json_path,
+                                    format="json",
+                                )
+
+                                logger.info(
+                                    "✅ Transcription complete! Words: %s",
+                                    transcript_data.get("word_count"),
+                                )
+
+                                # Store transcription text in Firestore
+                                try:
+                                    transcription_text = transcript_data.get(
+                                        "transcript", ""
+                                    )
+                                    if transcription_text:
+                                        firestore_meeting_id = (
+                                            self.fs_meeting_id or self.meeting_id
                                         )
-                                        if firestore_stored:
-                                            logger.info(
-                                                f"✅ Transcription stored in Firestore for meeting: {firestore_meeting_id}"
+                                        if firestore_meeting_id:
+                                            firestore_stored = (
+                                                self.firestore_client.set_transcription(
+                                                    firestore_meeting_id,
+                                                    transcription_text,
+                                                )
                                             )
+                                            if firestore_stored:
+                                                logger.info(
+                                                    "✅ Transcription stored in Firestore for meeting: %s",
+                                                    firestore_meeting_id,
+                                                )
+                                            else:
+                                                logger.warning(
+                                                    "Failed to store transcription in Firestore"
+                                                )
                                         else:
                                             logger.warning(
-                                                "Failed to store transcription in Firestore"
+                                                "No meeting ID available for Firestore storage (neither FS_MEETING_ID nor MEETING_ID set)"
                                             )
                                     else:
                                         logger.warning(
-                                            "No meeting ID available for Firestore storage (neither FS_MEETING_ID nor MEETING_ID set)"
+                                            "No transcription text available to store in Firestore"
                                         )
-                                else:
-                                    logger.warning(
-                                        "No transcription text available to store in Firestore"
+                                except Exception as firestore_err:
+                                    logger.exception(
+                                        "Error storing transcription in Firestore: %s",
+                                        firestore_err,
                                     )
-                            except Exception as firestore_err:
-                                logger.exception(
-                                    f"Error storing transcription in Firestore: {firestore_err}"
-                                )
+                                    logger.warning(
+                                        "Continuing despite Firestore storage failure"
+                                    )
+                            else:
                                 logger.warning(
-                                    "Continuing despite Firestore storage failure"
+                                    "Transcription completed but no results returned"
                                 )
-                        else:
-                            logger.warning(
-                                "Transcription completed but no results returned"
-                            )
-                    finally:
-                        try:
-                            self.storage_client.revoke_public_access(webm_gcs_path)
-                        except Exception as revoke_err:
-                            logger.debug(
-                                "Could not revoke public access (may not be public): "
-                                f"{revoke_err}"
-                            )
-                else:
-                    logger.warning("Failed to generate signed URL for WEBM")
+                        finally:
+                            for revoke_path in [target_gcs_path]:
+                                try:
+                                    self.storage_client.revoke_public_access(
+                                        revoke_path
+                                    )
+                                except Exception as revoke_err:
+                                    logger.debug(
+                                        "Could not revoke public access (may not be public): %s",
+                                        revoke_err,
+                                    )
+                    else:
+                        logger.warning("Failed to generate signed URL for WEBM")
 
-            except Exception as e:
-                logger.exception(f"Transcription failed (non-fatal): {e}")
-                logger.warning("Continuing with upload despite transcription failure")
+                except Exception as e:
+                    logger.exception(f"Transcription failed (non-fatal): {e}")
+                    logger.warning(
+                        "Continuing with upload despite transcription failure"
+                    )
 
             # Step 5: Upload transcripts if available
             logger.info("Step 5: Uploading transcripts to GCS (if available)...")
@@ -387,7 +517,18 @@ class MeetingManager:
                     os.remove(recording_path)
                     logger.info(f"Cleaned up file: {recording_path}")
             except Exception as cleanup_err:
-                logger.warning(f"Failed to cleanup file {recording_path}: {cleanup_err}")
+                logger.warning(
+                    f"Failed to cleanup file {recording_path}: {cleanup_err}"
+                )
+
+            if audio_path and os.path.exists(audio_path):
+                try:
+                    os.remove(audio_path)
+                    logger.debug(f"Removed extracted audio: {audio_path}")
+                except Exception as cleanup_err:
+                    logger.debug(
+                        f"Failed to cleanup extracted audio {audio_path}: {cleanup_err}"
+                    )
 
             if transcript_txt_path and os.path.exists(transcript_txt_path):
                 os.remove(transcript_txt_path)
@@ -471,11 +612,15 @@ def _is_sample_transcription(transcript_text: str) -> bool:
         "I'm the director of operations",
         "new project that we're going to be launching",
         "Speaker 1 (*Male*):",
-        "Speaker 2 (*Female*):"
+        "Speaker 2 (*Female*):",
     ]
 
     # Check if multiple sample indicators are present
-    found_indicators = sum(1 for indicator in sample_indicators if indicator.lower() in transcript_text.lower())
+    found_indicators = sum(
+        1
+        for indicator in sample_indicators
+        if indicator.lower() in transcript_text.lower()
+    )
 
     # Also check for generic business meeting patterns that suggest sample content
     generic_patterns = [
@@ -483,10 +628,12 @@ def _is_sample_transcription(transcript_text: str) -> bool:
         "really excited about this new project",
         "director of operations",
         "customer touchpoints",
-        "pilot program in q3"
+        "pilot program in q3",
     ]
 
-    found_patterns = sum(1 for pattern in generic_patterns if pattern.lower() in transcript_text.lower())
+    found_patterns = sum(
+        1 for pattern in generic_patterns if pattern.lower() in transcript_text.lower()
+    )
 
     # If we find 3+ indicators OR 2+ patterns, likely sample text
     return found_indicators >= 3 or found_patterns >= 2

@@ -46,8 +46,21 @@ services:
       - GCS_PATH=${GCS_PATH}
       - GCS_BUCKET=${GCS_BUCKET}
       - MEETING_BOT_API_URL=http://meeting-bot:3000
+      # Offline transcription/diarization (optional)
+      - TRANSCRIPTION_MODE=${TRANSCRIPTION_MODE:-online}
+      - WHISPER_CLI_PATH=${WHISPER_CLI_PATH:-/app/tools/whisper.cpp/build/bin/whisper-cli}
+      - WHISPER_MODEL_PATH=${WHISPER_MODEL_PATH:-/app/tools/whisper.cpp/models/ggml-base.en.bin}
+      - SPEECHBRAIN_SPKREC_DIR=${SPEECHBRAIN_SPKREC_DIR:-/app/tools/speechbrain/spkrec-ecapa-voxceleb}
+      # GCS auth (ADC) for offline mode when downloading gs:// URIs
+      - GOOGLE_APPLICATION_CREDENTIALS=/creds/adc.json
+      - GOOGLE_CLOUD_PROJECT=${GOOGLE_CLOUD_PROJECT}
     depends_on:
       - meeting-bot
+    volumes:
+      # Mount an ADC json file from the host (create/populate via `gcloud auth application-default login`)
+      - ${GOOGLE_APPLICATION_CREDENTIALS_PATH:-/tmp/adc.json}:/creds/adc.json:ro
+      # Capture offline pipeline outputs locally
+      - ./test-results/container-e2e:/out
     profiles:
       - test-manager # Only run when explicitly requested
 

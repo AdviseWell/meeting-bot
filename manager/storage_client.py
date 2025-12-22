@@ -139,13 +139,24 @@ class StorageClient:
             gcs_path = gcs_path.lstrip("/")
             blob = self.bucket.blob(gcs_path)
 
-            # Check if we're using default credentials without a private key
+            # Determine whether we have key-based signing available.
+            # Many runtime creds (GCE, Workload Identity, gcloud user ADC) do NOT
+            # have a private key, which makes blob.generate_signed_url() fail unless
+            # we pass service_account_email + access_token.
             credentials = self.client._credentials
+
+            # Heuristic: key-based credentials typically expose a signer/private key.
+            has_private_key = bool(getattr(credentials, "signer", None)) or bool(
+                getattr(credentials, "_signer", None)
+            )
+
+            # Keep the old compute_engine check, but broaden to token-only creds.
             using_default_credentials = isinstance(
                 credentials, compute_engine.Credentials
             )
+            using_token_only_credentials = not has_private_key
 
-            if using_default_credentials:
+            if using_default_credentials or using_token_only_credentials:
                 # Use IAM-based signing instead of key-based signing
                 # This keeps files private but generates signed URLs
                 logger.info(
@@ -157,7 +168,17 @@ class StorageClient:
                     # Get the default service account email
                     auth_req = auth_requests.Request()
                     credentials.refresh(auth_req)
-                    service_account_email = credentials.service_account_email
+
+                    service_account_email = getattr(
+                        credentials, "service_account_email", None
+                    )
+                    if not service_account_email:
+                        # Some token-only ADC types (e.g., user credentials) do not
+                        # expose service_account_email.
+                        raise RuntimeError(
+                            "Current credentials do not expose service_account_email; "
+                            "cannot perform IAM-based signed URL generation."
+                        )
 
                     logger.info(f"Service account: {service_account_email}")
 
@@ -269,12 +290,12 @@ class FirestoreClient:
         """
         try:
             # Create document reference: organizations/advisewell/meetings/{meeting_id}
-            doc_ref = self.client.document(f"organizations/advisewell/meetings/{meeting_id}")
+            doc_ref = self.client.document(
+                f"organizations/advisewell/meetings/{meeting_id}"
+            )
 
             # Update the transcription field
-            doc_ref.update({
-                "transcription": transcription_text
-            })
+            doc_ref.update({"transcription": transcription_text})
 
             logger.info(f"Successfully stored transcription for meeting: {meeting_id}")
             return True
@@ -296,12 +317,14 @@ class FirestoreClient:
         """
         try:
             # Create document reference: organizations/advisewell/meetings/{meeting_id}
-            doc_ref = self.client.document(f"organizations/advisewell/meetings/{meeting_id}")
+            doc_ref = self.client.document(
+                f"organizations/advisewell/meetings/{meeting_id}"
+            )
 
             # Set the transcription field (creates document if it doesn't exist)
-            doc_ref.set({
-                "transcription": transcription_text
-            }, merge=True)  # merge=True to preserve other fields
+            doc_ref.set(
+                {"transcription": transcription_text}, merge=True
+            )  # merge=True to preserve other fields
 
             logger.info(f"Successfully stored transcription for meeting: {meeting_id}")
             return True
