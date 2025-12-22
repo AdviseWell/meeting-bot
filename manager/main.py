@@ -86,18 +86,14 @@ class MeetingManager:
         self.transcription_client = None
         if self.transcription_mode == "gemini":
             self.transcription_client = TranscriptionClient(
-                project_id=os.environ.get(
-                    "GEMINI_PROJECT_ID", "aw-gemini-api-central"
-                )
+                project_id=os.environ.get("GEMINI_PROJECT_ID", "aw-gemini-api-central")
             )
 
         # Offline pipeline options (only used when TRANSCRIPTION_MODE=offline)
         self.offline_language = os.environ.get(
             "OFFLINE_TRANSCRIPTION_LANGUAGE", "en"
         ).strip()
-        self.offline_max_speakers = int(
-            os.environ.get("OFFLINE_MAX_SPEAKERS", "6")
-        )
+        self.offline_max_speakers = int(os.environ.get("OFFLINE_MAX_SPEAKERS", "6"))
 
         logger.info(
             "Transcription backend selected: %s",
@@ -351,14 +347,24 @@ class MeetingManager:
                     local_input = audio_path or recording_path
                     out_dir = Path(tempfile.gettempdir())
 
-                    txt_path, json_path = transcribe_and_diarize_local_media(
-                        input_path=Path(local_input),
-                        out_dir=out_dir,
-                        meeting_id=self.meeting_id,
-                        language=self.offline_language,
-                        diarize=True,
-                        max_speakers=self.offline_max_speakers,
-                    )
+                    def _run_offline(diarize: bool):
+                        return transcribe_and_diarize_local_media(
+                            input_path=Path(local_input),
+                            out_dir=out_dir,
+                            meeting_id=self.meeting_id,
+                            language=self.offline_language,
+                            diarize=diarize,
+                            max_speakers=self.offline_max_speakers,
+                        )
+
+                    try:
+                        txt_path, json_path = _run_offline(diarize=True)
+                    except Exception as diar_err:
+                        logger.warning(
+                            "Diarization failed; retrying: %s",
+                            diar_err,
+                        )
+                        txt_path, json_path = _run_offline(diarize=False)
 
                     # Upload expects fixed filenames.
                     transcript_txt_path = str(txt_path)

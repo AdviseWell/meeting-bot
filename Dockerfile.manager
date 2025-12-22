@@ -41,6 +41,50 @@ RUN pip install --no-cache-dir -r requirements-offline-diarization.txt
 RUN mkdir -p /app/tools/speechbrain/spkrec-ecapa-voxceleb
 COPY tools/speechbrain/spkrec-ecapa-voxceleb/ /app/tools/speechbrain/spkrec-ecapa-voxceleb/
 
+# If the repository contains only a partial set of SpeechBrain assets, download
+# the remaining required files at *build time* so runtime stays offline.
+#
+# This downloads from Hugging Face during the image build (Option B), not at
+# runtime.
+RUN python - <<'PY'
+import os
+from pathlib import Path
+
+model_dir = Path('/app/tools/speechbrain/spkrec-ecapa-voxceleb')
+model_dir.mkdir(parents=True, exist_ok=True)
+
+required = [
+    'hyperparams.yaml',
+    'embedding_model.ckpt',
+    'mean_var_norm_emb.ckpt',
+    'classifier.ckpt',
+    'label_encoder.txt',
+]
+
+missing = [f for f in required if not (model_dir / f).exists()]
+if not missing:
+    print('SpeechBrain diarization assets already present; skipping HF download.')
+    raise SystemExit(0)
+
+print('Missing diarization assets:', missing)
+print('Downloading missing SpeechBrain diarization assets from Hugging Face (build time)...')
+
+from huggingface_hub import hf_hub_download
+
+repo_id = os.environ.get('SPEECHBRAIN_HF_REPO', 'speechbrain/spkrec-ecapa-voxceleb')
+
+for filename in missing:
+    path = hf_hub_download(
+        repo_id=repo_id,
+        filename=filename,
+        local_dir=str(model_dir),
+        local_dir_use_symlinks=False,
+    )
+    print('Downloaded', filename, '->', path)
+
+print('SpeechBrain diarization assets download complete.')
+PY
+
 # --- Build whisper.cpp + download model (reliable for CI multi-arch) ---
 # Expected by manager/offline_pipeline.py defaults:
 #   /app/tools/whisper.cpp/build/bin/whisper-cli
@@ -84,6 +128,15 @@ USER manager
 
 # Set Python to run in unbuffered mode for better logging
 ENV PYTHONUNBUFFERED=1
+
+# Ensure Hugging Face / Torch / SpeechBrain caches go to a writable location.
+# Running as non-root means '/.cache' is not writable and will cause failures
+# when SpeechBrain attempts to fetch or read cached artifacts.
+ENV XDG_CACHE_HOME=/tmp/.cache
+ENV HF_HOME=/tmp/.cache/huggingface
+ENV TRANSFORMERS_CACHE=/tmp/.cache/huggingface/transformers
+ENV HUGGINGFACE_HUB_CACHE=/tmp/.cache/huggingface/hub
+ENV TORCH_HOME=/tmp/.cache/torch
 
 # Ensure our optional `sitecustomize.py` (torchaudio/SpeechBrain compat) is on
 # sys.path at interpreter startup.

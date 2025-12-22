@@ -15,3 +15,6 @@ requests==2.32.5
 
 # Optional: Better logging and monitoring
 python-json-logger==4.0.0
+
+# Test runner (used by CI / container smoke checks)
+pytest==8.3.4

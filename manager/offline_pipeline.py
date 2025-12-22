@@ -34,6 +34,39 @@ from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
+
+def _patch_speechbrain_hyperparams_for_local_model(model_dir: Path) -> None:
+    """Make SpeechBrain hyperparams.yaml use local files instead of HF hub.
+
+    The upstream SpeechBrain model ships with:
+      pretrained_path: speechbrain/spkrec-ecapa-voxceleb
+
+    When we call EncoderClassifier.from_hparams(source=<local dir>),
+    SpeechBrain still uses `pretrained_path` to resolve files, and if it's a HF
+    repo id it will try hf_hub_download even when the files exist locally.
+
+    We patch `pretrained_path` to point at `model_dir` so all assets resolve
+    locally and offline runs don't touch the network.
+    """
+
+    hp = model_dir / "hyperparams.yaml"
+    if not hp.exists():
+        return
+
+    txt = hp.read_text(encoding="utf-8")
+
+    # Only patch when the hyperparams are still pointing at the HF repo id.
+    # Keep this conservative to avoid surprising edits.
+    if "pretrained_path: speechbrain/spkrec-ecapa-voxceleb" not in txt:
+        return
+
+    patched = txt.replace(
+        "pretrained_path: speechbrain/spkrec-ecapa-voxceleb",
+        f"pretrained_path: {model_dir}",
+    )
+    hp.write_text(patched, encoding="utf-8")
+
+
 UTC = getattr(_datetime, "UTC", timezone.utc)
 SPEAKER_LABELS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
@@ -328,6 +361,28 @@ def diarize_segments_offline(
             "that path."
         )
 
+    # SpeechBrain will attempt to download missing files via HF Hub.
+    # In offline/locked-down runtimes this can fail (and can also try to write
+    # to an unwritable cache like '/.cache'). We therefore require *all*
+    # diarization assets we rely on to be present locally.
+    required_files = [
+        "hyperparams.yaml",
+        "embedding_model.ckpt",
+        "mean_var_norm_emb.ckpt",
+        "classifier.ckpt",
+        # Required by SpeechBrain's pretrained interface for this model.
+        "label_encoder.txt",
+    ]
+
+    missing_files = [f for f in required_files if not (model_dir / f).exists()]
+    if missing_files:
+        raise RuntimeError(
+            "Missing offline diarization assets in "
+            f"{model_dir}: {', '.join(missing_files)}. "
+            "Either prebake them for fully offline diarization, or run with "
+            "diarization disabled."
+        )
+
     windows = _merge_segments_for_diarization(segments)
     if len(windows) < 2:
         for s in segments:
@@ -338,6 +393,11 @@ def diarize_segments_offline(
         "Diarization: computing embeddings for %d windows",
         len(windows),
     )
+
+    # Patch hyperparams.yaml to point `pretrained_path` at the local directory.
+    # This prevents SpeechBrain from trying HF Hub downloads even when files
+    # are already prebaked.
+    _patch_speechbrain_hyperparams_for_local_model(model_dir)
 
     classifier: Any = EncoderClassifier.from_hparams(
         source=str(model_dir),
