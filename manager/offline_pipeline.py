@@ -35,6 +35,106 @@ from typing import Any, Dict, List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 
+def _normalize_text_for_dedupe(text: str) -> str:
+    """Normalize transcription text for de-duplication comparisons."""
+
+    return " ".join(text.strip().split()).lower()
+
+
+def _dedupe_repeated_segments(
+    segments: List[Segment],
+    *,
+    lookback: int = 80,
+) -> List[Segment]:
+    """Drop repeated segments that often show up at the end of transcripts.
+
+    We've seen a whisper.cpp/SRT edge case where trailing subtitle entries are
+    duplicated many times. We keep the first (oldest) occurrence and drop later
+    duplicates, preserving original ordering.
+
+    The `lookback` limit keeps this linear-time and focused on the common tail
+    repetition pattern, while still being safe for long meetings.
+    """
+
+    if len(segments) < 2:
+        return segments
+
+    # 1) First, remove *consecutive* duplicates (common when SRT repeats tail
+    #    lines over and over). This is order-preserving and keeps the earliest.
+    collapsed: List[Segment] = []
+    prev_key: Optional[tuple[str, Optional[str]]] = None
+    for s in segments:
+        key = (_normalize_text_for_dedupe(s.text), s.speaker)
+        if prev_key is not None and key == prev_key:
+            continue
+        collapsed.append(s)
+        prev_key = key
+
+    if len(collapsed) < 2:
+        return collapsed
+
+    # 2) Then, within a limited lookback window, drop re-occurrences of the
+    #    same (speaker,text). This catches cases where multiple tail blocks
+    #    repeat.
+    start_idx = max(0, len(collapsed) - lookback)
+    seen: set[tuple[str, Optional[str]]] = set()
+    out: List[Segment] = []
+
+    for i, s in enumerate(collapsed):
+        if i < start_idx:
+            out.append(s)
+            continue
+
+        key = (_normalize_text_for_dedupe(s.text), s.speaker)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(s)
+
+    return out
+
+
+def _segments_to_markdown(segments: List[Segment]) -> str:
+    """Convert segments into speaker-grouped markdown.
+
+    Output format (blank line between speakers blocks):
+
+      **Speaker A:** first sentence. second sentence.
+
+      **Speaker B:** ...
+    """
+
+    lines: List[str] = []
+
+    cur_speaker: Optional[str] = None
+    cur_text: List[str] = []
+
+    def _flush():
+        nonlocal cur_speaker, cur_text
+        if not cur_text:
+            return
+        speaker = cur_speaker or "Unknown"
+        text = " ".join(t.strip() for t in cur_text if t.strip()).strip()
+        if text:
+            lines.append(f"**{speaker}:** {text}")
+        cur_text = []
+
+    for s in segments:
+        speaker = s.speaker or "Unknown"
+        if cur_speaker is None:
+            cur_speaker = speaker
+        if speaker != cur_speaker:
+            _flush()
+            lines.append("")
+            cur_speaker = speaker
+
+        cur_text.append(s.text)
+
+    _flush()
+
+    return "\n".join(lines).strip() + "\n"
+
+
 def _patch_speechbrain_hyperparams_for_local_model(model_dir: Path) -> None:
     """Make SpeechBrain hyperparams.yaml use local files instead of HF hub.
 
@@ -597,11 +697,15 @@ def transcribe_and_diarize_local_media(
             )
             diarization_info["detected_speakers"] = detected
 
+        # Remove repeated trailing segments (keep the oldest occurrence).
+        segments = _dedupe_repeated_segments(segments)
+
         timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         base_name = f"{meeting_id}_{timestamp}_whispercpp"
 
         txt_path = out_dir / f"{base_name}.txt"
         json_path = out_dir / f"{base_name}.json"
+        md_path = out_dir / f"{base_name}.md"
 
         transcript_lines: List[str] = []
         for s in segments:
@@ -610,6 +714,8 @@ def transcribe_and_diarize_local_media(
                 f"[{s.start:0.2f}-{s.end:0.2f}] {speaker_prefix}{s.text}"
             )
         txt_path.write_text("\n".join(transcript_lines), encoding="utf-8")
+
+        md_path.write_text(_segments_to_markdown(segments), encoding="utf-8")
 
         payload: Dict[str, Any] = {
             "engine": "whisper.cpp",
