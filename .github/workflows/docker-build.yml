@@ -230,8 +230,11 @@ jobs:
         with:
           context: .
           file: ./Dockerfile.manager
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ github.event_name == 'pull_request' && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
           push: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop') }}
+          # For PRs we don't push; load the first platform into the runner's
+          # Docker engine so the smoke test can run.
+          load: ${{ github.event_name == 'pull_request' }}
           tags: ${{ steps.manager_meta.outputs.tags }}
           labels: ${{ steps.manager_meta.outputs.labels }}
           cache-from: type=gha,scope=manager
@@ -243,7 +246,9 @@ jobs:
       - name: Smoke test manager image (imports + versions)
         if: github.event_name == 'pull_request'
         run: |
-          IMAGE="${{ env.REGISTRY }}/manager:sha-${{ github.sha }}"
+          # Use the first tag produced by metadata-action (and applied by the
+          # build step). With load=true on PRs, this tag exists locally.
+          IMAGE=$(echo "${{ steps.manager_meta.outputs.tags }}" | head -n1)
           echo "Running smoke test against $IMAGE"
           docker run --rm "$IMAGE" python - <<'PY'
           import importlib
@@ -429,64 +434,6 @@ jobs:
           REPO=$(echo "$FIRST_TAG" | cut -d':' -f1 | cut -d'/' -f2-)
           echo ""
           echo "${REGISTRY}/${REPO}@${{ steps.controller_docker_build.outputs.digest }}"
-          echo ""
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo ""
-
-      # Generate Docker tags for manager
-      - name: Extract metadata for manager
-        id: manager_meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/manager
-          tags: |
-            ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && format('type=raw,value={0}', env.TAG) || '' }}
-            type=ref,event=branch
-            type=sha,prefix=sha-
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
-
-      # Build manager image (always), push only on main or develop
-      - name: Build and push manager Docker image
-        id: manager_docker_build
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./Dockerfile.manager
-          platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop') }}
-          tags: ${{ steps.manager_meta.outputs.tags }}
-          labels: ${{ steps.manager_meta.outputs.labels }}
-          cache-from: type=gha,scope=manager
-          cache-to: type=gha,mode=max,scope=manager
-
-      - name: Output Manager Image Reference
-        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
-        run: |
-          echo ""
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "📦 MANAGER IMAGE BUILT AND PUSHED"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo ""
-          echo "Git SHA: $(git rev-parse --short=8 HEAD)"
-          echo "Branch:  ${{ github.ref_name }}"
-          echo ""
-          echo "Image Digest: ${{ steps.manager_docker_build.outputs.digest }}"
-          echo ""
-          echo "Available Tags:"
-          echo "${{ steps.manager_meta.outputs.tags }}" | while read tag; do
-            if [[ -n "$tag" ]]; then
-              echo "  • $tag"
-            fi
-          done
-          echo ""
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "🔗 COPY THIS FOR TERRAFORM/KUBERNETES:"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          FIRST_TAG=$(echo "${{ steps.manager_meta.outputs.tags }}" | head -n1)
-          REGISTRY=$(echo "$FIRST_TAG" | cut -d'/' -f1)
-          REPO=$(echo "$FIRST_TAG" | cut -d':' -f1 | cut -d'/' -f2-)
-          echo ""
-          echo "${REGISTRY}/${REPO}@${{ steps.manager_docker_build.outputs.digest }}"
           echo ""
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo ""
