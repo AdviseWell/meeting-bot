@@ -394,60 +394,70 @@ def diarize_segments_offline(
         len(windows),
     )
 
-    # Patch hyperparams.yaml to point `pretrained_path` at the local directory.
-    # This prevents SpeechBrain from trying HF Hub downloads even when files
-    # are already prebaked.
-    _patch_speechbrain_hyperparams_for_local_model(model_dir)
+    # IMPORTANT (non-root containers): the baked model directory under /app is
+    # often read-only for the runtime user. Our hyperparams patcher needs to
+    # write `hyperparams.yaml` to force `pretrained_path` to resolve locally.
+    # Copy the model directory to a writable temp directory and load from
+    # there.
+    with tempfile.TemporaryDirectory(prefix="speechbrain_model_") as tmp_model_dir_s:
+        tmp_model_dir = Path(tmp_model_dir_s)
+        shutil.copytree(model_dir, tmp_model_dir, dirs_exist_ok=True)
 
-    classifier: Any = EncoderClassifier.from_hparams(
-        source=str(model_dir),
-        savedir=str(model_dir),
-        run_opts={"device": device},
-    )
+        # Patch hyperparams.yaml to point `pretrained_path` at the local
+        # directory. This prevents SpeechBrain from attempting HF Hub downloads
+        # even when files are already prebaked.
+        _patch_speechbrain_hyperparams_for_local_model(tmp_model_dir)
 
-    embeddings: List[List[float]] = []
-    win_tmp_files: List[Path] = []
-    try:
-        for ws, we, _ in windows:
-            wpath = _extract_wav_window(wav_path, ws, we)
-            win_tmp_files.append(wpath)
+        classifier: Any = EncoderClassifier.from_hparams(
+            source=str(tmp_model_dir),
+            savedir=str(tmp_model_dir),
+            run_opts={"device": device},
+        )
 
-            cmd = [
-                "ffmpeg",
-                "-nostdin",
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-i",
-                str(wpath),
-                "-f",
-                "s16le",
-                "-ac",
-                "1",
-                "-ar",
-                "16000",
-                "-",
-            ]
-            raw = subprocess.check_output(cmd)
-            audio_i16 = np.frombuffer(raw, dtype=np.int16)
-            audio_f32 = (audio_i16.astype(np.float32) / 32768.0).reshape(1, -1)
-            wav = torch.from_numpy(audio_f32)
-            with torch.inference_mode():
-                emb_tensor = classifier.encode_batch(wav)
-            emb_np = (
-                (emb_tensor.squeeze(0).squeeze(0).detach().cpu().numpy())
-                .astype(np.float32)
-                .reshape(-1)
-            )
-            embeddings.append(emb_np.tolist())
-    finally:
-        for p in win_tmp_files:
-            try:
-                p.unlink(missing_ok=True)
-            except Exception:
-                pass
+        embeddings: List[List[float]] = []
+        win_tmp_files: List[Path] = []
+        try:
+            for ws, we, _ in windows:
+                wpath = _extract_wav_window(wav_path, ws, we)
+                win_tmp_files.append(wpath)
 
-    k, labels = _cluster_speakers(embeddings, max_speakers=max_speakers)
+                cmd = [
+                    "ffmpeg",
+                    "-nostdin",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-i",
+                    str(wpath),
+                    "-f",
+                    "s16le",
+                    "-ac",
+                    "1",
+                    "-ar",
+                    "16000",
+                    "-",
+                ]
+                raw = subprocess.check_output(cmd)
+                audio_i16 = np.frombuffer(raw, dtype=np.int16)
+                audio_f32 = (audio_i16.astype(np.float32) / 32768.0).reshape(1, -1)
+                wav = torch.from_numpy(audio_f32)
+                with torch.inference_mode():
+                    emb_tensor = classifier.encode_batch(wav)
+                emb_np = (
+                    (emb_tensor.squeeze(0).squeeze(0).detach().cpu().numpy())
+                    .astype(np.float32)
+                    .reshape(-1)
+                )
+                embeddings.append(emb_np.tolist())
+        finally:
+            for p in win_tmp_files:
+                try:
+                    p.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+        k, labels = _cluster_speakers(embeddings, max_speakers=max_speakers)
+
     logger.info("Diarization: selected %d speakers", k)
 
     label_map: Dict[int, str] = {}
