@@ -67,6 +67,38 @@ def _patch_speechbrain_hyperparams_for_local_model(model_dir: Path) -> None:
     hp.write_text(patched, encoding="utf-8")
 
 
+def _make_writable_hyperparams_overlay(*, baked_model_dir: Path) -> Path:
+    """Create a small writable 'overlay' dir for SpeechBrain hyperparams.
+
+    Why: In k8s jobs with tight ephemeral storage, copying the whole
+    SpeechBrain model directory (~tens of MB) into /tmp per run is wasteful.
+
+    Approach: We only write a patched `hyperparams.yaml` into a temp directory,
+    and point `pretrained_path` at the baked model directory so checkpoints
+    resolve locally.
+
+    Returns:
+        overlay_dir
+    """
+
+    hp_src = baked_model_dir / "hyperparams.yaml"
+    if not hp_src.exists():
+        raise RuntimeError(f"Missing hyperparams.yaml at {hp_src}")
+
+    overlay_dir = Path(tempfile.mkdtemp(prefix="speechbrain_hp_"))
+    hp_dst = overlay_dir / "hyperparams.yaml"
+
+    txt = hp_src.read_text(encoding="utf-8")
+    # Patch only if still pointing to the HF repo id.
+    if "pretrained_path: speechbrain/spkrec-ecapa-voxceleb" in txt:
+        txt = txt.replace(
+            "pretrained_path: speechbrain/spkrec-ecapa-voxceleb",
+            f"pretrained_path: {baked_model_dir}",
+        )
+    hp_dst.write_text(txt, encoding="utf-8")
+    return overlay_dir
+
+
 UTC = getattr(_datetime, "UTC", timezone.utc)
 SPEAKER_LABELS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
@@ -225,7 +257,7 @@ def run_whisper_cpp(
 
 def _merge_segments_for_diarization(
     segments: List[Segment],
-    min_seconds: float = 2.5,
+    min_seconds: float = 1.5,
     max_seconds: float = 12.0,
     max_gap_seconds: float = 0.8,
 ) -> List[Tuple[float, float, List[int]]]:
@@ -395,22 +427,14 @@ def diarize_segments_offline(
     )
 
     # IMPORTANT (non-root containers): the baked model directory under /app is
-    # often read-only for the runtime user. Our hyperparams patcher needs to
-    # write `hyperparams.yaml` to force `pretrained_path` to resolve locally.
-    # Copy the model directory to a writable temp directory and load from
-    # there.
-    with tempfile.TemporaryDirectory(prefix="speechbrain_model_") as tmp_model_dir_s:
-        tmp_model_dir = Path(tmp_model_dir_s)
-        shutil.copytree(model_dir, tmp_model_dir, dirs_exist_ok=True)
-
-        # Patch hyperparams.yaml to point `pretrained_path` at the local
-        # directory. This prevents SpeechBrain from attempting HF Hub downloads
-        # even when files are already prebaked.
-        _patch_speechbrain_hyperparams_for_local_model(tmp_model_dir)
-
+    # often read-only for the runtime user, so we cannot edit hyperparams.yaml
+    # in place. Also, copying the whole model directory per job can add up and
+    # exceed k8s ephemeral storage limits.
+    overlay_dir = _make_writable_hyperparams_overlay(baked_model_dir=model_dir)
+    try:
         classifier: Any = EncoderClassifier.from_hparams(
-            source=str(tmp_model_dir),
-            savedir=str(tmp_model_dir),
+            source=str(overlay_dir),
+            savedir=str(overlay_dir),
             run_opts={"device": device},
         )
 
@@ -457,6 +481,8 @@ def diarize_segments_offline(
                     pass
 
         k, labels = _cluster_speakers(embeddings, max_speakers=max_speakers)
+    finally:
+        shutil.rmtree(overlay_dir, ignore_errors=True)
 
     logger.info("Diarization: selected %d speakers", k)
 
