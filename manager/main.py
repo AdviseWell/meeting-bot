@@ -27,6 +27,7 @@ from transcription_client import TranscriptionClient
 from media_converter import MediaConverter
 from offline_pipeline import transcribe_and_diarize_local_media
 from firestore_persistence import persist_transcript_to_firestore
+from metadata import load_meeting_metadata
 
 # Configure logging
 logging.basicConfig(
@@ -56,7 +57,10 @@ class MeetingManager:
         self.gcs_path = os.environ.get("GCS_PATH")
 
         # Optional meeting metadata
-        self.metadata = self._load_metadata()
+        self.metadata = load_meeting_metadata(
+            meeting_id=self.meeting_id,
+            gcs_path=self.gcs_path,
+        )
 
         # GCS and API configuration
         self.gcs_bucket = os.environ.get("GCS_BUCKET")
@@ -105,69 +109,6 @@ class MeetingManager:
             "Transcription backend selected: %s",
             self.transcription_mode,
         )
-
-    def _load_metadata(self) -> Dict:
-        """Load metadata from environment variables for meeting-bot API"""
-        metadata = {}
-
-        # Core meeting fields
-        if self.meeting_id:
-            metadata["meeting_id"] = self.meeting_id
-        if self.gcs_path:
-            metadata["gcs_path"] = self.gcs_path
-
-        # Get optional fields from environment (support both snake_case and
-        # camelCase)
-        bearer_token = (
-            os.environ.get("BEARERTOKEN")
-            or os.environ.get("BEARER_TOKEN")
-            or os.environ.get("bearer_token")
-        )
-        user_id = (
-            os.environ.get("USERID")
-            or os.environ.get("USER_ID")
-            or os.environ.get("user_id")
-        )
-        bot_id = (
-            os.environ.get("BOTID")
-            or os.environ.get("BOT_ID")
-            or os.environ.get("bot_id")
-        )
-        event_id = (
-            os.environ.get("EVENTID")
-            or os.environ.get("EVENT_ID")
-            or os.environ.get("event_id")
-        )
-
-        metadata["bearerToken"] = bearer_token
-        metadata["userId"] = user_id
-        metadata["botId"] = bot_id or event_id or self.meeting_id
-
-        # teamId (required) - fallback to meeting_id
-        metadata["teamId"] = (
-            os.environ.get("TEAMID")
-            or os.environ.get("TEAM_ID")
-            or os.environ.get("team_id")
-            or self.meeting_id
-        )
-
-        # name (required) - fallback to 'Meeting Bot'
-        metadata["name"] = (
-            os.environ.get("NAME")
-            or os.environ.get("name")
-            or os.environ.get("BOT_NAME")
-            or "Meeting Bot"
-        )
-
-        # Optional meeting metadata
-        if os.environ.get("MEETING_TITLE"):
-            metadata["meeting_title"] = os.environ.get("MEETING_TITLE")
-        if os.environ.get("MEETING_ORGANIZER"):
-            metadata["meeting_organizer"] = os.environ.get("MEETING_ORGANIZER")
-        if os.environ.get("MEETING_START_TIME"):
-            metadata["meeting_start_time"] = os.environ.get("MEETING_START_TIME")
-
-        return metadata
 
     def _validate_config(self):
         """Validate required environment variables"""
