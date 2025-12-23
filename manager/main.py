@@ -24,9 +24,9 @@ from pathlib import Path
 from meeting_monitor import MeetingMonitor
 from storage_client import StorageClient, FirestoreClient
 from transcription_client import TranscriptionClient
-from meeting_utils import auto_generate_missing_fields
 from media_converter import MediaConverter
 from offline_pipeline import transcribe_and_diarize_local_media
+from firestore_persistence import persist_transcript_to_firestore
 
 # Configure logging
 logging.basicConfig(
@@ -60,7 +60,10 @@ class MeetingManager:
 
         # GCS and API configuration
         self.gcs_bucket = os.environ.get("GCS_BUCKET")
-        self.firestore_database = os.environ.get("FIRESTORE_DATABASE", "(default)")
+        self.firestore_database = os.environ.get(
+            "FIRESTORE_DATABASE",
+            "(default)",
+        )
         self.meeting_bot_api = os.environ.get(
             "MEETING_BOT_API_URL", "http://localhost:3000"
         )
@@ -86,7 +89,10 @@ class MeetingManager:
         self.transcription_client = None
         if self.transcription_mode == "gemini":
             self.transcription_client = TranscriptionClient(
-                project_id=os.environ.get("GEMINI_PROJECT_ID", "aw-gemini-api-central")
+                project_id=os.environ.get(
+                    "GEMINI_PROJECT_ID",
+                    "aw-gemini-api-central",
+                )
             )
 
         # Offline pipeline options (only used when TRANSCRIPTION_MODE=offline)
@@ -110,7 +116,8 @@ class MeetingManager:
         if self.gcs_path:
             metadata["gcs_path"] = self.gcs_path
 
-        # Get optional fields from environment (support both snake_case and camelCase)
+        # Get optional fields from environment (support both snake_case and
+        # camelCase)
         bearer_token = (
             os.environ.get("BEARERTOKEN")
             or os.environ.get("BEARER_TOKEN")
@@ -132,42 +139,9 @@ class MeetingManager:
             or os.environ.get("event_id")
         )
 
-        # Auto-generate missing fields if meeting URL is available
-        if self.meeting_url:
-            try:
-                auto_generated = auto_generate_missing_fields(
-                    url=self.meeting_url,
-                    bearer_token=bearer_token,
-                    user_id=user_id,
-                    bot_id=bot_id,
-                    event_id=event_id,
-                )
-
-                # Use auto-generated values
-                metadata["bearerToken"] = auto_generated["bearer_token"]
-                metadata["userId"] = auto_generated["user_id"]
-                metadata["botId"] = auto_generated["bot_id"]
-
-                # Also update meeting_id if it wasn't provided
-                if not self.meeting_id:
-                    metadata["meeting_id"] = auto_generated["meeting_id"]
-
-                logger.info(
-                    f"Auto-generated fields: userId={metadata['userId']}, botId={metadata['botId']}, bearerToken={'***' if metadata['bearerToken'] else 'NONE'}"
-                )
-            except Exception as e:
-                logger.warning(
-                    f"Could not auto-generate fields: {e}. Using fallback values."
-                )
-                # Fallback to original behavior
-                metadata["bearerToken"] = bearer_token or ""
-                metadata["userId"] = user_id or "system"
-                metadata["botId"] = bot_id or event_id or self.meeting_id
-        else:
-            # No meeting URL, use provided values or fallbacks
-            metadata["bearerToken"] = bearer_token or ""
-            metadata["userId"] = user_id or "system"
-            metadata["botId"] = bot_id or event_id or self.meeting_id
+        metadata["bearerToken"] = bearer_token
+        metadata["userId"] = user_id
+        metadata["botId"] = bot_id or event_id or self.meeting_id
 
         # teamId (required) - fallback to meeting_id
         metadata["teamId"] = (
@@ -175,11 +149,6 @@ class MeetingManager:
             or os.environ.get("TEAM_ID")
             or os.environ.get("team_id")
             or self.meeting_id
-        )
-
-        # timezone (required) - fallback to UTC
-        metadata["timezone"] = (
-            os.environ.get("TIMEZONE") or os.environ.get("timezone") or "UTC"
         )
 
         # name (required) - fallback to 'Meeting Bot'
@@ -235,7 +204,10 @@ class MeetingManager:
 
             # Step 1: Join the meeting
             logger.info("Step 1: Joining meeting...")
-            job_id = self.meeting_monitor.join_meeting(self.meeting_url, self.metadata)
+            job_id = self.meeting_monitor.join_meeting(
+                self.meeting_url,
+                self.metadata,
+            )
             if not job_id:
                 logger.error("Failed to join meeting")
                 return False
@@ -264,14 +236,16 @@ class MeetingManager:
                 if extracted_m4a and os.path.exists(extracted_m4a):
                     audio_size = os.path.getsize(extracted_m4a)
                     logger.info(
-                        "Extracted audio size: "
-                        f"{audio_size} bytes ({audio_size / (1024 * 1024):.2f} MB)"
+                        "Extracted audio size: %s bytes (%.2f MB)",
+                        audio_size,
+                        audio_size / (1024 * 1024),
                     )
                     if audio_size >= 1000:
                         audio_path = extracted_m4a
                     else:
                         logger.warning(
-                            "Extracted audio file is too small; will fall back "
+                            "Extracted audio file is too small; "
+                            "will fall back "
                             "to WEBM for transcription."
                         )
                 else:
@@ -281,7 +255,8 @@ class MeetingManager:
                     )
             except Exception as audio_err:
                 logger.warning(
-                    f"Audio extraction failed; continuing without it: {audio_err}"
+                    "Audio extraction failed; continuing without it: %s",
+                    audio_err,
                 )
 
             # Step 3: Upload original WEBM file to GCS (required)
@@ -292,11 +267,14 @@ class MeetingManager:
 
             webm_size = os.path.getsize(recording_path)
             logger.info(
-                f"WEBM file size: {webm_size} bytes ({webm_size / (1024 * 1024):.2f} MB)"
+                "WEBM file size: %s bytes (%.2f MB)",
+                webm_size,
+                webm_size / (1024 * 1024),
             )
             if webm_size < 1000:
                 logger.error(
-                    f"❌ WEBM file too small ({webm_size} bytes) - file is empty or corrupted"
+                    "❌ WEBM file too small (%s bytes) - file is " "empty or corrupted",
+                    webm_size,
                 )
                 return False
 
@@ -309,7 +287,9 @@ class MeetingManager:
                 return False
 
             logger.info(
-                f"✅ Original WEBM uploaded to gs://{self.gcs_bucket}/{webm_gcs_path}"
+                "✅ Original WEBM uploaded to gs://%s/%s",
+                self.gcs_bucket,
+                webm_gcs_path,
             )
 
             # Step 3.5: Upload extracted audio (optional but preferred)
@@ -335,12 +315,13 @@ class MeetingManager:
             # Prefer audio-only if available; fall back to WEBM.
             transcript_txt_path = None
             transcript_json_path = None
+            transcript_md_path = None
 
             if self.transcription_mode == "none":
                 logger.info("Step 4: Transcription skipped (TRANSCRIPTION_MODE=none)")
             elif self.transcription_mode == "offline":
                 logger.info(
-                    "Step 4: Transcribing offline with whisper.cpp + diarization..."
+                    "Step 4: Transcribing offline with whisper.cpp + " "diarization..."
                 )
                 try:
                     # Prefer extracted audio when available.
@@ -366,6 +347,10 @@ class MeetingManager:
                         )
                         txt_path, json_path = _run_offline(diarize=False)
 
+                    # offline_pipeline also writes a markdown file next to the
+                    # txt/json outputs using the same base name.
+                    transcript_md_path = os.path.splitext(str(txt_path))[0] + ".md"
+
                     # Upload expects fixed filenames.
                     transcript_txt_path = str(txt_path)
                     transcript_json_path = str(json_path)
@@ -374,11 +359,31 @@ class MeetingManager:
                         transcript_txt_path,
                         transcript_json_path,
                     )
+
+                    # Best-effort: persist offline transcript into Firestore.
+                    # We write into the same `transcription` field used by the
+                    # Gemini path.
+                    try:
+                        firestore_meeting_id = self.fs_meeting_id or self.meeting_id
+                        persist_transcript_to_firestore(
+                            firestore_client=self.firestore_client,
+                            meeting_id=firestore_meeting_id,
+                            markdown_path=transcript_md_path,
+                            logger=logger,
+                        )
+                    except Exception as firestore_err:
+                        logger.exception(
+                            "Error storing offline transcript in " "Firestore: %s",
+                            firestore_err,
+                        )
                 except Exception as e:
-                    logger.exception("Offline transcription failed (non-fatal): %s", e)
+                    logger.exception(
+                        "Offline transcription failed (non-fatal): %s",
+                        e,
+                    )
             else:
                 logger.info(
-                    "Step 4: Transcribing with Gemini (audio-only preferred)..."
+                    "Step 4: Transcribing with Gemini " "(audio-only preferred)..."
                 )
 
             if self.transcription_mode == "gemini":
@@ -390,7 +395,9 @@ class MeetingManager:
                         )
                     target_gcs_path = audio_gcs_path or webm_gcs_path
                     logger.info(
-                        f"Transcription target: gs://{self.gcs_bucket}/{target_gcs_path}"
+                        "Transcription target: gs://%s/%s",
+                        self.gcs_bucket,
+                        target_gcs_path,
                     )
 
                     # Generate signed URL for Gemini to access the file.
@@ -421,10 +428,14 @@ class MeetingManager:
                                 transcript_text = transcript_data.get("transcript", "")
                                 if _is_sample_transcription(transcript_text):
                                     logger.warning(
-                                        "⚠️  Transcription appears to be sample/demo text, not actual meeting content"
+                                        "⚠️  Transcription appears to be "
+                                        "sample/demo "
+                                        "text, not actual meeting content"
                                     )
                                     logger.warning(
-                                        "This may indicate the WEBM contains no speech or audio capture failed"
+                                        "This may indicate the WEBM contains "
+                                        "no "
+                                        "speech or audio capture failed"
                                     )
 
                                 transcript_txt_path = os.path.join(
@@ -470,32 +481,38 @@ class MeetingManager:
                                             )
                                             if firestore_stored:
                                                 logger.info(
-                                                    "✅ Transcription stored in Firestore for meeting: %s",
+                                                    "✅ Stored transcription " "for %s",
                                                     firestore_meeting_id,
                                                 )
                                             else:
                                                 logger.warning(
-                                                    "Failed to store transcription in Firestore"
+                                                    "Failed to store " "transcription"
                                                 )
                                         else:
                                             logger.warning(
-                                                "No meeting ID available for Firestore storage (neither FS_MEETING_ID nor MEETING_ID set)"
+                                                "No meeting ID available for "
+                                                "Firestore storage (neither "
+                                                "FS_MEETING_ID nor MEETING_ID "
+                                                "set)"
                                             )
                                     else:
                                         logger.warning(
-                                            "No transcription text available to store in Firestore"
+                                            "No transcription text available "
+                                            "to store in Firestore"
                                         )
                                 except Exception as firestore_err:
                                     logger.exception(
-                                        "Error storing transcription in Firestore: %s",
+                                        "Error storing transcription in "
+                                        "Firestore: %s",
                                         firestore_err,
                                     )
                                     logger.warning(
-                                        "Continuing despite Firestore storage failure"
+                                        "Continuing despite Firestore storage "
+                                        "failure"
                                     )
                             else:
                                 logger.warning(
-                                    "Transcription completed but no results returned"
+                                    "Transcription completed but no results " "returned"
                                 )
                         finally:
                             for revoke_path in [target_gcs_path]:
@@ -505,7 +522,8 @@ class MeetingManager:
                                     )
                                 except Exception as revoke_err:
                                     logger.debug(
-                                        "Could not revoke public access (may not be public): %s",
+                                        "Could not revoke public access "
+                                        "(may not be public): %s",
                                         revoke_err,
                                     )
                     else:
@@ -521,6 +539,7 @@ class MeetingManager:
             logger.info("Step 5: Uploading transcripts to GCS (if available)...")
             transcript_txt_uploaded = False
             transcript_json_uploaded = False
+            transcript_md_uploaded = False
             if transcript_txt_path and os.path.exists(transcript_txt_path):
                 transcript_txt_uploaded = self.storage_client.upload_file(
                     transcript_txt_path, f"{self.gcs_path}/transcript.txt"
@@ -529,12 +548,22 @@ class MeetingManager:
                 transcript_json_uploaded = self.storage_client.upload_file(
                     transcript_json_path, f"{self.gcs_path}/transcript.json"
                 )
+            if transcript_md_path and os.path.exists(transcript_md_path):
+                transcript_md_uploaded = self.storage_client.upload_file(
+                    transcript_md_path,
+                    f"{self.gcs_path}/transcript.md",
+                    content_type="text/markdown",
+                )
 
             logger.info(
-                f"Successfully uploaded recording to gs://{self.gcs_bucket}/{self.gcs_path}/"
+                "Successfully uploaded recording to gs://%s/%s/",
+                self.gcs_bucket,
+                self.gcs_path,
             )
             if transcript_txt_uploaded and transcript_json_uploaded:
                 logger.info("✅ Transcripts also uploaded successfully")
+            if transcript_md_uploaded:
+                logger.info("✅ Markdown transcript uploaded successfully")
 
             # Cleanup local files (recording + transcripts)
             try:
@@ -552,15 +581,26 @@ class MeetingManager:
                     logger.debug(f"Removed extracted audio: {audio_path}")
                 except Exception as cleanup_err:
                     logger.debug(
-                        f"Failed to cleanup extracted audio {audio_path}: {cleanup_err}"
+                        "Failed to cleanup extracted audio %s: %s",
+                        audio_path,
+                        cleanup_err,
                     )
 
             if transcript_txt_path and os.path.exists(transcript_txt_path):
                 os.remove(transcript_txt_path)
-                logger.debug(f"Removed local transcript: {transcript_txt_path}")
+                logger.debug(
+                    "Removed local transcript: %s",
+                    transcript_txt_path,
+                )
             if transcript_json_path and os.path.exists(transcript_json_path):
                 os.remove(transcript_json_path)
-                logger.debug(f"Removed local transcript: {transcript_json_path}")
+                logger.debug(
+                    "Removed local transcript: %s",
+                    transcript_json_path,
+                )
+            if transcript_md_path and os.path.exists(transcript_md_path):
+                os.remove(transcript_md_path)
+                logger.debug(f"Removed local transcript: {transcript_md_path}")
 
             return True
 
@@ -600,7 +640,8 @@ class MeetingManager:
                 exit_code = 1
 
         finally:
-            # ALWAYS trigger shutdown of meeting-bot, regardless of success or failure
+            # ALWAYS trigger shutdown of meeting-bot, regardless of success or
+            # failure
             logger.info("Triggering meeting-bot shutdown...")
             shutdown_success = self.meeting_monitor.shutdown()
             if shutdown_success:
@@ -647,7 +688,8 @@ def _is_sample_transcription(transcript_text: str) -> bool:
         if indicator.lower() in transcript_text.lower()
     )
 
-    # Also check for generic business meeting patterns that suggest sample content
+    # Also check for generic business meeting patterns that suggest sample
+    # content
     generic_patterns = [
         "thank you [name redacted]",
         "really excited about this new project",
@@ -683,7 +725,8 @@ def main():
                 manager.meeting_monitor.shutdown()
             except Exception as shutdown_error:
                 logger.error(
-                    f"Error during shutdown after fatal error: {shutdown_error}"
+                    "Error during shutdown after fatal error: %s",
+                    shutdown_error,
                 )
 
     sys.exit(exit_code)
