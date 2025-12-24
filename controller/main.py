@@ -263,22 +263,20 @@ class MeetingController:
                         name="recordings", mount_path="/usr/src/app/dist/_tempvideo"
                     ),
                     # Mount shared memory for Chrome (prevents crashes)
-                    client.V1VolumeMount(
-                        name="dshm", mount_path="/dev/shm"
-                    ),
+                    client.V1VolumeMount(name="dshm", mount_path="/dev/shm"),
                     # Mount tmp for XDG and PulseAudio runtime directories
-                    client.V1VolumeMount(
-                        name="tmp", mount_path="/tmp"
-                    ),
+                    client.V1VolumeMount(name="tmp", mount_path="/tmp"),
                 ],
                 resources=client.V1ResourceRequirements(
                     requests={
                         "cpu": "3000m",  # 2 CPU cores for smooth audio/video processing
                         "memory": "2Gi",  # 2 GB memory
+                        "ephemeral-storage": "10Gi",
                     },
                     limits={
                         "cpu": "4000m",  # 4 CPU cores (doubled for better performance)
                         "memory": "3Gi",  # 4 GB memory (increased for high-quality recording)
+                        "ephemeral-storage": "10Gi",
                     },
                 ),
             )
@@ -302,10 +300,12 @@ class MeetingController:
                     requests={
                         "cpu": "2500m",  # 2.5 CPU cores
                         "memory": "1Gi",  # 1 GB memory (doubled)
+                        "ephemeral-storage": "10Gi",
                     },
                     limits={
                         "cpu": "3750m",  # 50% higher (3.75 CPU cores)
                         "memory": "1536Mi",  # 1.5 GB memory (doubled)
+                        "ephemeral-storage": "10Gi",
                     },
                 ),
             )
@@ -319,7 +319,7 @@ class MeetingController:
                     },
                     annotations={
                         "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
-                    }
+                    },
                 ),
                 spec=client.V1PodSpec(
                     restart_policy="Never",
@@ -339,12 +339,13 @@ class MeetingController:
                         # Shared memory for Chrome
                         client.V1Volume(
                             name="dshm",
-                            empty_dir=client.V1EmptyDirVolumeSource(medium="Memory", size_limit="2Gi")
+                            empty_dir=client.V1EmptyDirVolumeSource(
+                                medium="Memory", size_limit="2Gi"
+                            ),
                         ),
                         # Temporary storage for runtime dirs (XDG, PulseAudio)
                         client.V1Volume(
-                            name="tmp",
-                            empty_dir=client.V1EmptyDirVolumeSource()
+                            name="tmp", empty_dir=client.V1EmptyDirVolumeSource()
                         ),
                     ],
                 ),
