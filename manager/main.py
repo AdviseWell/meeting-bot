@@ -83,6 +83,7 @@ def _cleanup_meeting_scratch_dir(path: str) -> None:
     except Exception as e:
         logger.warning("Scratch cleanup failed (ignored): %s", e)
 
+
 # Reduce noise from some verbose libraries
 logging.getLogger("google.auth").setLevel(logging.WARNING)
 logging.getLogger("urllib3").setLevel(logging.WARNING)

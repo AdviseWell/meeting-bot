@@ -27,7 +27,7 @@ function isNoSuchUploadError(err: any, userId: string, logger: Logger): boolean 
   /**
    * Error includes:
    * code: ERR_BAD_REQUEST
-   * 
+   *
    * Error response includes:
    * status: 404
    * statusText: 'Not Found'
@@ -70,7 +70,7 @@ class DiskUploader implements IUploader {
   private readonly RETRY_UPLOAD_DELAY_BASE_MS = 500;
   private readonly MAX_GLOBAL_FAILURES = 5;
 
-  private folderId = 'private'; // Assume meetings belong to an individual 
+  private folderId = 'private'; // Assume meetings belong to an individual
   private contentType: ContentType = extensionToContentType[config.uploaderFileExtension] ?? 'video/webm'; // Default video format
   private fileExtension: string = config.uploaderFileExtension;
   private fileId: string;
@@ -176,7 +176,7 @@ class DiskUploader implements IUploader {
 
   private async finish() {
     this._logger.info('Client finishing upload ...', this._userId, this._teamId);
-    
+
     // Finalise upload
     const file: FileType = await finalizeUpload({
       teamId: this._teamId,
@@ -281,7 +281,7 @@ class DiskUploader implements IUploader {
       }
       this.enqueue(data);
       return true;
-    } catch(err) {
+    } catch (err) {
       this._logger.info('Error: Unable to save the chunk to disk...', this._userId, this._teamId, err);
       return false;
     }
@@ -426,12 +426,12 @@ class DiskUploader implements IUploader {
 
       // Check if the queue is empty
       if (this.queue.length > 0) {
-        // Final attempt to finish the disk write 
+        // Final attempt to finish the disk write
         await this.writeWithRetries();
       }
 
       return true;
-    } catch(err) {
+    } catch (err) {
       this._logger.info('Critical: Failed to finalise temp file write...', this._userId, err);
       return false;
     }
@@ -524,7 +524,7 @@ class DiskUploader implements IUploader {
       }
 
       const goodToGo = await this.finalizeDiskWriting();
-      
+
       if (this.forceUpload) {
         this._logger.info('Force upload is enabled. Ignoring disk writing check results...', { goodToGo });
       } else if (!goodToGo) {

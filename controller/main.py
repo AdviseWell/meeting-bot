@@ -348,14 +348,7 @@ class MeetingController:
                         client.V1Volume(
                             name="recordings", empty_dir=client.V1EmptyDirVolumeSource()
                         ),
-                        # Shared RWX scratch space for large conversions/intermediates.
-                        # Must be created ahead of time (see k8s/pvc-scratch-rwx.yaml).
-                        client.V1Volume(
-                            name="scratch",
-                            persistent_volume_claim=client.V1PersistentVolumeClaimVolumeSource(
-                                claim_name="meeting-bot-scratch-rwx"
-                            ),
-                        ),
+                        # Scratch will be mounted via a per-job RWO PVC created below.
                         # Shared memory for Chrome
                         client.V1Volume(
                             name="dshm",
@@ -371,7 +364,53 @@ class MeetingController:
                 ),
             )
 
-            # Define the job
+            # Create a per-job RWO scratch PVC for /scratch.
+            # This avoids relying on RWX provisioning and keeps large artifacts
+            # off node ephemeral storage.
+            scratch_pvc_name = f"{job_name}-scratch"
+            scratch_pvc = client.V1PersistentVolumeClaim(
+                api_version="v1",
+                kind="PersistentVolumeClaim",
+                metadata=client.V1ObjectMeta(
+                    name=scratch_pvc_name,
+                    namespace=self.k8s_namespace,
+                    labels={
+                        "app": "meeting-bot-manager",
+                        "meeting-id": meeting_id[:63],
+                        "managed-by": "meeting-bot-controller",
+                    },
+                ),
+                spec=client.V1PersistentVolumeClaimSpec(
+                    access_modes=["ReadWriteOnce"],
+                    storage_class_name=os.getenv(
+                        "SCRATCH_STORAGE_CLASS", "standard-rwo"
+                    ),
+                    resources=client.V1ResourceRequirements(
+                        requests={
+                            "storage": os.getenv("SCRATCH_STORAGE_SIZE", "50Gi")
+                        }
+                    ),
+                ),
+            )
+
+            self.core_v1.create_namespaced_persistent_volume_claim(
+                namespace=self.k8s_namespace, body=scratch_pvc
+            )
+
+            logger.info("Scratch PVC for job %s: %s", job_name, scratch_pvc_name)
+
+            # Add the scratch volume to the template now that the PVC exists.
+            template.spec.volumes.insert(
+                1,
+                client.V1Volume(
+                    name="scratch",
+                    persistent_volume_claim=client.V1PersistentVolumeClaimVolumeSource(
+                        claim_name=scratch_pvc_name
+                    ),
+                ),
+            )
+
+            # Define and create the job.
             job = client.V1Job(
                 api_version="batch/v1",
                 kind="Job",
@@ -391,78 +430,30 @@ class MeetingController:
                 ),
             )
 
-            # Create the job first so we can set ownerReferences on the PVC.
             created_job = self.batch_v1.create_namespaced_job(
-                namespace=self.k8s_namespace, body=job
-            )
-
-            # Create a per-job RWO scratch PVC for /scratch.
-            # This avoids relying on RWX provisioning and keeps large artifacts
-            # off node ephemeral storage.
-            scratch_pvc_name = f"{job_name}-scratch"
-            scratch_pvc = client.V1PersistentVolumeClaim(
-                api_version="v1",
-                kind="PersistentVolumeClaim",
-                metadata=client.V1ObjectMeta(
-                    name=scratch_pvc_name,
-                    namespace=self.k8s_namespace,
-                    labels={
-                        "app": "meeting-bot-manager",
-                        "meeting-id": meeting_id[:63],
-                        "managed-by": "meeting-bot-controller",
-                    },
-                    owner_references=[
-                        client.V1OwnerReference(
-                            api_version=created_job.api_version,
-                            kind=created_job.kind,
-                            name=created_job.metadata.name,
-                            uid=created_job.metadata.uid,
-                            controller=True,
-                            block_owner_deletion=True,
-                        )
-                    ],
-                ),
-                spec=client.V1PersistentVolumeClaimSpec(
-                    access_modes=["ReadWriteOnce"],
-                    storage_class_name=os.getenv(
-                        "SCRATCH_STORAGE_CLASS", "standard-rwo"
-                    ),
-                    resources=client.V1ResourceRequirements(
-                        requests={
-                            "storage": os.getenv("SCRATCH_STORAGE_SIZE", "50Gi")
-                        }
-                    ),
-                ),
-            )
-
-            self.core_v1.create_namespaced_persistent_volume_claim(
-                namespace=self.k8s_namespace, body=scratch_pvc
-            )
-
-            # Patch the Job to mount the per-job scratch PVC.
-            # We patch instead of building it up-front so the PVC can use a
-            # proper ownerReference.
-            patch_body = {
-                "spec": {
-                    "template": {
-                        "spec": {
-                            "volumes": [
-                                {
-                                    "name": "scratch",
-                                    "persistentVolumeClaim": {
-                                        "claimName": scratch_pvc_name
-                                    },
-                                }
-                            ]
-                        }
-                    }
-                }
-            }
-
-            self.batch_v1.patch_namespaced_job(
-                name=created_job.metadata.name,
                 namespace=self.k8s_namespace,
-                body=patch_body,
+                body=job,
+            )
+
+            # Update the scratch PVC ownerReference to point at the Job.
+            scratch_pvc.metadata.owner_references = [
+                client.V1OwnerReference(
+                    api_version=created_job.api_version,
+                    kind=created_job.kind,
+                    name=created_job.metadata.name,
+                    uid=created_job.metadata.uid,
+                    controller=True,
+                    block_owner_deletion=True,
+                )
+            ]
+            self.core_v1.patch_namespaced_persistent_volume_claim(
+                name=scratch_pvc_name,
+                namespace=self.k8s_namespace,
+                body={
+                    "metadata": {
+                        "ownerReferences": scratch_pvc.metadata.owner_references
+                    }
+                },
             )
 
             logger.info(f"✅ Created job '{job_name}' for meeting {meeting_id}")
