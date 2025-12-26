@@ -16,7 +16,12 @@ import { getTimeString } from '../lib/datetime';
 
 console.log(' ----- PWD OR CWD ----- ', process.cwd());
 
-const tempFolder = path.join(process.cwd(), 'dist', '_tempvideo');
+// Allow overriding the recording temp folder so Kubernetes can point this at a
+// PVC-mounted path (e.g., /scratch/tempvideo) to avoid Autopilot ephemeral
+// storage limits.
+const tempFolder = process.env.TEMPVIDEO_DIR
+  ? process.env.TEMPVIDEO_DIR
+  : path.join(process.cwd(), 'dist', '_tempvideo');
 
 function isNoSuchUploadError(err: any, userId: string, logger: Logger): boolean {
   /**

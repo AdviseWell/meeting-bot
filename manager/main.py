@@ -38,6 +38,51 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
+
+def _scratch_root() -> str:
+    """Prefer a PVC-backed scratch directory if mounted."""
+    # /scratch is mounted by the controller when a RWX PVC is available.
+    # Fall back to /tmp for local/dev.
+    return "/scratch" if os.path.isdir("/scratch") else "/tmp"
+
+
+def _should_cleanup_scratch() -> bool:
+    """Whether to delete per-meeting scratch dirs after successful processing."""
+    # Default on: keeps shared RWX PVC from filling up over time.
+    return os.environ.get("CLEANUP_SCRATCH", "true").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+    }
+
+
+def _cleanup_meeting_scratch_dir(path: str) -> None:
+    """Best-effort delete of the per-meeting scratch directory."""
+    if not path:
+        return
+
+    abs_path = os.path.abspath(path)
+
+    # Safety: only allow delete inside /scratch/meetings/<id>
+    allowed_prefix = os.path.abspath("/scratch/meetings") + os.sep
+    if not abs_path.startswith(allowed_prefix):
+        logger.warning("Skipping scratch cleanup outside allowed prefix: %s", abs_path)
+        return
+
+    # Extra safety: don’t delete the root meetings dir.
+    if abs_path.rstrip(os.sep) == os.path.abspath("/scratch/meetings"):
+        logger.warning("Skipping scratch cleanup of root meetings dir")
+        return
+
+    try:
+        import shutil
+
+        shutil.rmtree(abs_path, ignore_errors=True)
+        logger.info("Cleaned up scratch workspace: %s", abs_path)
+    except Exception as e:
+        logger.warning("Scratch cleanup failed (ignored): %s", e)
+
 # Reduce noise from some verbose libraries
 logging.getLogger("google.auth").setLevel(logging.WARNING)
 logging.getLogger("urllib3").setLevel(logging.WARNING)
@@ -165,6 +210,31 @@ class MeetingManager:
                 return False
 
             logger.info(f"Meeting completed. Recording at: {recording_path}")
+
+            # Use PVC-backed scratch space for any heavy processing. This avoids
+            # GKE Autopilot ephemeral storage limits.
+            scratch_root = _scratch_root()
+            scratch_tmp = os.path.join(scratch_root, "tmp")
+            os.makedirs(scratch_tmp, exist_ok=True)
+
+            work_dir = os.path.join(scratch_root, "meetings", self.meeting_id)
+            os.makedirs(work_dir, exist_ok=True)
+
+            # Copy the WEBM into scratch so ffmpeg outputs (mp4/m4a) land on the
+            # PVC rather than node ephemeral storage.
+            work_webm = os.path.join(work_dir, "recording.webm")
+            if os.path.abspath(recording_path) != os.path.abspath(work_webm):
+                try:
+                    logger.info("Copying recording into scratch workspace...")
+                    import shutil
+
+                    shutil.copy2(recording_path, work_webm)
+                    recording_path = work_webm
+                except Exception as copy_err:
+                    logger.warning(
+                        "Failed to copy recording into scratch; will process in-place: %s",
+                        copy_err,
+                    )
 
             # Step 2.5: Extract audio-only (preferred for transcription)
             # This reduces upload size and significantly improves chances of a
@@ -508,9 +578,14 @@ class MeetingManager:
 
             # Cleanup local files (recording + transcripts)
             try:
-                if os.path.exists(recording_path):
+                # Only delete the recording file when it lives in /scratch.
+                # The source recording under /recordings is part of the shared
+                # volume and we should not delete it here.
+                if os.path.exists(recording_path) and os.path.abspath(
+                    recording_path
+                ).startswith(os.path.abspath("/scratch") + os.sep):
                     os.remove(recording_path)
-                    logger.info(f"Cleaned up file: {recording_path}")
+                    logger.info(f"Cleaned up scratch file: {recording_path}")
             except Exception as cleanup_err:
                 logger.warning(
                     f"Failed to cleanup file {recording_path}: {cleanup_err}"
@@ -542,6 +617,12 @@ class MeetingManager:
             if transcript_md_path and os.path.exists(transcript_md_path):
                 os.remove(transcript_md_path)
                 logger.debug(f"Removed local transcript: {transcript_md_path}")
+
+            # Best-effort: delete the per-meeting scratch workspace.
+            if _should_cleanup_scratch() and os.path.isdir("/scratch"):
+                _cleanup_meeting_scratch_dir(
+                    os.path.join("/scratch", "meetings", self.meeting_id)
+                )
 
             return True
 

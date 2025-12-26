@@ -243,6 +243,12 @@ class MeetingController:
                 env=[
                     client.V1EnvVar(name="PORT", value="3000"),
                     client.V1EnvVar(name="NODE_ENV", value=self.node_env),
+                    # Prefer using the RWX scratch PVC for temp files.
+                    client.V1EnvVar(name="TMPDIR", value="/scratch/tmp"),
+                    client.V1EnvVar(name="TMP", value="/scratch/tmp"),
+                    client.V1EnvVar(name="TEMP", value="/scratch/tmp"),
+                    # Prefer writing recording artifacts to the scratch PVC.
+                    client.V1EnvVar(name="TEMPVIDEO_DIR", value="/scratch/tempvideo"),
                     client.V1EnvVar(
                         name="MAX_RECORDING_DURATION_MINUTES",
                         value=str(self.max_recording_duration),
@@ -260,8 +266,9 @@ class MeetingController:
                 ],
                 volume_mounts=[
                     client.V1VolumeMount(
-                        name="recordings", mount_path="/usr/src/app/dist/_tempvideo"
+                        name="scratch", mount_path="/usr/src/app/dist/_tempvideo"
                     ),
+                    client.V1VolumeMount(name="scratch", mount_path="/scratch"),
                     # Mount shared memory for Chrome (prevents crashes)
                     client.V1VolumeMount(name="dshm", mount_path="/dev/shm"),
                     # Mount tmp for XDG and PulseAudio runtime directories
@@ -271,12 +278,12 @@ class MeetingController:
                     requests={
                         "cpu": "3000m",  # 2 CPU cores for smooth audio/video processing
                         "memory": "2Gi",  # 2 GB memory
-                        "ephemeral-storage": "10Gi",
+                        "ephemeral-storage": "8Gi",
                     },
                     limits={
                         "cpu": "4000m",  # 4 CPU cores (doubled for better performance)
                         "memory": "3Gi",  # 4 GB memory (increased for high-quality recording)
-                        "ephemeral-storage": "10Gi",
+                        "ephemeral-storage": "8Gi",
                     },
                 ),
             )
@@ -291,21 +298,26 @@ class MeetingController:
                     client.V1EnvVar(
                         name="MEETING_BOT_API_URL", value="http://localhost:3000"
                     ),
+                    # Prefer using the RWX scratch PVC for temp files.
+                    client.V1EnvVar(name="TMPDIR", value="/scratch/tmp"),
+                    client.V1EnvVar(name="TMP", value="/scratch/tmp"),
+                    client.V1EnvVar(name="TEMP", value="/scratch/tmp"),
                 ],
                 volume_mounts=[
-                    client.V1VolumeMount(name="recordings", mount_path="/recordings")
+                    client.V1VolumeMount(name="recordings", mount_path="/recordings"),
+                    client.V1VolumeMount(name="scratch", mount_path="/scratch"),
                 ],
                 image_pull_policy="IfNotPresent",
                 resources=client.V1ResourceRequirements(
                     requests={
                         "cpu": "2500m",  # 2.5 CPU cores
                         "memory": "1Gi",  # 1 GB memory (doubled)
-                        "ephemeral-storage": "10Gi",
+                        "ephemeral-storage": "2Gi",
                     },
                     limits={
                         "cpu": "3750m",  # 50% higher (3.75 CPU cores)
                         "memory": "1536Mi",  # 1.5 GB memory (doubled)
-                        "ephemeral-storage": "10Gi",
+                        "ephemeral-storage": "2Gi",
                     },
                 ),
             )
@@ -335,6 +347,14 @@ class MeetingController:
                     volumes=[
                         client.V1Volume(
                             name="recordings", empty_dir=client.V1EmptyDirVolumeSource()
+                        ),
+                        # Shared RWX scratch space for large conversions/intermediates.
+                        # Must be created ahead of time (see k8s/pvc-scratch-rwx.yaml).
+                        client.V1Volume(
+                            name="scratch",
+                            persistent_volume_claim=client.V1PersistentVolumeClaimVolumeSource(
+                                claim_name="meeting-bot-scratch-rwx"
+                            ),
                         ),
                         # Shared memory for Chrome
                         client.V1Volume(
@@ -371,8 +391,79 @@ class MeetingController:
                 ),
             )
 
-            # Create the job
-            self.batch_v1.create_namespaced_job(namespace=self.k8s_namespace, body=job)
+            # Create the job first so we can set ownerReferences on the PVC.
+            created_job = self.batch_v1.create_namespaced_job(
+                namespace=self.k8s_namespace, body=job
+            )
+
+            # Create a per-job RWO scratch PVC for /scratch.
+            # This avoids relying on RWX provisioning and keeps large artifacts
+            # off node ephemeral storage.
+            scratch_pvc_name = f"{job_name}-scratch"
+            scratch_pvc = client.V1PersistentVolumeClaim(
+                api_version="v1",
+                kind="PersistentVolumeClaim",
+                metadata=client.V1ObjectMeta(
+                    name=scratch_pvc_name,
+                    namespace=self.k8s_namespace,
+                    labels={
+                        "app": "meeting-bot-manager",
+                        "meeting-id": meeting_id[:63],
+                        "managed-by": "meeting-bot-controller",
+                    },
+                    owner_references=[
+                        client.V1OwnerReference(
+                            api_version=created_job.api_version,
+                            kind=created_job.kind,
+                            name=created_job.metadata.name,
+                            uid=created_job.metadata.uid,
+                            controller=True,
+                            block_owner_deletion=True,
+                        )
+                    ],
+                ),
+                spec=client.V1PersistentVolumeClaimSpec(
+                    access_modes=["ReadWriteOnce"],
+                    storage_class_name=os.getenv(
+                        "SCRATCH_STORAGE_CLASS", "standard-rwo"
+                    ),
+                    resources=client.V1ResourceRequirements(
+                        requests={
+                            "storage": os.getenv("SCRATCH_STORAGE_SIZE", "50Gi")
+                        }
+                    ),
+                ),
+            )
+
+            self.core_v1.create_namespaced_persistent_volume_claim(
+                namespace=self.k8s_namespace, body=scratch_pvc
+            )
+
+            # Patch the Job to mount the per-job scratch PVC.
+            # We patch instead of building it up-front so the PVC can use a
+            # proper ownerReference.
+            patch_body = {
+                "spec": {
+                    "template": {
+                        "spec": {
+                            "volumes": [
+                                {
+                                    "name": "scratch",
+                                    "persistentVolumeClaim": {
+                                        "claimName": scratch_pvc_name
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+
+            self.batch_v1.patch_namespaced_job(
+                name=created_job.metadata.name,
+                namespace=self.k8s_namespace,
+                body=patch_body,
+            )
 
             logger.info(f"✅ Created job '{job_name}' for meeting {meeting_id}")
             return True

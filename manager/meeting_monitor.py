@@ -4,8 +4,6 @@ Meeting Monitor - Interface with the meeting-bot API
 
 import os
 import glob
-import shutil
-import tempfile
 import time
 import logging
 import requests
@@ -341,33 +339,18 @@ class MeetingMonitor:
                 file_size = os.path.getsize(source_path)
                 logger.info(f"📊 Recording file size: {file_size / (1024*1024):.2f} MB")
 
-                # Copy to /tmp for processing (shared volume is read-only for manager)
-                temp_dir = tempfile.mkdtemp(prefix="recording_")
-                filename = os.path.basename(source_path)
-                temp_path = os.path.join(temp_dir, filename)
-
-                logger.info(f"📋 Copying recording to temp directory: {temp_path}")
-                shutil.copy2(source_path, temp_path)
-                logger.info(f"✅ Recording copied successfully")
-
-                # Also copy WAV backup file if it exists
-                wav_files = glob.glob(f"{recording_dir}/backup_*.wav")
-                if wav_files:
-                    wav_source = wav_files[0]
-                    wav_filename = os.path.basename(wav_source)
-                    wav_temp_path = os.path.join(temp_dir, wav_filename)
-
-                    logger.info(
-                        f"📋 Copying WAV backup to temp directory: {wav_temp_path}"
-                    )
-                    shutil.copy2(wav_source, wav_temp_path)
-                    logger.info(
-                        f"✅ WAV backup copied successfully ({os.path.getsize(wav_source) / (1024*1024):.2f} MB)"
-                    )
-                else:
-                    logger.debug(f"No WAV backup file found in {recording_dir}")
-
-                return temp_path
+                # Historically we copied into /tmp for processing, but that can
+                # easily exceed GKE Autopilot ephemeral storage limits on long
+                # recordings. Instead, process directly from the shared
+                # /recordings volume.
+                #
+                # NOTE: /recordings is an EmptyDir shared between the two
+                # containers for the lifetime of the pod, so this is safe.
+                # Be mindful to clean up any derived outputs you create there.
+                logger.info(
+                    "Using shared /recordings path for processing (no /tmp copy)"
+                )
+                return source_path
 
             # Check if job failed
             if state in ["failed", "error", "cancelled"]:
