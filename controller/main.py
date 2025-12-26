@@ -386,9 +386,7 @@ class MeetingController:
                         "SCRATCH_STORAGE_CLASS", "standard-rwo"
                     ),
                     resources=client.V1ResourceRequirements(
-                        requests={
-                            "storage": os.getenv("SCRATCH_STORAGE_SIZE", "50Gi")
-                        }
+                        requests={"storage": os.getenv("SCRATCH_STORAGE_SIZE", "50Gi")}
                     ),
                 ),
             )
