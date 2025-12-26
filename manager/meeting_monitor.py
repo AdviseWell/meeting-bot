@@ -308,14 +308,59 @@ class MeetingMonitor:
 
                 logger.info(f"Looking for recording in directory for userId: {user_id}")
 
-                # Look for the recording file in the shared volume
-                recording_dir = f"/recordings/{user_id}"
-                if not os.path.exists(recording_dir):
-                    logger.error(f"❌ Recording directory not found: {recording_dir}")
-                    return None
+                def _candidate_recording_dirs() -> list[str]:
+                    """Return candidate directories where meeting-bot may write recordings.
 
-                # Find .webm files in the directory
-                recording_files = glob.glob(f"{recording_dir}/*.webm")
+                    Historically, meeting-bot wrote to an EmptyDir mounted at /recordings.
+                    Newer deployments can redirect temp video output to a PVC-backed
+                    scratch volume via TEMPVIDEO_DIR (often /scratch/tempvideo).
+                    """
+
+                    candidates: list[str] = []
+
+                    # 1) Legacy shared EmptyDir convention.
+                    candidates.append(f"/recordings/{user_id}")
+
+                    # 2) Preferred: controller sets TEMPVIDEO_DIR in meeting-bot.
+                    # meeting-bot typically writes into TEMPVIDEO_DIR/<userId>/...
+                    tempvideo_root = os.environ.get("TEMPVIDEO_DIR")
+                    if tempvideo_root:
+                        candidates.append(os.path.join(tempvideo_root, user_id))
+
+                    # 3) Common scratch layout used by the controller.
+                    candidates.append(os.path.join("/scratch/tempvideo", user_id))
+
+                    # 4) Fallback to the in-container path (may also be backed by scratch
+                    # via a volume mount).
+                    candidates.append(
+                        os.path.join("/usr/src/app/dist/_tempvideo", user_id)
+                    )
+
+                    # Deduplicate while preserving order.
+                    seen: set[str] = set()
+                    uniq: list[str] = []
+                    for d in candidates:
+                        if d not in seen:
+                            seen.add(d)
+                            uniq.append(d)
+                    return uniq
+
+                recording_files: list[str] = []
+                searched_dirs: list[str] = []
+                for recording_dir in _candidate_recording_dirs():
+                    searched_dirs.append(recording_dir)
+                    if not os.path.exists(recording_dir):
+                        continue
+                    recording_files = glob.glob(os.path.join(recording_dir, "*.webm"))
+                    if recording_files:
+                        break
+
+                if not recording_files:
+                    logger.error(
+                        "❌ No recording directory/files found. Checked: %s",
+                        ", ".join(searched_dirs),
+                    )
+                    return None
 
                 if not recording_files:
                     logger.error(
@@ -347,9 +392,7 @@ class MeetingMonitor:
                 # NOTE: /recordings is an EmptyDir shared between the two
                 # containers for the lifetime of the pod, so this is safe.
                 # Be mindful to clean up any derived outputs you create there.
-                logger.info(
-                    "Using shared /recordings path for processing (no /tmp copy)"
-                )
+                logger.info("Using recording path for processing (no /tmp copy)")
                 return source_path
 
             # Check if job failed
