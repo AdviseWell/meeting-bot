@@ -336,6 +336,22 @@ class MeetingController:
                 spec=client.V1PodSpec(
                     restart_policy="Never",
                     priority_class_name="high-priority",
+                    init_containers=[
+                        client.V1Container(
+                            name="init-scratch-dirs",
+                            image="busybox:1.36",
+                            command=[
+                                "sh",
+                                "-c",
+                                "mkdir -p /scratch/tmp /scratch/tempvideo && chmod 1777 /scratch/tmp && chmod 0777 /scratch/tempvideo",
+                            ],
+                            volume_mounts=[
+                                client.V1VolumeMount(
+                                    name="scratch", mount_path="/scratch"
+                                )
+                            ],
+                        )
+                    ],
                     containers=[meeting_bot_container, manager_container],
                     service_account_name=self.job_service_account,
                     # Security context for audio/video capture
