@@ -93,7 +93,7 @@ class MeetingController:
         # Optional configuration
         self.node_env = os.getenv("NODE_ENV", "development")
         self.max_recording_duration = int(
-            os.getenv("MAX_RECORDING_DURATION_MINUTES", "240")
+            os.getenv("MAX_RECORDING_DURATION_MINUTES", "600")
         )
         self.meeting_inactivity = int(os.getenv("MEETING_INACTIVITY_MINUTES", "15"))
         self.inactivity_detection_delay = int(
@@ -440,6 +440,9 @@ class MeetingController:
                 spec=client.V1JobSpec(
                     template=template,
                     backoff_limit=0,  # Do not retry on failure
+                    # Hard cap the overall job runtime. This prevents runaway
+                    # pods if recording/monitoring gets stuck.
+                    active_deadline_seconds=39600,  # 11 hours
                     ttl_seconds_after_finished=3600,  # Clean up after 1 hour
                 ),
             )

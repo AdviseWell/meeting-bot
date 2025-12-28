@@ -257,7 +257,7 @@ class MeetingMonitor:
         job_id: str,
         metadata: Dict,
         check_interval: int = 10,
-        max_wait_time: int = 14400,  # 4 hours default
+        max_wait_time: int = 39600,  # 11 hours default
     ) -> Optional[str]:
         """
         Monitor a meeting job until it completes
