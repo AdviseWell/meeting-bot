@@ -102,6 +102,15 @@ class MeetingManager:
         )  # Firestore-specific meeting ID
         self.gcs_path = os.environ.get("GCS_PATH")
 
+        # Storage layout: prefer recordings/<meeting_id>/... as the default
+        # prefix. If a producer passes only the meeting id (legacy
+        # meeting-id-only layout), normalize it here.
+        if self.gcs_path and not self.gcs_path.startswith("recordings/"):
+            # Keep other explicit prefixes (e.g., custom folder) if provided.
+            # Only auto-prefix when the provided value looks like a bare id.
+            if "/" not in self.gcs_path:
+                self.gcs_path = f"recordings/{self.gcs_path}"
+
         # Optional meeting metadata
         self.metadata = load_meeting_metadata(
             meeting_id=self.meeting_id,
@@ -241,10 +250,13 @@ class MeetingManager:
             # This reduces upload size and significantly improves chances of a
             # one-shot transcription staying within model input limits.
             audio_path = None
+            mp4_path = None
             try:
                 logger.info("Step 2.5: Extracting audio-only for transcription...")
                 converter = MediaConverter()
-                _, extracted_m4a = converter.convert(recording_path)
+                extracted_mp4, extracted_m4a = converter.convert(recording_path)
+                if extracted_mp4 and os.path.exists(extracted_mp4):
+                    mp4_path = extracted_mp4
                 if extracted_m4a and os.path.exists(extracted_m4a):
                     audio_size = os.path.getsize(extracted_m4a)
                     logger.info(
@@ -303,6 +315,24 @@ class MeetingManager:
                 self.gcs_bucket,
                 webm_gcs_path,
             )
+
+            # Step 3.25: Upload MP4 (optional) for browser fallback.
+            if mp4_path and os.path.exists(mp4_path):
+                logger.info("Step 3.25: Uploading MP4 fallback to GCS...")
+                mp4_gcs_path = f"{self.gcs_path}/recording.mp4"
+                mp4_uploaded = self.storage_client.upload_file(
+                    mp4_path,
+                    mp4_gcs_path,
+                    content_type="video/mp4",
+                )
+                if mp4_uploaded:
+                    logger.info(
+                        "✅ MP4 uploaded to gs://%s/%s",
+                        self.gcs_bucket,
+                        mp4_gcs_path,
+                    )
+                else:
+                    logger.warning("Failed to upload MP4 fallback; will ignore")
 
             # Step 3.5: Upload extracted audio (optional but preferred)
             audio_gcs_path = None
@@ -552,6 +582,7 @@ class MeetingManager:
             transcript_txt_uploaded = False
             transcript_json_uploaded = False
             transcript_md_uploaded = False
+            transcript_vtt_uploaded = False
             if transcript_txt_path and os.path.exists(transcript_txt_path):
                 transcript_txt_uploaded = self.storage_client.upload_file(
                     transcript_txt_path, f"{self.gcs_path}/transcript.txt"
@@ -567,6 +598,16 @@ class MeetingManager:
                     content_type="text/markdown",
                 )
 
+            # offline_pipeline writes a .vtt file next to the txt/json outputs.
+            if transcript_txt_path:
+                transcript_vtt_path = os.path.splitext(transcript_txt_path)[0] + ".vtt"
+                if os.path.exists(transcript_vtt_path):
+                    transcript_vtt_uploaded = self.storage_client.upload_file(
+                        transcript_vtt_path,
+                        f"{self.gcs_path}/transcript.vtt",
+                        content_type="text/vtt",
+                    )
+
             logger.info(
                 "Successfully uploaded recording to gs://%s/%s/",
                 self.gcs_bucket,
@@ -576,6 +617,8 @@ class MeetingManager:
                 logger.info("✅ Transcripts also uploaded successfully")
             if transcript_md_uploaded:
                 logger.info("✅ Markdown transcript uploaded successfully")
+            if transcript_vtt_uploaded:
+                logger.info("✅ WebVTT subtitles uploaded successfully")
 
             # Cleanup local files (recording + transcripts)
             try:
@@ -618,6 +661,13 @@ class MeetingManager:
             if transcript_md_path and os.path.exists(transcript_md_path):
                 os.remove(transcript_md_path)
                 logger.debug(f"Removed local transcript: {transcript_md_path}")
+
+            # Remove local VTT (if created).
+            if transcript_txt_path:
+                transcript_vtt_path = os.path.splitext(transcript_txt_path)[0] + ".vtt"
+                if os.path.exists(transcript_vtt_path):
+                    os.remove(transcript_vtt_path)
+                    logger.debug(f"Removed local transcript: {transcript_vtt_path}")
 
             # Best-effort: delete the per-meeting scratch workspace.
             if _should_cleanup_scratch() and os.path.isdir("/scratch"):

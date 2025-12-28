@@ -135,6 +135,53 @@ def _segments_to_markdown(segments: List[Segment]) -> str:
     return "\n".join(lines).strip() + "\n"
 
 
+def _format_vtt_timestamp(seconds: float) -> str:
+    """Format seconds as a WebVTT timestamp (HH:MM:SS.mmm)."""
+
+    if seconds < 0:
+        seconds = 0.0
+    millis = int(round(seconds * 1000.0))
+    hrs, rem = divmod(millis, 3600 * 1000)
+    mins, rem = divmod(rem, 60 * 1000)
+    secs, ms = divmod(rem, 1000)
+    return f"{hrs:02d}:{mins:02d}:{secs:02d}.{ms:03d}"
+
+
+def _escape_vtt_text(text: str) -> str:
+    """Escape text for safe WebVTT cues.
+
+    WebVTT cue payload is text; the only strict requirement we enforce is that
+    it must not contain blank lines inside a cue.
+    """
+
+    # Collapse internal whitespace/newlines to keep one cue = one paragraph.
+    return " ".join(text.strip().split())
+
+
+def _segments_to_webvtt(segments: List[Segment]) -> str:
+    """Convert segments into a WebVTT file content."""
+
+    out: List[str] = ["WEBVTT", ""]
+    cue_idx = 1
+    for s in segments:
+        text = _escape_vtt_text(s.text)
+        if not text:
+            continue
+
+        start = _format_vtt_timestamp(s.start)
+        end = _format_vtt_timestamp(s.end)
+        speaker = (s.speaker or "").strip()
+        prefix = f"{speaker}: " if speaker else ""
+
+        out.append(str(cue_idx))
+        out.append(f"{start} --> {end}")
+        out.append(prefix + text)
+        out.append("")
+        cue_idx += 1
+
+    return "\n".join(out).rstrip() + "\n"
+
+
 def _patch_speechbrain_hyperparams_for_local_model(model_dir: Path) -> None:
     """Make SpeechBrain hyperparams.yaml use local files instead of HF hub.
 
@@ -706,6 +753,7 @@ def transcribe_and_diarize_local_media(
         txt_path = out_dir / f"{base_name}.txt"
         json_path = out_dir / f"{base_name}.json"
         md_path = out_dir / f"{base_name}.md"
+        vtt_path = out_dir / f"{base_name}.vtt"
 
         transcript_lines: List[str] = []
         for s in segments:
@@ -716,6 +764,8 @@ def transcribe_and_diarize_local_media(
         txt_path.write_text("\n".join(transcript_lines), encoding="utf-8")
 
         md_path.write_text(_segments_to_markdown(segments), encoding="utf-8")
+
+        vtt_path.write_text(_segments_to_webvtt(segments), encoding="utf-8")
 
         payload: Dict[str, Any] = {
             "engine": "whisper.cpp",
