@@ -649,6 +649,12 @@ class MeetingController:
             else "scheduled"
         )
 
+        logger.debug(
+            "Querying meetings: path=%s, status=%s",
+            self.meetings_collection_path,
+            status_value,
+        )
+
         q = coll.where(
             field_path=self.meeting_status_field,
             op_string="==",
@@ -843,15 +849,23 @@ class MeetingController:
         health_server = HealthCheckServer()
         health_server.start()
 
+        logger.info(f"Polling interval: {self.poll_interval}s")
+
         while True:
             try:
+                logger.debug("Starting poll cycle...")
+                
                 # Step 0: discover meetings that need bot instances and enqueue them.
                 meeting_docs = self._query_meetings_needing_bots()
                 if meeting_docs:
-                    logger.info("Found %s meeting(s) needing bots", len(meeting_docs))
+                    logger.info(
+                        "Found %s meeting(s) needing bots", len(meeting_docs)
+                    )
                 for meeting_doc in meeting_docs:
                     try:
-                        bot_id = self._try_create_bot_instance_for_meeting(meeting_doc)
+                        bot_id = self._try_create_bot_instance_for_meeting(
+                            meeting_doc
+                        )
                         if bot_id:
                             logger.info(
                                 "Ensured bot_instance %s for meeting %s",
@@ -869,7 +883,10 @@ class MeetingController:
                 # Step 1: process queued bot instances.
                 bot_docs = self._query_queued_bot_instances()
                 if not bot_docs:
-                    logger.debug("No queued meetings, waiting %ss...", self.poll_interval)
+                    logger.info(
+                        "No queued meetings found. Waiting %ss...",
+                        self.poll_interval,
+                    )
                     time.sleep(self.poll_interval)
                     continue
 
@@ -881,7 +898,9 @@ class MeetingController:
                         if not self._try_claim_bot_instance(bot_ref):
                             continue
 
-                        payload = self._build_job_payload_from_firestore(bot_doc)
+                        payload = self._build_job_payload_from_firestore(
+                            bot_doc
+                        )
                         ok = self.create_manager_job(payload, bot_doc.id)
                         # Mark done/failed based on job creation.
                         self._mark_bot_instance_done(bot_ref, ok=ok)

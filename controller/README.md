@@ -55,20 +55,35 @@ Orchestrates the entire workflow and coordinates between components.
 
 ## Environment Variables
 
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `GCP_PROJECT_ID` | Yes | Google Cloud Project ID |
-| `GCS_BUCKET` | Yes | Google Cloud Storage bucket name |
-| `MEETING_BOT_API_URL` | No | Meeting bot API endpoint (default: `http://localhost:3000`) |
-| `FIRESTORE_DATABASE` | No | Firestore database id (default: `(default)`) |
-| `POLL_INTERVAL` | No | Seconds to wait between Firestore polls when no work (default: `10`) |
-| `MAX_CLAIM_PER_POLL` | No | Max queued items to claim per poll loop (default: `10`) |
-| `CLAIM_TTL_SECONDS` | No | Claim expiry; allows reprocessing if controller dies mid-claim (default: `600`) |
-| `MEETINGS_COLLECTION_PATH` | No | Where to discover meetings (default: `meetings`) |
-| `MEETINGS_QUERY_MODE` | No | `collection` (default) or `collection_group` |
-| `MEETING_STATUS_FIELD` | No | Meeting status field name (default: `status`) |
-| `MEETING_STATUS_VALUES` | No | Comma-separated statuses to treat as needing a bot (default: `scheduled`) |
-| `MEETING_BOT_INSTANCE_FIELD` | No | Meeting field used to store bot instance id (default: `bot_instance_id`) |
+| Variable | Required | Description | Default |
+|----------|----------|-------------|---------|
+| `GCP_PROJECT_ID` | **Yes** | Google Cloud Project ID | - |
+| `GCS_BUCKET` | **Yes** | Google Cloud Storage bucket name | - |
+| `MANAGER_IMAGE` | **Yes** | Docker image for the manager container | - |
+| `MEETING_BOT_IMAGE` | **Yes** | Docker image for the meeting-bot container | - |
+| `FIRESTORE_DATABASE` | No | Firestore database id | `(default)` |
+| `KUBERNETES_NAMESPACE` | No | Kubernetes namespace to spawn jobs in | `default` |
+| `JOB_SERVICE_ACCOUNT` | No | Service account for the spawned jobs | `meeting-bot-job` |
+| `POLL_INTERVAL` | No | Seconds to wait between Firestore polls when no work | `10` |
+| `MAX_CLAIM_PER_POLL` | No | Max queued items to claim per poll loop | `10` |
+| `CLAIM_TTL_SECONDS` | No | Claim expiry; allows reprocessing if controller dies mid-claim | `600` |
+| `MEETINGS_COLLECTION_PATH` | No | Where to discover meetings | `meetings` |
+| `MEETINGS_QUERY_MODE` | No | `collection` or `collection_group` | `collection` |
+| `MEETING_STATUS_FIELD` | No | Meeting status field name | `status` |
+| `MEETING_STATUS_VALUES` | No | Comma-separated statuses to treat as needing a bot | `scheduled` |
+| `MEETING_BOT_INSTANCE_FIELD` | No | Meeting field used to store bot instance id | `bot_instance_id` |
+| `BOT_INSTANCE_STATUS_FIELD` | No | Bot instance status field name | `status` |
+| `BOT_INSTANCE_QUEUED_VALUE` | No | Value for queued status | `queued` |
+| `BOT_INSTANCE_PROCESSING_VALUE` | No | Value for processing status | `processing` |
+| `BOT_INSTANCE_DONE_VALUE` | No | Value for done status | `done` |
+| `BOT_INSTANCE_FAILED_VALUE` | No | Value for failed status | `failed` |
+| `NODE_ENV` | No | Node environment for meeting-bot | `development` |
+| `MAX_RECORDING_DURATION_MINUTES` | No | Max duration for recording | `600` |
+| `MEETING_INACTIVITY_MINUTES` | No | Inactivity timeout | `15` |
+| `INACTIVITY_DETECTION_START_DELAY_MINUTES` | No | Delay before inactivity detection starts | `5` |
+| `GCP_DEFAULT_REGION` | No | GCP Region for meeting-bot config | `us-central1` |
+| `SCRATCH_STORAGE_SIZE` | No | Size of scratch PVC for temp files | `50Gi` |
+| `CONTROLLER_ID` | No | ID for this controller instance (for claiming) | `$HOSTNAME` or `controller` |
 
 ## Firestore data model
 
