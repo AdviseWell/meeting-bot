@@ -756,8 +756,16 @@ class MeetingController:
         if existing_bot_instance:
             return str(existing_bot_instance)
 
-        meeting_url = meeting_data.get("meeting_url") or meeting_data.get("meetingUrl")
+        meeting_url = (
+            meeting_data.get("meeting_url")
+            or meeting_data.get("meetingUrl")
+            or meeting_data.get("join_url")
+        )
         if not meeting_url:
+            logger.warning(
+                f"Meeting {meeting_doc.id} has no meeting_url, meetingUrl, "
+                f"or join_url field. Available fields: {list(meeting_data.keys())}"
+            )
             return None
 
         org_id = (
@@ -776,7 +784,7 @@ class MeetingController:
 
         status_field = self.bot_instance_status_field
         queued_value = self.bot_instance_queued_value
-        
+
         logger.debug(
             f"Creating bot_instance for meeting {meeting_doc.id}: "
             f"{status_field}={queued_value}"
@@ -861,8 +869,8 @@ class MeetingController:
             return result
         except Exception as e:
             logger.error(
-                f"Failed to create bot_instance for meeting {meeting_doc.id}: "
-                f"{e}", exc_info=True
+                f"Failed to create bot_instance for meeting {meeting_doc.id}: " f"{e}",
+                exc_info=True,
             )
             return None
 
@@ -1024,7 +1032,7 @@ class MeetingController:
 
             for doc in docs:
                 data = doc.to_dict()
-                
+
                 logger.debug(
                     f"Evaluating meeting {doc.id}: "
                     f"status={data.get(self.meeting_status_field)}, "
@@ -1046,9 +1054,7 @@ class MeetingController:
 
                 # Check if bot already exists
                 if data.get(self.meeting_bot_instance_field):
-                    logger.debug(
-                        f"Skipping {doc.id}: bot_instance already exists"
-                    )
+                    logger.debug(f"Skipping {doc.id}: bot_instance already exists")
                     continue
 
                 # Check user and meeting settings for auto-join/AI assistant
@@ -1062,24 +1068,20 @@ class MeetingController:
                     if user_doc.exists:
                         user_data = user_doc.to_dict()
                         auto_join = user_data.get("auto_join_meetings", False)
-                
+
                 logger.debug(
                     f"Meeting {doc.id}: ai_enabled={ai_enabled}, "
                     f"auto_join={auto_join}"
                 )
 
                 if not (ai_enabled or auto_join):
-                    logger.debug(
-                        f"Skipping {doc.id}: neither ai_enabled nor auto_join"
-                    )
+                    logger.debug(f"Skipping {doc.id}: neither ai_enabled nor auto_join")
                     continue
 
                 # Check if Teams meeting
                 join_url = data.get("join_url") or ""
                 if "teams.microsoft.com" not in join_url:
-                    logger.debug(
-                        f"Skipping {doc.id}: not a Teams meeting"
-                    )
+                    logger.debug(f"Skipping {doc.id}: not a Teams meeting")
                     continue
 
                 # Create bot instance
@@ -1088,7 +1090,9 @@ class MeetingController:
                 if bot_id:
                     logger.info(f"Created bot_instance {bot_id} for meeting {doc.id}")
                 else:
-                    logger.warning(f"Failed to create bot_instance for meeting {doc.id}")
+                    logger.warning(
+                        f"Failed to create bot_instance for meeting {doc.id}"
+                    )
         except Exception as e:
             logger.error(f"Error scanning upcoming meetings: {e}", exc_info=True)
 
