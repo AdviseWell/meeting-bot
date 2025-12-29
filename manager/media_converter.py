@@ -1,6 +1,10 @@
-"""
+"""# noqa: E501
 Media Converter - Convert recordings to MP4 and extract M4A audio
 """
+
+# NOTE: This module intentionally contains very long ffmpeg filter strings and
+# command lines, so we ignore E501 (line length) at the file level.
+# flake8: noqa: E501
 
 import os
 import subprocess
@@ -15,6 +19,20 @@ class MediaConverter:
 
     def __init__(self):
         """Initialize media converter"""
+        # Timeouts are intentionally configurable because long recordings can take
+        # many hours to re-encode depending on CPU and filter complexity.
+        #
+        # Use 0 (or blank) to disable a timeout.
+        self._mp4_timeout_seconds = self._read_timeout_env(
+            "MEDIA_CONVERTER_MP4_TIMEOUT_SECONDS",
+            default=None,  # No timeout by default; avoid long-meeting failures.
+        )
+        self._m4a_timeout_seconds = self._read_timeout_env(
+            "MEDIA_CONVERTER_M4A_TIMEOUT_SECONDS",
+            # No timeout by default; long meetings can take hours.
+            default=None,
+        )
+
         # Verify ffmpeg is available
         # Use a simple which/command check instead of running ffmpeg -version
         # which can hang in some Docker environments
@@ -32,14 +50,15 @@ class MediaConverter:
             logger.error("Timeout while checking for ffmpeg")
             raise RuntimeError("ffmpeg check timed out")
         except FileNotFoundError:
-            # 'which' command not available, try direct ffmpeg check with shorter timeout
+            # 'which' command not available, try direct ffmpeg check with a
+            # shorter timeout.
             try:
                 result = subprocess.run(
                     ["ffmpeg", "-version"],
                     capture_output=True,
                     text=True,
                     timeout=2,
-                    stdin=subprocess.DEVNULL,  # Prevent ffmpeg from waiting for input
+                    stdin=subprocess.DEVNULL,  # Prevent ffmpeg waiting for input
                 )
                 if result.returncode == 0:
                     logger.info("ffmpeg is available")
@@ -52,6 +71,39 @@ class MediaConverter:
         except Exception as e:
             logger.error(f"Error checking for ffmpeg: {e}")
             raise RuntimeError("ffmpeg is required but not available")
+
+    @staticmethod
+    def _read_timeout_env(
+        var_name: str,
+        default: Optional[int],
+    ) -> Optional[int]:
+        """Read a timeout env var as seconds.
+
+        Accepted values:
+          - unset: returns default
+          - integer seconds (e.g. 3600)
+          - 0 / negative: disable timeout (returns None)
+
+        Returns:
+            Timeout in seconds, or None for no timeout.
+        """
+        raw = os.environ.get(var_name)
+        if raw is None or raw.strip() == "":
+            return default
+
+        try:
+            value = int(raw)
+        except ValueError:
+            logger.warning(
+                f"Invalid {var_name}={raw!r}; expected integer seconds. "
+                f"Using default={default!r}."
+            )
+            return default
+
+        if value <= 0:
+            return None
+
+        return value
 
     def convert(self, input_path: str) -> Tuple[Optional[str], Optional[str]]:
         """
@@ -140,7 +192,7 @@ class MediaConverter:
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=3600,  # 1 hour timeout
+                timeout=self._mp4_timeout_seconds,
                 stdin=subprocess.DEVNULL,  # Prevent ffmpeg from waiting for input
             )
 
@@ -215,7 +267,7 @@ class MediaConverter:
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=1800,  # 30 minute timeout
+                timeout=self._m4a_timeout_seconds,
                 stdin=subprocess.DEVNULL,  # Prevent ffmpeg from waiting for input
             )
 
@@ -287,7 +339,7 @@ class MediaConverter:
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=1800,
+                timeout=self._m4a_timeout_seconds,
                 stdin=subprocess.DEVNULL,
             )
 

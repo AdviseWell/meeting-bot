@@ -1,10 +1,13 @@
-"""
+"""# noqa: E501
 Audio Transcription Client - Uses Google Gemini for speech-to-text transcription
 
 This module provides audio transcription capabilities using Google's Gemini models
 via the GenAI API. It supports direct transcription with speaker diarization,
 timestamps, and action items extraction.
 """
+
+# NOTE: This module has long prompt strings/log lines; ignore line-length.
+# flake8: noqa: E501
 
 import os
 import time
@@ -39,6 +42,19 @@ class TranscriptionClient:
         self.region = region
         self.client = None
 
+        # Timeouts for transcription should be governed by overall job/meeting
+        # limits, not per-call cutoffs. Allow opt-in timeouts via env vars.
+        #
+        # Use 0 (or blank) to disable.
+        self._gemini_timeout_ms = self._read_timeout_env_ms(
+            "TRANSCRIPTION_GEMINI_TIMEOUT_MS",
+            default=None,
+        )
+        self._audio_download_timeout_seconds = self._read_timeout_env_seconds(
+            "TRANSCRIPTION_AUDIO_DOWNLOAD_TIMEOUT_SECONDS",
+            default=None,
+        )
+
         try:
             self.client = genai.Client(
                 vertexai=True,
@@ -46,7 +62,7 @@ class TranscriptionClient:
                 location=region,
                 http_options=HttpOptions(
                     api_version="v1",
-                    timeout=1800000,  # 30 minutes in milliseconds
+                    timeout=self._gemini_timeout_ms,
                     headers={"Connection": "close"},  # Prevent stale connections
                 ),
             )
@@ -56,6 +72,40 @@ class TranscriptionClient:
         except Exception as e:
             logger.error(f"Failed to initialize transcription client: {e}")
             raise
+
+    @staticmethod
+    def _read_timeout_env_seconds(
+        var_name: str, default: Optional[int]
+    ) -> Optional[int]:
+        raw = os.environ.get(var_name)
+        if raw is None or raw.strip() == "":
+            return default
+        try:
+            value = int(raw)
+        except ValueError:
+            logger.warning(
+                f"Invalid {var_name}={raw!r}; expected integer seconds. Using default={default!r}."
+            )
+            return default
+        if value <= 0:
+            return None
+        return value
+
+    @staticmethod
+    def _read_timeout_env_ms(var_name: str, default: Optional[int]) -> Optional[int]:
+        raw = os.environ.get(var_name)
+        if raw is None or raw.strip() == "":
+            return default
+        try:
+            value = int(raw)
+        except ValueError:
+            logger.warning(
+                f"Invalid {var_name}={raw!r}; expected integer milliseconds. Using default={default!r}."
+            )
+            return default
+        if value <= 0:
+            return None
+        return value
 
     def transcribe_audio(
         self,
@@ -119,7 +169,10 @@ class TranscriptionClient:
                     mime_type = "video/mp4"
             else:
                 logger.info("Downloading audio file...")
-                response = requests.get(audio_uri, timeout=60)
+                response = requests.get(
+                    audio_uri,
+                    timeout=self._audio_download_timeout_seconds,
+                )
                 response.raise_for_status()
                 audio_bytes = response.content
 
