@@ -57,4 +57,3 @@ def test_try_create_bot_instance_skips_when_no_meeting_url(monkeypatch):
 
     out = c._try_create_bot_instance_for_meeting(meeting)  # noqa: SLF001
     assert out is None
-

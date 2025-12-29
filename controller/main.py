@@ -317,6 +317,12 @@ class MeetingController:
                     ),
                     # Disable S3 upload - manager will handle the recording file
                     client.V1EnvVar(name="S3_ENDPOINT", value=""),
+                    # Required by meeting-bot src/config.ts
+                    client.V1EnvVar(name="GCP_MISC_BUCKET", value=self.gcs_bucket),
+                    client.V1EnvVar(
+                        name="GCP_DEFAULT_REGION",
+                        value=os.getenv("GCP_DEFAULT_REGION", "us-central1"),
+                    ),
                 ],
                 volume_mounts=[
                     client.V1VolumeMount(
@@ -608,7 +614,11 @@ class MeetingController:
         """Find candidate bot instances to process."""
         q = (
             self.db.collection("bot_instances")
-            .where(self.bot_instance_status_field, "==", self.bot_instance_queued_value)
+            .where(
+                field_path=self.bot_instance_status_field,
+                op_string="==",
+                value=self.bot_instance_queued_value,
+            )
             .limit(self.max_claim_per_poll)
         )
         return list(q.stream())
@@ -633,11 +643,17 @@ class MeetingController:
         # Firestore doesn't support IN queries combined with some inequality
         # patterns consistently without composite indexes. Keep this simple:
         # if multiple statuses provided, just query the first one.
-        status_value = self.meeting_status_values[0] if self.meeting_status_values else "scheduled"
-
-        q = coll.where(self.meeting_status_field, "==", status_value).limit(
-            self.max_claim_per_poll
+        status_value = (
+            self.meeting_status_values[0]
+            if self.meeting_status_values
+            else "scheduled"
         )
+
+        q = coll.where(
+            field_path=self.meeting_status_field,
+            op_string="==",
+            value=status_value,
+        ).limit(self.max_claim_per_poll)
         return list(q.stream())
 
     def _try_create_bot_instance_for_meeting(

@@ -230,6 +230,7 @@ class MeetingMonitor:
 
             result = response.json()
             is_busy = result.get("data", 0)
+            logger.debug(f"Meeting-bot isbusy status: {is_busy}")
 
             # Map busy status to job state
             # When busy=1, meeting is in progress
@@ -297,6 +298,13 @@ class MeetingMonitor:
 
             # Check if job is complete
             if state in ["completed", "finished", "done"]:
+                if elapsed < 30:
+                    logger.warning(
+                        f"⚠️ Job finished very quickly ({elapsed:.1f}s). "
+                        "This usually indicates the bot failed to join or crashed immediately. "
+                        "Check meeting-bot container logs for errors."
+                    )
+
                 # Recording file is in the shared volume
                 # Meeting-bot saves to: /usr/src/app/dist/_tempvideo/{userId}/recording.webm
                 # This is mounted to /recordings in the manager container (read-only access)
