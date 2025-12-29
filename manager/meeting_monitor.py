@@ -199,7 +199,9 @@ class MeetingMonitor:
                 logger.error(f"No job ID in response: {result}")
                 return None
 
-            logger.info(f"Successfully joined {provider} meeting. Job ID: {job_id}")
+            logger.info(
+                f"Join request accepted for {provider} meeting. Job ID: {job_id}"
+            )
             return job_id
 
         except requests.exceptions.RequestException as e:

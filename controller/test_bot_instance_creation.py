@@ -35,3 +35,26 @@ def test_try_create_bot_instance_skips_when_meeting_has_bot(monkeypatch):
     # Method should return existing bot id without trying to touch Firestore.
     out = c._try_create_bot_instance_for_meeting(meeting)  # noqa: SLF001
     assert out == "existing"
+
+
+def test_try_create_bot_instance_skips_when_no_meeting_url(monkeypatch):
+    from main import MeetingController  # type: ignore
+
+    monkeypatch.setenv("GCP_PROJECT_ID", "demo")
+    monkeypatch.setenv("GCS_BUCKET", "bucket")
+    monkeypatch.setenv("MANAGER_IMAGE", "manager")
+    monkeypatch.setenv("MEETING_BOT_IMAGE", "bot")
+
+    c = MeetingController()
+
+    meeting = _FakeDoc(
+        "meet2",
+        {
+            "status": "scheduled",
+            # No meeting_url
+        },
+    )
+
+    out = c._try_create_bot_instance_for_meeting(meeting)  # noqa: SLF001
+    assert out is None
+
