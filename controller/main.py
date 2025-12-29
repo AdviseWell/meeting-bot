@@ -21,8 +21,9 @@ Workflow:
 import os
 import sys
 import time
+import socket
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, List, Optional
 
 from google.cloud import firestore
@@ -106,6 +107,13 @@ class MeetingController:
             "BOT_INSTANCE_QUEUED_VALUE", "queued"
         )
 
+        # Leader election configuration
+        self.instance_id = socket.gethostname()
+        self.leader_collection_path = "system"
+        self.leader_doc_id = "controller_leader"
+        self.leader_lease_seconds = 30
+        self.is_leader = False
+
         # Meeting discovery / creation behavior
         # The controller is the source of truth for creating bot_instances.
         # It discovers meetings that need a bot and creates a bot_instances doc
@@ -117,13 +125,17 @@ class MeetingController:
             # organizations/<org_id>/meetings and also set MEETINGS_QUERY_MODE.
             "meetings",
         )
-        self.meetings_query_mode = os.getenv(
-            "MEETINGS_QUERY_MODE",
-            # 'collection' -> use MEETINGS_COLLECTION_PATH as a collection
-            # 'collection_group' -> treat MEETINGS_COLLECTION_PATH as a collection id
-            #                     and query across all parents.
-            "collection",
-        ).strip().lower()
+        self.meetings_query_mode = (
+            os.getenv(
+                "MEETINGS_QUERY_MODE",
+                # 'collection' -> use MEETINGS_COLLECTION_PATH as a collection
+                # 'collection_group' -> treat MEETINGS_COLLECTION_PATH as a collection id
+                #                     and query across all parents.
+                "collection",
+            )
+            .strip()
+            .lower()
+        )
         self.meeting_status_field = os.getenv("MEETING_STATUS_FIELD", "status")
         self.meeting_status_values = [
             s.strip()
@@ -158,7 +170,9 @@ class MeetingController:
         self._validate_config()
 
         # Initialize Firestore client
-        self.db = firestore.Client(project=self.project_id, database=self.firestore_database)
+        self.db = firestore.Client(
+            project=self.project_id, database=self.firestore_database
+        )
 
         # Initialize Kubernetes client
         try:
@@ -543,7 +557,9 @@ class MeetingController:
             logger.error(f"❌ Error creating manager job: {e}")
             return False
 
-    def _build_job_payload_from_firestore(self, bot_doc: firestore.DocumentSnapshot) -> Dict[str, Any]:
+    def _build_job_payload_from_firestore(
+        self, bot_doc: firestore.DocumentSnapshot
+    ) -> Dict[str, Any]:
         """Translate a bot_instance Firestore doc into the payload expected by the manager.
 
         This mirrors (a subset of) what the Firebase callable function used to publish
@@ -644,9 +660,7 @@ class MeetingController:
         # patterns consistently without composite indexes. Keep this simple:
         # if multiple statuses provided, just query the first one.
         status_value = (
-            self.meeting_status_values[0]
-            if self.meeting_status_values
-            else "scheduled"
+            self.meeting_status_values[0] if self.meeting_status_values else "scheduled"
         )
 
         logger.debug(
@@ -655,12 +669,58 @@ class MeetingController:
             status_value,
         )
 
-        q = coll.where(
-            field_path=self.meeting_status_field,
-            op_string="==",
-            value=status_value,
-        ).limit(self.max_claim_per_poll)
-        return list(q.stream())
+        # Pagination loop to find meetings that actually need bots
+        # (skipping those that already have bot_instance_id)
+        candidates: List[firestore.DocumentSnapshot] = []
+        last_doc = None
+        page_size = 50  # Fetch larger batches to skip processed items efficiently
+        max_scan = 500  # Safety limit to prevent infinite scanning
+
+        scanned_count = 0
+
+        while len(candidates) < self.max_claim_per_poll and scanned_count < max_scan:
+            q = coll.where(
+                field_path=self.meeting_status_field,
+                op_string="==",
+                value=status_value,
+            ).limit(page_size)
+
+            if last_doc:
+                q = q.start_after(last_doc)
+
+            batch = list(q.stream())
+            if not batch:
+                break
+
+            for doc in batch:
+                scanned_count += 1
+                last_doc = doc
+                data = doc.to_dict() or {}
+
+                # Skip if already has bot instance
+                if data.get(self.meeting_bot_instance_field):
+                    continue
+
+                # Skip if missing meeting_url (required to create bot)
+                if not (data.get("meeting_url") or data.get("meetingUrl")):
+                    continue
+
+                candidates.append(doc)
+                if len(candidates) >= self.max_claim_per_poll:
+                    break
+
+            # If we got fewer docs than page_size, we reached the end
+            if len(batch) < page_size:
+                break
+
+        if scanned_count >= max_scan:
+            logger.warning(
+                "Scanned %d meetings without finding enough candidates. "
+                "Consider cleaning up old 'scheduled' meetings.",
+                scanned_count,
+            )
+
+        return candidates
 
     def _try_create_bot_instance_for_meeting(
         self,
@@ -775,7 +835,9 @@ class MeetingController:
         queued_value = self.bot_instance_queued_value
         processing_value = os.getenv("BOT_INSTANCE_PROCESSING_VALUE", "processing")
 
-        controller_id = os.getenv("CONTROLLER_ID") or os.getenv("HOSTNAME") or "controller"
+        controller_id = (
+            os.getenv("CONTROLLER_ID") or os.getenv("HOSTNAME") or "controller"
+        )
         now = datetime.now(timezone.utc)
         expires = datetime.fromtimestamp(
             now.timestamp() + self.claim_ttl_seconds, tz=timezone.utc
@@ -822,7 +884,9 @@ class MeetingController:
 
         return bool(_txn(transaction))
 
-    def _mark_bot_instance_done(self, bot_ref: firestore.DocumentReference, ok: bool) -> None:
+    def _mark_bot_instance_done(
+        self, bot_ref: firestore.DocumentReference, ok: bool
+    ) -> None:
         done_value = os.getenv("BOT_INSTANCE_DONE_VALUE", "done")
         failed_value = os.getenv("BOT_INSTANCE_FAILED_VALUE", "failed")
         status_field = self.bot_instance_status_field
@@ -832,6 +896,65 @@ class MeetingController:
                 "processed_at": datetime.now(timezone.utc),
             }
         )
+
+    def _try_acquire_leadership(self) -> bool:
+        """Try to acquire or renew leadership lease.
+
+        Returns:
+            True if this instance is the leader, False otherwise.
+        """
+        leader_ref = self.db.collection(self.leader_collection_path).document(
+            self.leader_doc_id
+        )
+
+        @firestore.transactional
+        def update_in_transaction(transaction, ref):
+            snapshot = ref.get(transaction=transaction)
+            now = datetime.now(timezone.utc)
+            expires_at = now + timedelta(seconds=self.leader_lease_seconds)
+
+            new_data = {
+                "leader_id": self.instance_id,
+                "lease_expires_at": expires_at,
+                "last_renewed_at": now,
+            }
+
+            if not snapshot.exists:
+                transaction.set(ref, new_data)
+                return True
+
+            data = snapshot.to_dict()
+            current_leader = data.get("leader_id")
+            lease_expires = data.get("lease_expires_at")
+
+            # If lease is valid and held by someone else
+            if (
+                current_leader != self.instance_id
+                and lease_expires
+                and lease_expires > now
+            ):
+                return False
+
+            # Otherwise (expired or held by me), claim/renew it
+            transaction.set(ref, new_data)
+            return True
+
+        try:
+            transaction = self.db.transaction()
+            is_leader = update_in_transaction(transaction, leader_ref)
+
+            if is_leader and not self.is_leader:
+                logger.info("👑 Acquired leadership (instance: %s)", self.instance_id)
+            elif not is_leader and self.is_leader:
+                logger.info("Lost leadership")
+
+            self.is_leader = is_leader
+            return is_leader
+        except Exception as e:
+            logger.error("Error during leadership election: %s", e)
+            # If we can't talk to Firestore, assume we lost leadership to be safe
+            self.is_leader = False
+            return False
 
     def run(self):
         """Main run loop - continuously process queued Firestore work"""
@@ -853,19 +976,21 @@ class MeetingController:
 
         while True:
             try:
+                # Check leadership
+                if not self._try_acquire_leadership():
+                    logger.debug("Not leader, sleeping...")
+                    time.sleep(self.poll_interval)
+                    continue
+
                 logger.debug("Starting poll cycle...")
-                
+
                 # Step 0: discover meetings that need bot instances and enqueue them.
                 meeting_docs = self._query_meetings_needing_bots()
                 if meeting_docs:
-                    logger.info(
-                        "Found %s meeting(s) needing bots", len(meeting_docs)
-                    )
+                    logger.info("Found %s meeting(s) needing bots", len(meeting_docs))
                 for meeting_doc in meeting_docs:
                     try:
-                        bot_id = self._try_create_bot_instance_for_meeting(
-                            meeting_doc
-                        )
+                        bot_id = self._try_create_bot_instance_for_meeting(meeting_doc)
                         if bot_id:
                             logger.info(
                                 "Ensured bot_instance %s for meeting %s",
@@ -898,9 +1023,7 @@ class MeetingController:
                         if not self._try_claim_bot_instance(bot_ref):
                             continue
 
-                        payload = self._build_job_payload_from_firestore(
-                            bot_doc
-                        )
+                        payload = self._build_job_payload_from_firestore(bot_doc)
                         ok = self.create_manager_job(payload, bot_doc.id)
                         # Mark done/failed based on job creation.
                         self._mark_bot_instance_done(bot_ref, ok=ok)
