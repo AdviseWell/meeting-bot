@@ -1,26 +1,31 @@
 #!/usr/bin/env python3
-"""
+"""controller.main
+
 Meeting Bot Controller - Kubernetes Job Orchestrator
 
-This controller monitors GCP Pub/Sub for meeting requests and spawns
-Kubernetes Jobs to process each meeting via the manager.
+This controller polls Firestore for queued meeting/bot-instance work and
+spawns Kubernetes Jobs to process each meeting via the manager.
+
+Why Firestore polling?
+- Removes Pub/Sub + Firebase Functions infrastructure.
+- Uses existing Firestore state as the source of truth.
 
 Workflow:
-1. Pull messages from GCP Pub/Sub (batch of up to 10)
-2. ACK messages immediately
-3. Create a Kubernetes Job with the manager image for each message
-4. Pass all meeting details as environment variables to the job
-5. Continue monitoring for new messages
+1. Query Firestore for queued bot instances
+2. Atomically claim a bot instance (best-effort distributed lock)
+3. Build a job payload compatible with the existing manager env contract
+4. Create a Kubernetes Job for the claimed item
+5. Repeat
 """
 
 import os
 import sys
 import time
 import logging
-import json
-from typing import Optional, Dict
+from datetime import datetime, timezone
+from typing import Dict, Any, List, Optional
 
-from google.cloud import pubsub_v1
+from google.cloud import firestore
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 
@@ -72,7 +77,7 @@ class HealthCheckServer:
 
         thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         thread.start()
-        logger.info(f"Health check server started on port 8080")
+        logger.info("Health check server started on port 8080")
 
 
 class MeetingController:
@@ -81,10 +86,55 @@ class MeetingController:
     def __init__(self):
         # Required environment variables
         self.project_id = os.getenv("GCP_PROJECT_ID")
-        self.subscription_name = os.getenv("PUBSUB_SUBSCRIPTION")
         self.gcs_bucket = os.getenv("GCS_BUCKET")
         self.manager_image = os.getenv("MANAGER_IMAGE")
         self.meeting_bot_image = os.getenv("MEETING_BOT_IMAGE")
+
+        # Firestore configuration
+        # NOTE: We keep the GCP project id as the canonical project identifier.
+        self.firestore_database = os.getenv("FIRESTORE_DATABASE", "(default)")
+        # When claim TTL expires, another controller instance may re-claim.
+        self.claim_ttl_seconds = int(os.getenv("CLAIM_TTL_SECONDS", "600"))
+        self.max_claim_per_poll = int(os.getenv("MAX_CLAIM_PER_POLL", "10"))
+
+        # Firestore query behavior
+        # Query for bot instances in queued state.
+        self.bot_instance_status_field = os.getenv(
+            "BOT_INSTANCE_STATUS_FIELD", "status"
+        )
+        self.bot_instance_queued_value = os.getenv(
+            "BOT_INSTANCE_QUEUED_VALUE", "queued"
+        )
+
+        # Meeting discovery / creation behavior
+        # The controller is the source of truth for creating bot_instances.
+        # It discovers meetings that need a bot and creates a bot_instances doc
+        # in queued state.
+        self.meetings_collection_path = os.getenv(
+            "MEETINGS_COLLECTION_PATH",
+            # Default to a flat collection for simplicity.
+            # If your schema is per-org, set MEETINGS_COLLECTION_PATH to
+            # organizations/<org_id>/meetings and also set MEETINGS_QUERY_MODE.
+            "meetings",
+        )
+        self.meetings_query_mode = os.getenv(
+            "MEETINGS_QUERY_MODE",
+            # 'collection' -> use MEETINGS_COLLECTION_PATH as a collection
+            # 'collection_group' -> treat MEETINGS_COLLECTION_PATH as a collection id
+            #                     and query across all parents.
+            "collection",
+        ).strip().lower()
+        self.meeting_status_field = os.getenv("MEETING_STATUS_FIELD", "status")
+        self.meeting_status_values = [
+            s.strip()
+            for s in os.getenv("MEETING_STATUS_VALUES", "scheduled").split(",")
+            if s.strip()
+        ]
+
+        # Only create a bot instance when meeting doesn't already have one.
+        self.meeting_bot_instance_field = os.getenv(
+            "MEETING_BOT_INSTANCE_FIELD", "bot_instance_id"
+        )
 
         # Kubernetes configuration
         self.k8s_namespace = os.getenv("KUBERNETES_NAMESPACE", "default")
@@ -99,16 +149,16 @@ class MeetingController:
         self.inactivity_detection_delay = int(
             os.getenv("INACTIVITY_DETECTION_START_DELAY_MINUTES", "5")
         )
+
+        # How often the controller checks Firestore for new meetings/bot work.
+        # Kept configurable; default matches prior behavior.
         self.poll_interval = int(os.getenv("POLL_INTERVAL", "10"))
 
         # Validate required environment variables
         self._validate_config()
 
-        # Initialize Pub/Sub client
-        self.subscriber = pubsub_v1.SubscriberClient()
-        self.subscription_path = self.subscriber.subscription_path(
-            self.project_id, self.subscription_name
-        )
+        # Initialize Firestore client
+        self.db = firestore.Client(project=self.project_id, database=self.firestore_database)
 
         # Initialize Kubernetes client
         try:
@@ -123,18 +173,22 @@ class MeetingController:
         self.batch_v1 = client.BatchV1Api()
         self.core_v1 = client.CoreV1Api()
 
-        logger.info(f"Controller initialized:")
+        logger.info("Controller initialized:")
         logger.info(f"  Project: {self.project_id}")
-        logger.info(f"  Subscription: {self.subscription_name}")
+        logger.info(f"  Firestore DB: {self.firestore_database}")
         logger.info(f"  Namespace: {self.k8s_namespace}")
         logger.info(f"  Manager Image: {self.manager_image}")
         logger.info(f"  Meeting Bot Image: {self.meeting_bot_image}")
+        logger.info(
+            "  Meeting discovery: mode=%s path=%s",
+            self.meetings_query_mode,
+            self.meetings_collection_path,
+        )
 
     def _validate_config(self):
         """Validate required environment variables"""
         required_vars = {
             "GCP_PROJECT_ID": self.project_id,
-            "PUBSUB_SUBSCRIPTION": self.subscription_name,
             "MANAGER_IMAGE": self.manager_image,
             "MEETING_BOT_IMAGE": self.meeting_bot_image,
             "GCS_BUCKET": self.gcs_bucket,
@@ -146,7 +200,7 @@ class MeetingController:
                 f"Missing required environment variables: {', '.join(missing)}"
             )
 
-    def create_manager_job(self, message_data: Dict, message_id: str) -> bool:
+    def create_manager_job(self, message_data: Dict[str, Any], message_id: str) -> bool:
         """
         Create a Kubernetes Job to process the meeting
 
@@ -198,7 +252,7 @@ class MeetingController:
                 ),
             ]
 
-            # Add ALL fields from Pub/Sub message as environment variables
+            # Add ALL fields from message payload as environment variables
             # This ensures the manager has all the data it needs for the meeting-bot API
             # We add both original case AND uppercase versions for compatibility
             for key, value in message_data.items():
@@ -483,69 +537,287 @@ class MeetingController:
             logger.error(f"❌ Error creating manager job: {e}")
             return False
 
-    def process_message(
-        self, message: pubsub_v1.types.PubsubMessage, ack_id: str
-    ) -> None:
+    def _build_job_payload_from_firestore(self, bot_doc: firestore.DocumentSnapshot) -> Dict[str, Any]:
+        """Translate a bot_instance Firestore doc into the payload expected by the manager.
+
+        This mirrors (a subset of) what the Firebase callable function used to publish
+        to Pub/Sub.
         """
-        Process a single Pub/Sub message
+        data = bot_doc.to_dict() or {}
 
-        Args:
-            message: Pub/Sub message containing meeting details
-            ack_id: ACK ID for the message
+        meeting_url = data.get("meeting_url")
+        if not meeting_url:
+            raise ValueError("bot_instance missing meeting_url")
+
+        # Best-effort meeting id.
+        meeting_id = (
+            data.get("meeting_id")
+            or data.get("initial_linked_meeting", {}).get("meeting_id")
+            or bot_doc.id
+        )
+
+        org_id = (
+            data.get("creator_organization_id")
+            or data.get("initial_linked_meeting", {}).get("organization_id")
+            or ""
+        )
+
+        now = datetime.now(timezone.utc)
+        gcs_path = data.get(
+            "gcs_path",
+            f"recordings/ad-hoc/{org_id}/{now.year}/{now.month:02d}/{now.day:02d}/teams-{meeting_id}",
+        )
+
+        payload: Dict[str, Any] = {
+            "meeting_url": meeting_url,
+            "meeting_id": meeting_id,
+            "gcs_path": gcs_path,
+            # Maintain compatibility with existing manager payload expectations.
+            "name": data.get("bot_name") or data.get("name") or "Meeting Bot",
+            "teamId": org_id or data.get("teamId") or data.get("team_id") or meeting_id,
+            "timezone": data.get("timezone") or "UTC",
+            "user_id": data.get("creator_user_id")
+            or data.get("user_id")
+            or data.get("initial_linked_meeting", {}).get("user_id")
+            or "",
+            "user_email": data.get("user_email", ""),
+            "initiated_at": data.get("initiated_at")
+            or (now.isoformat().replace("+00:00", "Z")),
+            "auto_joined": bool(data.get("auto_joined", False)),
+            # Handy for consumers/debugging.
+            "bot_instance_id": bot_doc.id,
+        }
+
+        # Preserve pass-through fields if present.
+        for key in [
+            "bearerToken",
+            "bearer_token",
+            "userId",
+            "user_id",
+            "botId",
+            "bot_id",
+            "eventId",
+            "event_id",
+        ]:
+            if key in data and data[key] is not None:
+                payload[key] = data[key]
+
+        return payload
+
+    def _query_queued_bot_instances(self) -> List[firestore.DocumentSnapshot]:
+        """Find candidate bot instances to process."""
+        q = (
+            self.db.collection("bot_instances")
+            .where(self.bot_instance_status_field, "==", self.bot_instance_queued_value)
+            .limit(self.max_claim_per_poll)
+        )
+        return list(q.stream())
+
+    def _query_meetings_needing_bots(self) -> List[firestore.DocumentSnapshot]:
+        """Discover meetings that need a bot instance created.
+
+        This intentionally stays flexible because meeting schemas vary.
+
+        Default behavior:
+        - Read from flat `meetings` collection
+        - Filter by status in MEETING_STATUS_VALUES (default: scheduled)
+        - Require meeting_url
+        - Skip if meeting already has bot_instance_id
         """
-        try:
-            # Parse message data
-            message_data = json.loads(message.data.decode("utf-8"))
-            logger.info(
-                f"📨 Received message {message.message_id}: {message_data.get('meeting_id', 'unknown')}"
-            )
 
-            # ACK the message immediately to prevent redelivery
-            self.subscriber.acknowledge(
-                request={
-                    "subscription": self.subscription_path,
-                    "ack_ids": [ack_id],
-                }
-            )
-            logger.info(f"✓ ACKed message {message.message_id}")
+        if self.meetings_query_mode == "collection_group":
+            coll = self.db.collection_group(self.meetings_collection_path)
+        else:
+            coll = self.db.collection(self.meetings_collection_path)
 
-            # Create Kubernetes Job
-            success = self.create_manager_job(message_data, message.message_id)
+        # Firestore doesn't support IN queries combined with some inequality
+        # patterns consistently without composite indexes. Keep this simple:
+        # if multiple statuses provided, just query the first one.
+        status_value = self.meeting_status_values[0] if self.meeting_status_values else "scheduled"
 
-            if not success:
-                logger.warning(
-                    f"⚠️  Job creation failed for message {message.message_id}, but message was already ACKed"
+        q = coll.where(self.meeting_status_field, "==", status_value).limit(
+            self.max_claim_per_poll
+        )
+        return list(q.stream())
+
+    def _try_create_bot_instance_for_meeting(
+        self,
+        meeting_doc: firestore.DocumentSnapshot,
+    ) -> Optional[str]:
+        """Create a bot_instances document for a meeting (idempotent).
+
+        Returns:
+            bot_instance_id if created or already exists, else None.
+        """
+
+        meeting_data = meeting_doc.to_dict() or {}
+        meeting_ref = meeting_doc.reference
+
+        # Skip if meeting already linked.
+        existing_bot_instance = meeting_data.get(self.meeting_bot_instance_field)
+        if existing_bot_instance:
+            return str(existing_bot_instance)
+
+        meeting_url = meeting_data.get("meeting_url") or meeting_data.get("meetingUrl")
+        if not meeting_url:
+            return None
+
+        org_id = (
+            meeting_data.get("organization_id")
+            or meeting_data.get("organizationId")
+            or meeting_data.get("teamId")
+            or meeting_data.get("team_id")
+            or ""
+        )
+        user_id = meeting_data.get("user_id") or meeting_data.get("userId") or ""
+
+        now = datetime.now(timezone.utc)
+
+        # Dedupe by meeting id: One bot instance per meeting doc.
+        bot_ref = self.db.collection("bot_instances").document(meeting_doc.id)
+
+        status_field = self.bot_instance_status_field
+        queued_value = self.bot_instance_queued_value
+
+        transaction = self.db.transaction()
+
+        @firestore.transactional
+        def _txn(txn: firestore.Transaction) -> Optional[str]:
+            fresh_meeting = meeting_ref.get(transaction=txn)
+            if not fresh_meeting.exists:
+                return None
+
+            fresh_data = fresh_meeting.to_dict() or {}
+            if fresh_data.get(self.meeting_bot_instance_field):
+                return str(fresh_data.get(self.meeting_bot_instance_field))
+
+            bot_snap = bot_ref.get(transaction=txn)
+            if bot_snap.exists:
+                # Link meeting to existing bot instance.
+                txn.update(
+                    meeting_ref,
+                    {
+                        self.meeting_bot_instance_field: bot_ref.id,
+                        "bot_status": "queued",
+                        "bot_enqueued_at": now,
+                    },
                 )
+                return bot_ref.id
 
-        except json.JSONDecodeError as e:
-            logger.error(f"❌ Invalid JSON in message {message.message_id}: {e}")
-            # ACK invalid messages to remove them from queue
-            self.subscriber.acknowledge(
-                request={
-                    "subscription": self.subscription_path,
-                    "ack_ids": [ack_id],
-                }
+            # Create bot instance.
+            txn.set(
+                bot_ref,
+                {
+                    status_field: queued_value,
+                    "meeting_url": meeting_url,
+                    "meeting_id": meeting_doc.id,
+                    "creator_user_id": user_id,
+                    "creator_organization_id": org_id,
+                    "bot_name": meeting_data.get("bot_name")
+                    or meeting_data.get("name")
+                    or "Meeting Bot",
+                    "created_at": now,
+                    "initial_linked_meeting": {
+                        "meeting_id": meeting_doc.id,
+                        "organization_id": org_id,
+                        "user_id": user_id,
+                    },
+                },
             )
 
-        except Exception as e:
-            logger.error(
-                f"❌ Error processing message {message.message_id}: {e}", exc_info=True
+            # Link meeting to bot instance.
+            txn.update(
+                meeting_ref,
+                {
+                    self.meeting_bot_instance_field: bot_ref.id,
+                    "bot_status": "queued",
+                    "bot_enqueued_at": now,
+                },
             )
-            # ACK to prevent infinite retries
-            self.subscriber.acknowledge(
-                request={
-                    "subscription": self.subscription_path,
-                    "ack_ids": [ack_id],
-                }
+
+            return bot_ref.id
+
+        return _txn(transaction)
+
+    def _try_claim_bot_instance(self, bot_ref: firestore.DocumentReference) -> bool:
+        """Attempt to claim a bot instance.
+
+        We use a Firestore transaction to set claimed_* fields when the bot is still queued
+        and either unclaimed or claim has expired.
+        """
+
+        claim_expires_at_field = "claim_expires_at"
+        claimed_by_field = "claimed_by"
+        claimed_at_field = "claimed_at"
+        status_field = self.bot_instance_status_field
+        queued_value = self.bot_instance_queued_value
+        processing_value = os.getenv("BOT_INSTANCE_PROCESSING_VALUE", "processing")
+
+        controller_id = os.getenv("CONTROLLER_ID") or os.getenv("HOSTNAME") or "controller"
+        now = datetime.now(timezone.utc)
+        expires = datetime.fromtimestamp(
+            now.timestamp() + self.claim_ttl_seconds, tz=timezone.utc
+        )
+
+        transaction = self.db.transaction()
+
+        @firestore.transactional
+        def _txn(txn: firestore.Transaction) -> bool:
+            snap = bot_ref.get(transaction=txn)
+            if not snap.exists:
+                return False
+
+            data = snap.to_dict() or {}
+
+            # Only claim queued items.
+            if data.get(status_field) != queued_value:
+                return False
+
+            # Allow claim if unclaimed or expired.
+            existing_exp = data.get(claim_expires_at_field)
+            if existing_exp is not None:
+                try:
+                    exp_dt = (
+                        existing_exp.replace(tzinfo=timezone.utc)
+                        if getattr(existing_exp, "tzinfo", None) is None
+                        else existing_exp
+                    )
+                except Exception:
+                    exp_dt = None
+                if exp_dt and exp_dt > now:
+                    return False
+
+            txn.update(
+                bot_ref,
+                {
+                    claimed_by_field: controller_id,
+                    claimed_at_field: now,
+                    claim_expires_at_field: expires,
+                    status_field: processing_value,
+                },
             )
+            return True
+
+        return bool(_txn(transaction))
+
+    def _mark_bot_instance_done(self, bot_ref: firestore.DocumentReference, ok: bool) -> None:
+        done_value = os.getenv("BOT_INSTANCE_DONE_VALUE", "done")
+        failed_value = os.getenv("BOT_INSTANCE_FAILED_VALUE", "failed")
+        status_field = self.bot_instance_status_field
+        bot_ref.update(
+            {
+                status_field: done_value if ok else failed_value,
+                "processed_at": datetime.now(timezone.utc),
+            }
+        )
 
     def run(self):
-        """Main run loop - continuously process messages"""
+        """Main run loop - continuously process queued Firestore work"""
         logger.info("=" * 50)
         logger.info("🚀 Meeting Bot Controller starting...")
         logger.info("=" * 50)
         logger.info(f"📡 Project ID: {self.project_id}")
-        logger.info(f"📡 Subscription: {self.subscription_name}")
+        logger.info(f"�️  Firestore DB: {self.firestore_database}")
         logger.info(f"📁 Namespace: {self.k8s_namespace}")
         logger.info(f"🐳 Manager Image: {self.manager_image}")
         logger.info(f"🐳 Meeting Bot Image: {self.meeting_bot_image}")
@@ -557,27 +829,58 @@ class MeetingController:
 
         while True:
             try:
-                # Pull messages with a short timeout (batch of up to 10)
-                response = self.subscriber.pull(
-                    request={
-                        "subscription": self.subscription_path,
-                        "max_messages": 10,
-                    },
-                    timeout=30.0,
-                )
-
-                if response.received_messages:
-                    logger.info(
-                        f"📬 Received {len(response.received_messages)} message(s)"
-                    )
-
-                    for received_message in response.received_messages:
-                        self.process_message(
-                            received_message.message, received_message.ack_id
+                # Step 0: discover meetings that need bot instances and enqueue them.
+                meeting_docs = self._query_meetings_needing_bots()
+                if meeting_docs:
+                    logger.info("Found %s meeting(s) needing bots", len(meeting_docs))
+                for meeting_doc in meeting_docs:
+                    try:
+                        bot_id = self._try_create_bot_instance_for_meeting(meeting_doc)
+                        if bot_id:
+                            logger.info(
+                                "Ensured bot_instance %s for meeting %s",
+                                bot_id,
+                                meeting_doc.id,
+                            )
+                    except Exception as e:
+                        logger.error(
+                            "Failed creating bot instance for meeting %s: %s",
+                            meeting_doc.id,
+                            e,
+                            exc_info=True,
                         )
-                else:
-                    logger.debug(f"No messages, waiting {self.poll_interval}s...")
+
+                # Step 1: process queued bot instances.
+                bot_docs = self._query_queued_bot_instances()
+                if not bot_docs:
+                    logger.debug("No queued meetings, waiting %ss...", self.poll_interval)
                     time.sleep(self.poll_interval)
+                    continue
+
+                logger.info("Found %s queued bot instance(s)", len(bot_docs))
+
+                for bot_doc in bot_docs:
+                    bot_ref = bot_doc.reference
+                    try:
+                        if not self._try_claim_bot_instance(bot_ref):
+                            continue
+
+                        payload = self._build_job_payload_from_firestore(bot_doc)
+                        ok = self.create_manager_job(payload, bot_doc.id)
+                        # Mark done/failed based on job creation.
+                        self._mark_bot_instance_done(bot_ref, ok=ok)
+                    except Exception as e:
+                        logger.error(
+                            "Failed processing bot instance %s: %s",
+                            bot_doc.id,
+                            e,
+                            exc_info=True,
+                        )
+                        try:
+                            self._mark_bot_instance_done(bot_ref, ok=False)
+                        except Exception:
+                            # Best-effort only.
+                            pass
 
             except KeyboardInterrupt:
                 logger.info("👋 Received shutdown signal")
