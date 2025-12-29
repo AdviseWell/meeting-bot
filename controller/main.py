@@ -32,20 +32,24 @@ from kubernetes.client.rest import ApiException
 import json
 
 # Configure logging
+log_level_name = os.getenv("LOG_LEVEL", "DEBUG").upper()
+log_level = getattr(logging, log_level_name, logging.DEBUG)
+
 logging.basicConfig(
-    level=logging.INFO,
+    level=log_level,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)],
 )
 
 logger = logging.getLogger(__name__)
 
-# Reduce noise from some verbose libraries
-logging.getLogger("google.auth").setLevel(logging.WARNING)
-logging.getLogger("urllib3").setLevel(logging.WARNING)
-logging.getLogger("google.cloud").setLevel(logging.INFO)
-logging.getLogger("kubernetes").setLevel(logging.INFO)
-logging.getLogger("google.cloud.pubsub_v1").setLevel(logging.WARNING)
+# Reduce noise from some verbose libraries (unless DEBUG is explicitly set)
+if log_level > logging.DEBUG:
+    logging.getLogger("google.auth").setLevel(logging.WARNING)
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("google.cloud").setLevel(logging.INFO)
+    logging.getLogger("kubernetes").setLevel(logging.INFO)
+    logging.getLogger("google.cloud.pubsub_v1").setLevel(logging.WARNING)
 
 
 class HealthCheckServer:
@@ -644,7 +648,12 @@ class MeetingController:
             )
             .limit(self.max_claim_per_poll)
         )
-        return list(q.stream())
+        results = list(q.stream())
+        logger.debug(
+            f"Query bot_instances where {self.bot_instance_status_field}="
+            f"'{self.bot_instance_queued_value}': found {len(results)} docs"
+        )
+        return results
 
     def _query_meetings_needing_bots(self) -> List[firestore.DocumentSnapshot]:
         """Discover meetings that need a bot instance created.
@@ -767,6 +776,11 @@ class MeetingController:
 
         status_field = self.bot_instance_status_field
         queued_value = self.bot_instance_queued_value
+        
+        logger.debug(
+            f"Creating bot_instance for meeting {meeting_doc.id}: "
+            f"{status_field}={queued_value}"
+        )
 
         transaction = self.db.transaction()
 
@@ -774,15 +788,24 @@ class MeetingController:
         def _txn(txn: firestore.Transaction) -> Optional[str]:
             fresh_meeting = meeting_ref.get(transaction=txn)
             if not fresh_meeting.exists:
+                logger.warning(f"Meeting {meeting_doc.id} no longer exists")
                 return None
 
             fresh_data = fresh_meeting.to_dict() or {}
             if fresh_data.get(self.meeting_bot_instance_field):
+                logger.debug(
+                    f"Meeting {meeting_doc.id} already has bot_instance: "
+                    f"{fresh_data.get(self.meeting_bot_instance_field)}"
+                )
                 return str(fresh_data.get(self.meeting_bot_instance_field))
 
             bot_snap = bot_ref.get(transaction=txn)
             if bot_snap.exists:
                 # Link meeting to existing bot instance.
+                logger.debug(
+                    f"Bot instance {bot_ref.id} already exists, linking to "
+                    f"meeting {meeting_doc.id}"
+                )
                 txn.update(
                     meeting_ref,
                     {
@@ -794,6 +817,7 @@ class MeetingController:
                 return bot_ref.id
 
             # Create bot instance.
+            logger.debug(f"Creating new bot_instance {bot_ref.id}")
             txn.set(
                 bot_ref,
                 {
@@ -824,9 +848,23 @@ class MeetingController:
                 },
             )
 
+            logger.info(
+                f"Created bot_instance {bot_ref.id} with {status_field}="
+                f"{queued_value}"
+            )
             return bot_ref.id
 
-        return _txn(transaction)
+        try:
+            result = _txn(transaction)
+            if result:
+                logger.debug(f"Transaction successful: bot_instance {result}")
+            return result
+        except Exception as e:
+            logger.error(
+                f"Failed to create bot_instance for meeting {meeting_doc.id}: "
+                f"{e}", exc_info=True
+            )
+            return None
 
     def _try_claim_bot_instance(self, bot_ref: firestore.DocumentReference) -> bool:
         """Attempt to claim a bot instance.
@@ -986,6 +1024,13 @@ class MeetingController:
 
             for doc in docs:
                 data = doc.to_dict()
+                
+                logger.debug(
+                    f"Evaluating meeting {doc.id}: "
+                    f"status={data.get(self.meeting_status_field)}, "
+                    f"bot_instance_id={data.get(self.meeting_bot_instance_field)}, "
+                    f"join_url={data.get('join_url', '')[:50]}"
+                )
 
                 # Filter by status
                 status = data.get(self.meeting_status_field)
@@ -993,10 +1038,17 @@ class MeetingController:
                     self.meeting_status_values
                     and status not in self.meeting_status_values
                 ):
+                    logger.debug(
+                        f"Skipping {doc.id}: status '{status}' not in "
+                        f"{self.meeting_status_values}"
+                    )
                     continue
 
                 # Check if bot already exists
                 if data.get(self.meeting_bot_instance_field):
+                    logger.debug(
+                        f"Skipping {doc.id}: bot_instance already exists"
+                    )
                     continue
 
                 # Check user and meeting settings for auto-join/AI assistant
@@ -1010,20 +1062,35 @@ class MeetingController:
                     if user_doc.exists:
                         user_data = user_doc.to_dict()
                         auto_join = user_data.get("auto_join_meetings", False)
+                
+                logger.debug(
+                    f"Meeting {doc.id}: ai_enabled={ai_enabled}, "
+                    f"auto_join={auto_join}"
+                )
 
                 if not (ai_enabled or auto_join):
+                    logger.debug(
+                        f"Skipping {doc.id}: neither ai_enabled nor auto_join"
+                    )
                     continue
 
                 # Check if Teams meeting
                 join_url = data.get("join_url") or ""
                 if "teams.microsoft.com" not in join_url:
+                    logger.debug(
+                        f"Skipping {doc.id}: not a Teams meeting"
+                    )
                     continue
 
                 # Create bot instance
                 logger.info(f"Enqueuing bot for meeting {doc.id}")
-                self._try_create_bot_instance_for_meeting(doc)
+                bot_id = self._try_create_bot_instance_for_meeting(doc)
+                if bot_id:
+                    logger.info(f"Created bot_instance {bot_id} for meeting {doc.id}")
+                else:
+                    logger.warning(f"Failed to create bot_instance for meeting {doc.id}")
         except Exception as e:
-            logger.error(f"Error scanning upcoming meetings: {e}")
+            logger.error(f"Error scanning upcoming meetings: {e}", exc_info=True)
 
     def _pubsub_callback(self, message: pubsub_v1.subscriber.message.Message):
         """Handle incoming Pub/Sub messages."""
