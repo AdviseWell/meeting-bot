@@ -1,5 +1,6 @@
 # Google Cloud Platform
-google-cloud-firestore==2.21.0
+google-cloud-firestore==2.22.0
+google-cloud-pubsub==2.34.0
 
 # Kubernetes Python Client
 kubernetes==34.1.0

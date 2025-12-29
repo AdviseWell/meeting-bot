@@ -26,9 +26,10 @@ import logging
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, List, Optional
 
-from google.cloud import firestore
+from google.cloud import firestore, pubsub_v1
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
+import json
 
 # Configure logging
 logging.basicConfig(
@@ -44,6 +45,7 @@ logging.getLogger("google.auth").setLevel(logging.WARNING)
 logging.getLogger("urllib3").setLevel(logging.WARNING)
 logging.getLogger("google.cloud").setLevel(logging.INFO)
 logging.getLogger("kubernetes").setLevel(logging.INFO)
+logging.getLogger("google.cloud.pubsub_v1").setLevel(logging.WARNING)
 
 
 class HealthCheckServer:
@@ -165,6 +167,11 @@ class MeetingController:
         # How often the controller checks Firestore for new meetings/bot work.
         # Kept configurable; default matches prior behavior.
         self.poll_interval = int(os.getenv("POLL_INTERVAL", "10"))
+
+        # Pub/Sub configuration
+        self.pubsub_subscription = os.getenv("PUBSUB_SUBSCRIPTION")
+        self.subscriber = None
+        self.streaming_pull_future = None
 
         # Validate required environment variables
         self._validate_config()
@@ -956,6 +963,155 @@ class MeetingController:
             self.is_leader = False
             return False
 
+    def _scan_upcoming_meetings(self):
+        """Scan for meetings starting soon and enqueue them."""
+        now = datetime.now(timezone.utc)
+        target_time = now + timedelta(minutes=2)
+        window_start = target_time - timedelta(seconds=30)
+        window_end = target_time + timedelta(seconds=30)
+
+        logger.info(f"Scanning meetings: {window_start} to {window_end}")
+
+        if self.meetings_query_mode == "collection_group":
+            coll = self.db.collection_group(self.meetings_collection_path)
+        else:
+            coll = self.db.collection(self.meetings_collection_path)
+
+        # Query by time window
+        query = coll.where("start", ">=", window_start).where("start", "<=", window_end)
+
+        try:
+            docs = list(query.stream())
+            logger.info(f"Found {len(docs)} meetings in time window")
+
+            for doc in docs:
+                data = doc.to_dict()
+
+                # Filter by status
+                status = data.get(self.meeting_status_field)
+                if (
+                    self.meeting_status_values
+                    and status not in self.meeting_status_values
+                ):
+                    continue
+
+                # Check if bot already exists
+                if data.get(self.meeting_bot_instance_field):
+                    continue
+
+                # Check user and meeting settings for auto-join/AI assistant
+                user_id = data.get("user_id") or data.get("created_by")
+                ai_enabled = data.get("ai_assistant_enabled", False)
+                auto_join = False
+
+                if user_id:
+                    user_ref = self.db.collection("users").document(user_id)
+                    user_doc = user_ref.get()
+                    if user_doc.exists:
+                        user_data = user_doc.to_dict()
+                        auto_join = user_data.get("auto_join_meetings", False)
+
+                if not (ai_enabled or auto_join):
+                    continue
+
+                # Check if Teams meeting
+                join_url = data.get("join_url") or ""
+                if "teams.microsoft.com" not in join_url:
+                    continue
+
+                # Create bot instance
+                logger.info(f"Enqueuing bot for meeting {doc.id}")
+                self._try_create_bot_instance_for_meeting(doc)
+        except Exception as e:
+            logger.error(f"Error scanning upcoming meetings: {e}")
+
+    def _pubsub_callback(self, message: pubsub_v1.subscriber.message.Message):
+        """Handle incoming Pub/Sub messages."""
+        try:
+            data = json.loads(message.data.decode("utf-8"))
+            meeting_id = data.get("meeting_id")
+            org_id = data.get("teamId")
+
+            logger.info(f"Received Pub/Sub message for meeting: {meeting_id}")
+
+            if not meeting_id:
+                logger.error("Message missing meeting_id")
+                message.ack()  # Ack invalid messages to remove them
+                return
+
+            # Try to find the bot instance to claim it
+            bot_instance_id = None
+
+            # 1. Check if meeting doc has bot_instance_id
+            if org_id:
+                meeting_ref = (
+                    self.db.collection("organizations")
+                    .document(org_id)
+                    .collection("meetings")
+                    .document(meeting_id)
+                )
+                meeting_doc = meeting_ref.get()
+                if meeting_doc.exists:
+                    bot_instance_id = meeting_doc.get(self.meeting_bot_instance_field)
+
+            # 2. If not found, try the default ID convention (meeting_id)
+            if not bot_instance_id:
+                bot_instance_id = meeting_id
+
+            # 3. Try to claim the bot instance
+            bot_ref = self.db.collection("bot_instances").document(str(bot_instance_id))
+
+            # If bot instance doesn't exist, launch anyway
+            # Risk: double-launching if Poller picks it up
+            # Mitigation: claim atomically prevents double-launch
+
+            claimed = self._try_claim_bot_instance(bot_ref)
+
+            if claimed:
+                logger.info(f"Claimed bot instance {bot_instance_id} via Pub/Sub")
+                if self.create_manager_job(data, message.message_id):
+                    self._mark_bot_instance_done(bot_ref, ok=True)
+                    message.ack()
+                else:
+                    self._mark_bot_instance_done(bot_ref, ok=False)
+                    message.nack()
+            else:
+                # Could not claim. Check if it exists
+                # If missing, launch without state tracking
+                # If exists, someone else is handling it
+                if not bot_ref.get().exists:
+                    logger.warning(
+                        f"Bot instance {bot_instance_id} not found. "
+                        f"Launching without state tracking."
+                    )
+                    if self.create_manager_job(data, message.message_id):
+                        message.ack()
+                    else:
+                        message.nack()
+                else:
+                    logger.info(f"Bot instance {bot_instance_id} already processing")
+                    message.ack()  # Ack: someone else handling it
+
+        except Exception as e:
+            logger.error(f"Error processing Pub/Sub message: {e}")
+            message.nack()
+
+    def _start_pubsub_listener(self):
+        """Start the Pub/Sub subscriber in a background thread."""
+        if not self.pubsub_subscription:
+            logger.warning("No PUBSUB_SUBSCRIPTION configured. Skipping listener.")
+            return
+
+        try:
+            subscriber = pubsub_v1.SubscriberClient()
+            self.subscriber = subscriber
+            self.streaming_pull_future = subscriber.subscribe(
+                self.pubsub_subscription, callback=self._pubsub_callback
+            )
+            logger.info(f"Listening on {self.pubsub_subscription}")
+        except Exception as e:
+            logger.error(f"Failed to start Pub/Sub listener: {e}")
+
     def run(self):
         """Main run loop - continuously process queued Firestore work"""
         logger.info("=" * 50)
@@ -974,6 +1130,9 @@ class MeetingController:
 
         logger.info(f"Polling interval: {self.poll_interval}s")
 
+        # Start the Pub/Sub listener
+        self._start_pubsub_listener()
+
         while True:
             try:
                 # Check leadership
@@ -984,26 +1143,8 @@ class MeetingController:
 
                 logger.debug("Starting poll cycle...")
 
-                # Step 0: discover meetings that need bot instances and enqueue them.
-                meeting_docs = self._query_meetings_needing_bots()
-                if meeting_docs:
-                    logger.info("Found %s meeting(s) needing bots", len(meeting_docs))
-                for meeting_doc in meeting_docs:
-                    try:
-                        bot_id = self._try_create_bot_instance_for_meeting(meeting_doc)
-                        if bot_id:
-                            logger.info(
-                                "Ensured bot_instance %s for meeting %s",
-                                bot_id,
-                                meeting_doc.id,
-                            )
-                    except Exception as e:
-                        logger.error(
-                            "Failed creating bot instance for meeting %s: %s",
-                            meeting_doc.id,
-                            e,
-                            exc_info=True,
-                        )
+                # Step 0: discover meetings starting soon (2min window)
+                self._scan_upcoming_meetings()
 
                 # Step 1: process queued bot instances.
                 bot_docs = self._query_queued_bot_instances()
