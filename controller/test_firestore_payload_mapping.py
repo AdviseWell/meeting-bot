@@ -76,7 +76,8 @@ def test_build_job_payload_minimal_fields(monkeypatch):
     c = MeetingController.__new__(MeetingController)
 
     # Even if a document carries an old-style gcs_path, controller should now
-    # enforce the canonical layout: recordings/<firestore_doc_id>/...
+    # enforce the canonical layout. With no user_id available we fall back to:
+    #   recordings/<firestore_doc_id>/...
     doc._data["gcs_path"] = "recordings/ad-hoc/x/2025/01/02/teams-meet42"
 
     p = c._build_job_payload_from_firestore(doc)  # noqa: SLF001
@@ -123,4 +124,4 @@ def test_build_job_payload_prefers_initial_linked_meeting(monkeypatch):
     assert p["user_id"] == "user1"
     # Storage is keyed by Firestore document id, not meeting_id.
     assert p["fs_meeting_id"] == "bot123"
-    assert p["gcs_path"] == "recordings/bot123"
+    assert p["gcs_path"] == "recordings/user1/bot123"

@@ -244,7 +244,7 @@ class MeetingController:
             meeting_url = message_data.get("meeting_url")
 
             # Storage layout is always:
-            #   recordings/<meeting_firebase_document_id>/<files>
+            #   recordings/<user_firebase_document_id>/<meeting_firebase_document_id>/<files>
             # The manager container will append fixed filenames.
             meeting_doc_id = (
                 message_data.get("fs_meeting_id")
@@ -253,7 +253,23 @@ class MeetingController:
                 or message_data.get("meeting_doc_id")
                 or meeting_id
             )
-            gcs_path = f"recordings/{meeting_doc_id}"
+
+            user_doc_id = (
+                message_data.get("user_id")
+                or message_data.get("USER_ID")
+                or message_data.get("fs_user_id")
+                or message_data.get("FS_USER_ID")
+                or message_data.get("creator_user_id")
+                or message_data.get("user_firebase_document_id")
+                or message_data.get("user_doc_id")
+                or ""
+            )
+
+            gcs_path = (
+                f"recordings/{user_doc_id}/{meeting_doc_id}"
+                if user_doc_id
+                else f"recordings/{meeting_doc_id}"
+            )
 
             if not meeting_url:
                 logger.error(
@@ -274,6 +290,7 @@ class MeetingController:
                 client.V1EnvVar(name="MEETING_URL", value=meeting_url),
                 client.V1EnvVar(name="MEETING_ID", value=meeting_id),
                 client.V1EnvVar(name="FS_MEETING_ID", value=str(meeting_doc_id)),
+                client.V1EnvVar(name="USER_ID", value=str(user_doc_id)),
                 client.V1EnvVar(name="GCS_PATH", value=gcs_path),
                 client.V1EnvVar(name="GCS_BUCKET", value=self.gcs_bucket),
                 client.V1EnvVar(name="MEETING_BOT_IMAGE", value=self.meeting_bot_image),
@@ -615,7 +632,18 @@ class MeetingController:
 
         now = datetime.now(timezone.utc)
 
-        gcs_path = f"recordings/{meeting_doc_id}"
+        user_doc_id = (
+            data.get("creator_user_id")
+            or data.get("user_id")
+            or data.get("initial_linked_meeting", {}).get("user_id")
+            or ""
+        )
+
+        gcs_path = (
+            f"recordings/{user_doc_id}/{meeting_doc_id}"
+            if user_doc_id
+            else f"recordings/{meeting_doc_id}"
+        )
 
         payload: Dict[str, Any] = {
             "meeting_url": meeting_url,
@@ -626,10 +654,7 @@ class MeetingController:
             "name": data.get("bot_name") or data.get("name") or "Meeting Bot",
             "teamId": org_id or data.get("teamId") or data.get("team_id") or meeting_id,
             "timezone": data.get("timezone") or "UTC",
-            "user_id": data.get("creator_user_id")
-            or data.get("user_id")
-            or data.get("initial_linked_meeting", {}).get("user_id")
-            or "",
+            "user_id": user_doc_id,
             "user_email": data.get("user_email", ""),
             "initiated_at": data.get("initiated_at")
             or (now.isoformat().replace("+00:00", "Z")),

@@ -103,15 +103,24 @@ class MeetingManager:
         self.fs_meeting_id = os.environ.get(
             "FS_MEETING_ID"
         )  # Firestore-specific meeting ID
+        self.user_id = (
+            os.environ.get("USER_ID")
+            or os.environ.get("user_id")
+            or os.environ.get("FS_USER_ID")
+            or os.environ.get("fs_user_id")
+        )
         self.gcs_path = os.environ.get("GCS_PATH")
 
         # Storage layout is always:
-        #   recordings/<meeting_firebase_document_id>/...
+        #   recordings/<user_firebase_document_id>/<meeting_firebase_document_id>/...
         #
         # For backward compatibility we accept legacy values, but we normalize
         # into the canonical prefix as early as possible.
         storage_meeting_id = self.fs_meeting_id or self.meeting_id
-        if storage_meeting_id:
+        if storage_meeting_id and self.user_id:
+            self.gcs_path = f"recordings/{self.user_id}/{storage_meeting_id}"
+        elif storage_meeting_id:
+            # Backward-compatible prefix (meeting only) when user id is unknown.
             self.gcs_path = f"recordings/{storage_meeting_id}"
         elif self.gcs_path:
             # Last-resort fallback if FS_MEETING_ID/MEETING_ID are missing.
