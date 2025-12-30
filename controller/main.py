@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""controller.main
+"""controller.main  # noqa: E501
 
 Meeting Bot Controller - Kubernetes Job Orchestrator
 
@@ -17,6 +17,9 @@ Workflow:
 4. Create a Kubernetes Job for the claimed item
 5. Repeat
 """
+
+# NOTE: This module is operational and contains long env var / YAML-ish lines.
+# flake8: noqa: E501
 
 import os
 import sys
@@ -239,7 +242,18 @@ class MeetingController:
         try:
             meeting_id = message_data.get("meeting_id", message_id)
             meeting_url = message_data.get("meeting_url")
-            gcs_path = message_data.get("gcs_path", f"recordings/{meeting_id}")
+
+            # Storage layout is always:
+            #   recordings/<meeting_firebase_document_id>/<files>
+            # The manager container will append fixed filenames.
+            meeting_doc_id = (
+                message_data.get("fs_meeting_id")
+                or message_data.get("FS_MEETING_ID")
+                or message_data.get("meeting_firebase_document_id")
+                or message_data.get("meeting_doc_id")
+                or meeting_id
+            )
+            gcs_path = f"recordings/{meeting_doc_id}"
 
             if not meeting_url:
                 logger.error(
@@ -259,6 +273,7 @@ class MeetingController:
             env_vars = [
                 client.V1EnvVar(name="MEETING_URL", value=meeting_url),
                 client.V1EnvVar(name="MEETING_ID", value=meeting_id),
+                client.V1EnvVar(name="FS_MEETING_ID", value=str(meeting_doc_id)),
                 client.V1EnvVar(name="GCS_PATH", value=gcs_path),
                 client.V1EnvVar(name="GCS_BUCKET", value=self.gcs_bucket),
                 client.V1EnvVar(name="MEETING_BOT_IMAGE", value=self.meeting_bot_image),
@@ -582,12 +597,15 @@ class MeetingController:
         if not meeting_url:
             raise ValueError("bot_instance missing meeting_url")
 
-        # Best-effort meeting id.
+        # Best-effort meeting id (join link meeting id).
         meeting_id = (
             data.get("meeting_id")
             or data.get("initial_linked_meeting", {}).get("meeting_id")
             or bot_doc.id
         )
+
+        # Canonical Firebase document id used for storage prefix.
+        meeting_doc_id = bot_doc.id
 
         org_id = (
             data.get("creator_organization_id")
@@ -596,15 +614,14 @@ class MeetingController:
         )
 
         now = datetime.now(timezone.utc)
-        gcs_path = data.get(
-            "gcs_path",
-            f"recordings/ad-hoc/{org_id}/{now.year}/{now.month:02d}/{now.day:02d}/teams-{meeting_id}",
-        )
+
+        gcs_path = f"recordings/{meeting_doc_id}"
 
         payload: Dict[str, Any] = {
             "meeting_url": meeting_url,
             "meeting_id": meeting_id,
             "gcs_path": gcs_path,
+            "fs_meeting_id": meeting_doc_id,
             # Maintain compatibility with existing manager payload expectations.
             "name": data.get("bot_name") or data.get("name") or "Meeting Bot",
             "teamId": org_id or data.get("teamId") or data.get("team_id") or meeting_id,

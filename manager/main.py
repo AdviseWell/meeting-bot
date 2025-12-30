@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-"""
+"""Meeting Bot Manager - Job Execution
 
+This module is operational and includes long log lines and pipeline strings,
+so we ignore line-length linting here.
+
+# flake8: noqa: E501
 # type: ignore
-Meeting Bot Manager - Job Execution
 
 This manager processes a single meeting recording job:
 1. Reads job details from environment variables
@@ -102,13 +105,18 @@ class MeetingManager:
         )  # Firestore-specific meeting ID
         self.gcs_path = os.environ.get("GCS_PATH")
 
-        # Storage layout: prefer recordings/<meeting_id>/... as the default
-        # prefix. If a producer passes only the meeting id (legacy
-        # meeting-id-only layout), normalize it here.
-        if self.gcs_path and not self.gcs_path.startswith("recordings/"):
-            # Keep other explicit prefixes (e.g., custom folder) if provided.
-            # Only auto-prefix when the provided value looks like a bare id.
-            if "/" not in self.gcs_path:
+        # Storage layout is always:
+        #   recordings/<meeting_firebase_document_id>/...
+        #
+        # For backward compatibility we accept legacy values, but we normalize
+        # into the canonical prefix as early as possible.
+        storage_meeting_id = self.fs_meeting_id or self.meeting_id
+        if storage_meeting_id:
+            self.gcs_path = f"recordings/{storage_meeting_id}"
+        elif self.gcs_path:
+            # Last-resort fallback if FS_MEETING_ID/MEETING_ID are missing.
+            # Keep existing behavior: accept bare ids.
+            if not self.gcs_path.startswith("recordings/") and "/" not in self.gcs_path:
                 self.gcs_path = f"recordings/{self.gcs_path}"
 
         # Optional meeting metadata
