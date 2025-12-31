@@ -428,12 +428,12 @@ class MeetingController:
                 resources=client.V1ResourceRequirements(
                     requests={
                         "cpu": "2500m",  # 2.5 CPU cores
-                        "memory": "1Gi",  # 1 GB memory (doubled)
+                        "memory": "4Gi",  # Increased to avoid OOM during whisper/diarization
                         "ephemeral-storage": "2Gi",
                     },
                     limits={
                         "cpu": "3750m",  # 50% higher (3.75 CPU cores)
-                        "memory": "1536Mi",  # 1.5 GB memory (doubled)
+                        "memory": "8Gi",  # Increased to avoid OOM during whisper/diarization
                         "ephemeral-storage": "2Gi",
                     },
                 ),

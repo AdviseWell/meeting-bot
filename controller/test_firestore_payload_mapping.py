@@ -14,6 +14,13 @@ def _import_controller():
     # the local environment.
     import sys
     import types
+    from pathlib import Path
+    import importlib.util
+
+    # Ensure we import controller/main.py specifically, without relying on
+    # `controller/` being an importable package and without accidentally
+    # importing manager/main.py (which pulls in requests/OpenSSL).
+    controller_dir = Path(__file__).resolve().parent
 
     for mod in [
         "google",
@@ -50,7 +57,13 @@ def _import_controller():
     sys.modules["google.cloud.pubsub_v1.subscriber.message"].Message = object  # type: ignore[attr-defined]  # noqa: E501
 
     # Local import so tests can run without executing controller startup.
-    from main import MeetingController  # type: ignore
+    spec = importlib.util.spec_from_file_location(
+        "controller_main", controller_dir / "main.py"
+    )
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+    MeetingController = mod.MeetingController
 
     return MeetingController
 
