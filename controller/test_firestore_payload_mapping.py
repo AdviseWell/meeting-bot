@@ -8,6 +8,41 @@ class _FakeDoc:
         return self._data
 
 
+class _FakeDocSnapshot:
+    def __init__(self, data):
+        self._data = data
+        self.exists = data is not None
+
+    def to_dict(self):
+        return self._data
+
+
+class _FakeFirestore:
+    def __init__(self, organizations: dict[str, dict]):
+        self._organizations = organizations
+
+    def collection(self, name: str):
+        assert name == "organizations"
+        return _FakeOrganizationsCollection(self._organizations)
+
+
+class _FakeOrganizationsCollection:
+    def __init__(self, organizations: dict[str, dict]):
+        self._organizations = organizations
+
+    def document(self, org_id: str):
+        return _FakeOrganizationDocRef(self._organizations, org_id)
+
+
+class _FakeOrganizationDocRef:
+    def __init__(self, organizations: dict[str, dict], org_id: str):
+        self._organizations = organizations
+        self._org_id = org_id
+
+    def get(self):
+        return _FakeDocSnapshot(self._organizations.get(self._org_id))
+
+
 def _import_controller():
     # Tests validate our payload mapping logic; they shouldn't require heavy
     # external deps (google-cloud, kubernetes) or a working OpenSSL stack in
@@ -129,6 +164,7 @@ def test_build_job_payload_prefers_initial_linked_meeting(monkeypatch):
 
     # Avoid constructing the controller (requires Firestore/K8s clients).
     c = MeetingController.__new__(MeetingController)
+    c.db = _FakeFirestore({"org1": {"meeting_bot_name": "AdviseWell"}})
     p = c._build_job_payload_from_firestore(doc)  # noqa: SLF001
 
     assert p["meeting_id"] == "meet999"
@@ -138,3 +174,54 @@ def test_build_job_payload_prefers_initial_linked_meeting(monkeypatch):
     # Storage is keyed by Firestore document id, not meeting_id.
     assert p["fs_meeting_id"] == "bot123"
     assert p["gcs_path"] == "recordings/user1/bot123"
+
+
+def test_build_job_payload_bot_name_from_org_doc(monkeypatch):
+    MeetingController = _import_controller()
+
+    monkeypatch.setenv("GCP_PROJECT_ID", "demo")
+    monkeypatch.setenv("GCS_BUCKET", "bucket")
+    monkeypatch.setenv("MANAGER_IMAGE", "manager")
+    monkeypatch.setenv("MEETING_BOT_IMAGE", "bot")
+
+    doc = _FakeDoc(
+        "bot123",
+        {
+            "meeting_url": "https://teams.microsoft.com/l/meeting-join/...",
+            "status": "queued",
+            "creator_organization_id": "org1",
+            # Old field should no longer drive the name.
+            "bot_name": "Old Name",
+        },
+    )
+
+    c = MeetingController.__new__(MeetingController)
+    c.db = _FakeFirestore({"org1": {"meeting_bot_name": "New Org Name"}})
+    p = c._build_job_payload_from_firestore(doc)  # noqa: SLF001
+
+    assert p["teamId"] == "org1"
+    assert p["name"] == "New Org Name"
+
+
+def test_build_job_payload_bot_name_falls_back(monkeypatch):
+    MeetingController = _import_controller()
+
+    monkeypatch.setenv("GCP_PROJECT_ID", "demo")
+    monkeypatch.setenv("GCS_BUCKET", "bucket")
+    monkeypatch.setenv("MANAGER_IMAGE", "manager")
+    monkeypatch.setenv("MEETING_BOT_IMAGE", "bot")
+
+    doc = _FakeDoc(
+        "bot123",
+        {
+            "meeting_url": "https://teams.microsoft.com/l/meeting-join/...",
+            "status": "queued",
+            "creator_organization_id": "org1",
+        },
+    )
+
+    c = MeetingController.__new__(MeetingController)
+    c.db = _FakeFirestore({"org1": {"meeting_bot_name": "   "}})
+    p = c._build_job_payload_from_firestore(doc)  # noqa: SLF001
+
+    assert p["name"] == "AdviseWell"

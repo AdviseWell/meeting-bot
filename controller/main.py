@@ -645,13 +645,28 @@ class MeetingController:
             else f"recordings/{meeting_doc_id}"
         )
 
+        # Determine meeting bot display name.
+        # Migration: `meeting_bot_name` moved from users/{uid} to organizations/{orgId}.
+        bot_display_name = "AdviseWell"
+        if org_id and getattr(self, "db", None) is not None:
+            try:
+                org_snap = self.db.collection("organizations").document(org_id).get()
+                if org_snap.exists:
+                    org_data = org_snap.to_dict() or {}
+                    candidate = org_data.get("meeting_bot_name")
+                    if isinstance(candidate, str) and candidate.strip():
+                        bot_display_name = candidate.strip()
+            except Exception:
+                # Never fail job creation due to missing org doc or transient Firestore issues.
+                pass
+
         payload: Dict[str, Any] = {
             "meeting_url": meeting_url,
             "meeting_id": meeting_id,
             "gcs_path": gcs_path,
             "fs_meeting_id": meeting_doc_id,
             # Maintain compatibility with existing manager payload expectations.
-            "name": data.get("bot_name") or data.get("name") or "Meeting Bot",
+            "name": bot_display_name,
             "teamId": org_id or data.get("teamId") or data.get("team_id") or meeting_id,
             "timezone": data.get("timezone") or "UTC",
             "user_id": user_doc_id,
