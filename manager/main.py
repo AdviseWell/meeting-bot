@@ -471,7 +471,9 @@ class MeetingManager:
                     # Gemini path.
                     try:
                         firestore_meeting_id = self.fs_meeting_id or self.meeting_id
-                        from firestore_persistence import persist_transcript_to_firestore
+                        from firestore_persistence import (
+                            persist_transcript_to_firestore,
+                        )
 
                         persist_transcript_to_firestore(
                             firestore_client=self.firestore_client,

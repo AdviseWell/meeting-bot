@@ -15,19 +15,14 @@ def test_monitor_until_complete_accepts_userid_variants(monkeypatch):
     mm = MeetingMonitor(api_base_url="http://example")
 
     # Force job to be immediately completed.
-    monkeypatch.setattr(
-        mm, "get_job_status", lambda job_id: {"status": "completed"}
-    )
+    monkeypatch.setattr(mm, "get_job_status", lambda job_id: {"status": "completed"})
 
     # Pretend meeting-bot already produced a recording.
     monkeypatch.setattr(os.path, "exists", lambda p: True)
 
     def fake_glob(pattern):
         # Should be called with a path that includes our user id.
-        assert (
-            "/recordings/u123" in pattern
-            or "/scratch/tempvideo/u123" in pattern
-        )
+        assert "/recordings/u123" in pattern or "/scratch/tempvideo/u123" in pattern
         return ["/recordings/u123/recording.webm"]
 
     import glob as _glob
@@ -52,9 +47,7 @@ def test_monitor_until_complete_rejects_blank_userid(monkeypatch):
     mm = MeetingMonitor(api_base_url="http://example")
 
     # Force job to be immediately completed.
-    monkeypatch.setattr(
-        mm, "get_job_status", lambda job_id: {"status": "completed"}
-    )
+    monkeypatch.setattr(mm, "get_job_status", lambda job_id: {"status": "completed"})
 
     # If the code mistakenly proceeds, we'd see os.path.exists/glob called.
     called = {"exists": 0, "glob": 0}
