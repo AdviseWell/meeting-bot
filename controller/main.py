@@ -830,6 +830,8 @@ class MeetingController:
 
         @firestore.transactional
         def _txn(txn: firestore.Transaction) -> Optional[str]:
+            # IMPORTANT: Read ALL documents first, before any writes.
+            # Firestore transactions do not allow reads after writes.
             fresh_meeting = meeting_ref.get(transaction=txn)
             if not fresh_meeting.exists:
                 return None
@@ -844,8 +846,14 @@ class MeetingController:
             if not fresh_meeting_url:
                 return None
 
-            # Create session doc if missing.
+            # Read session doc.
             sess_snap = session_ref.get(transaction=txn)
+            
+            # Read subscriber doc.
+            sub_snap = subscriber_ref.get(transaction=txn)
+
+            # Now perform all writes.
+            # Create session doc if missing.
             if not sess_snap.exists:
                 canonical_gcs_path = f"recordings/sessions/{session_id}"
                 txn.set(
@@ -864,7 +872,6 @@ class MeetingController:
                 txn.update(session_ref, {"updated_at": now})
 
             # Ensure subscriber.
-            sub_snap = subscriber_ref.get(transaction=txn)
             if not sub_snap.exists:
                 txn.set(
                     subscriber_ref,
