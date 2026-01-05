@@ -139,9 +139,7 @@ class _FakeFirestore:
 
 
 class _FakeSessionRef:
-    def __init__(
-        self, *, session_data: dict, subscribers: list[dict], store: list
-    ):
+    def __init__(self, *, session_data: dict, subscribers: list[dict], store: list):
         self._session_data = session_data
         self._subscribers = subscribers
         self._store = store
