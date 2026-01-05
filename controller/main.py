@@ -1203,8 +1203,6 @@ class MeetingController:
             "gcs_path": canonical_gcs_path,
             "teamId": org_id or session_doc.id,
             "timezone": data.get("timezone") or "UTC",
-            # For session mode, we don't use user_id for paths - canonical path is used
-            "user_id": "",
             "initiated_at": data.get("initiated_at")
             or (now.isoformat().replace("+00:00", "Z")),
             "auto_joined": True,

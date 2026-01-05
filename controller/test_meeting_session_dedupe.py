@@ -126,4 +126,4 @@ def test_build_payload_from_meeting_session_uses_canonical_gcs_path(
     payload = c._build_job_payload_from_meeting_session(doc)  # noqa: SLF001
     assert payload["gcs_path"] == "recordings/sessions/sess123"
     assert payload["fs_meeting_id"] == "sess123"
-    assert payload["user_id"].startswith("session:")
+    assert "user_id" not in payload
