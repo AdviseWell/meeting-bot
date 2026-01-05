@@ -848,7 +848,7 @@ class MeetingController:
 
             # Read session doc.
             sess_snap = session_ref.get(transaction=txn)
-            
+
             # Read subscriber doc.
             sub_snap = subscriber_ref.get(transaction=txn)
 
@@ -1069,6 +1069,24 @@ class MeetingController:
                 return
 
             subs = list(session_ref.collection("subscribers").stream())
+
+            # Try to read transcription text from canonical location (if it exists)
+            transcription_text = None
+            transcript_txt_path = f"{canonical_prefix}/transcript.txt"
+            try:
+                transcript_blob = self.gcs_bucket_client.blob(transcript_txt_path)
+                if transcript_blob.exists():
+                    transcription_text = transcript_blob.download_as_text()
+                    logger.debug(
+                        "Read transcription from %s (%d chars)",
+                        transcript_txt_path,
+                        len(transcription_text),
+                    )
+            except Exception as e:
+                logger.warning(
+                    "Could not read transcription from %s: %s", transcript_txt_path, e
+                )
+
             for sub in subs:
                 sub_ref = sub.reference
                 sub_data = sub.to_dict() or {}
@@ -1104,6 +1122,36 @@ class MeetingController:
                     },
                     merge=True,
                 )
+
+                # Update the individual meeting document with transcription and file links
+                try:
+                    # Get meeting document reference from subscriber data
+                    # The meeting doc is at: organizations/{org_id}/meetings/{fs_meeting_id}
+                    meeting_ref = (
+                        self.db.collection("organizations")
+                        .document(org_id)
+                        .collection("meetings")
+                        .document(fs_meeting_id)
+                    )
+
+                    meeting_update = {
+                        "updated_at": datetime.now(timezone.utc),
+                        "recording_url": f"gs://{self.gcs_bucket}/{dst_prefix}/recording.webm",
+                    }
+
+                    # Add transcription if available
+                    if transcription_text:
+                        meeting_update["transcription"] = transcription_text
+
+                    meeting_ref.set(meeting_update, merge=True)
+                    logger.debug(
+                        "Updated meeting doc %s with transcription and file links",
+                        fs_meeting_id,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Failed to update meeting document %s: %s", fs_meeting_id, e
+                    )
 
             session_ref.set(
                 {
@@ -1155,8 +1203,8 @@ class MeetingController:
             "gcs_path": canonical_gcs_path,
             "teamId": org_id or session_doc.id,
             "timezone": data.get("timezone") or "UTC",
-            # Manager expects user_id; provide a stable synthetic id.
-            "user_id": f"session:{session_doc.id}",
+            # For session mode, we don't use user_id for paths - canonical path is used
+            "user_id": "",
             "initiated_at": data.get("initiated_at")
             or (now.isoformat().replace("+00:00", "Z")),
             "auto_joined": True,
