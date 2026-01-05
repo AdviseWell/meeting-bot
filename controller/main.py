@@ -272,6 +272,18 @@ class MeetingController:
                 or ""
             )
 
+            if isinstance(user_doc_id, str):
+                user_doc_id = user_doc_id.strip()
+
+            if not user_doc_id:
+                logger.error(
+                    "Invalid message data - missing user id; refusing to create job. "
+                    "Expected one of: user_id/USER_ID/fs_user_id/FS_USER_ID/creator_user_id. "
+                    "Message keys: %s",
+                    list(message_data.keys()),
+                )
+                return False
+
             gcs_path = (
                 f"recordings/{user_doc_id}/{meeting_doc_id}"
                 if user_doc_id

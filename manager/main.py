@@ -20,19 +20,12 @@ Designed to run as a Kubernetes Job, spawned by the controller.
 import os
 import sys
 import logging
-from typing import Dict
+from typing import Dict, Optional
 import tempfile
 from pathlib import Path
 from datetime import datetime, timezone
 
-from google.cloud import firestore
-
 from meeting_monitor import MeetingMonitor
-from storage_client import StorageClient, FirestoreClient
-from transcription_client import TranscriptionClient
-from media_converter import MediaConverter
-from offline_pipeline import transcribe_and_diarize_local_media
-from firestore_persistence import persist_transcript_to_firestore
 from metadata import load_meeting_metadata
 
 # Configure logging
@@ -133,6 +126,18 @@ class MeetingManager:
         explicit_gcs_path = (self.gcs_path or "").strip()
         is_canonical_session_path = explicit_gcs_path.startswith("recordings/sessions/")
 
+        # USER_ID should never be blank for per-user recording jobs. Fail fast
+        # here so we don't run an hours-long job only to be unable to locate
+        # the recording volume directory at the end.
+        if isinstance(self.user_id, str):
+            self.user_id = self.user_id.strip()
+
+        if not is_canonical_session_path and not self.user_id:
+            raise ValueError(
+                "Missing USER_ID for recording job. Refusing to start. "
+                "Set USER_ID (or user_id/FS_USER_ID) in the manager env."
+            )
+
         if is_canonical_session_path:
             # Respect explicit canonical session path as-is.
             self.gcs_path = explicit_gcs_path
@@ -171,10 +176,12 @@ class MeetingManager:
         # Validate required environment variables
         self._validate_config()
 
-        # Initialize clients
+        # Clients and heavy deps are initialized lazily in process_meeting()
+        # after config validation. This keeps startup fast and avoids import-time
+        # failures in minimal environments.
         self.meeting_monitor = MeetingMonitor(self.meeting_bot_api)
-        self.storage_client = StorageClient(self.gcs_bucket)
-        self.firestore_client = FirestoreClient(self.firestore_database)
+        self.storage_client = None
+        self.firestore_client = None
 
         # Transcription mode:
         # - offline (default): whisper.cpp + offline diarization
@@ -183,17 +190,7 @@ class MeetingManager:
         self.transcription_mode = (
             os.environ.get("TRANSCRIPTION_MODE", "offline").strip().lower()
         )
-
-        # Only initialize Gemini client when explicitly requested. This avoids
-        # accidental cloud usage when the intention is to run fully offline.
         self.transcription_client = None
-        if self.transcription_mode == "gemini":
-            self.transcription_client = TranscriptionClient(
-                project_id=os.environ.get(
-                    "GEMINI_PROJECT_ID",
-                    "aw-gemini-api-central",
-                )
-            )
 
         # Offline pipeline options (only used when TRANSCRIPTION_MODE=offline)
         self.offline_language = os.environ.get(
@@ -201,10 +198,28 @@ class MeetingManager:
         ).strip()
         self.offline_max_speakers = int(os.environ.get("OFFLINE_MAX_SPEAKERS", "6"))
 
-        logger.info(
-            "Transcription backend selected: %s",
-            self.transcription_mode,
-        )
+        logger.info("Transcription backend selected: %s", self.transcription_mode)
+
+    def _init_clients(self) -> None:
+        """Initialize optional clients that pull in heavier dependencies."""
+
+        if self.storage_client and self.firestore_client:
+            return
+
+        from storage_client import StorageClient, FirestoreClient
+
+        self.storage_client = StorageClient(self.gcs_bucket)
+        self.firestore_client = FirestoreClient(self.firestore_database)
+
+        if self.transcription_mode == "gemini" and self.transcription_client is None:
+            from transcription_client import TranscriptionClient
+
+            self.transcription_client = TranscriptionClient(
+                project_id=os.environ.get(
+                    "GEMINI_PROJECT_ID",
+                    "aw-gemini-api-central",
+                )
+            )
 
     def _validate_config(self):
         """Validate required environment variables"""
@@ -229,6 +244,10 @@ class MeetingManager:
             True if processing succeeded, False otherwise
         """
         try:
+            # Only import and initialize heavy dependencies once we know the
+            # configuration is valid.
+            self._init_clients()
+
             logger.info(f"Processing meeting {self.meeting_id}")
             logger.info(f"Meeting URL: {self.meeting_url}")
             logger.info(f"Target GCS path: {self.gcs_path}")
@@ -294,6 +313,8 @@ class MeetingManager:
             mp4_path = None
             try:
                 logger.info("Step 2.5: Extracting audio-only for transcription...")
+                from media_converter import MediaConverter
+
                 converter = MediaConverter()
                 extracted_mp4, extracted_m4a = converter.convert(recording_path)
                 if extracted_mp4 and os.path.exists(extracted_mp4):
@@ -412,6 +433,8 @@ class MeetingManager:
                     out_dir = Path(tempfile.gettempdir())
 
                     def _run_offline(diarize: bool):
+                        from offline_pipeline import transcribe_and_diarize_local_media
+
                         return transcribe_and_diarize_local_media(
                             input_path=Path(local_input),
                             out_dir=out_dir,
@@ -448,6 +471,8 @@ class MeetingManager:
                     # Gemini path.
                     try:
                         firestore_meeting_id = self.fs_meeting_id or self.meeting_id
+                        from firestore_persistence import persist_transcript_to_firestore
+
                         persist_transcript_to_firestore(
                             firestore_client=self.firestore_client,
                             meeting_id=firestore_meeting_id,
@@ -762,7 +787,7 @@ class MeetingManager:
                 pass
             return False
 
-    def _mark_session_complete(self, *, ok: bool, artifacts: dict | None) -> None:
+    def _mark_session_complete(self, *, ok: bool, artifacts: Optional[dict]) -> None:
         """Best-effort: update per-org session state when running in session mode."""
 
         if not (self.gcs_path or "").startswith("recordings/sessions/"):
@@ -778,6 +803,8 @@ class MeetingManager:
 
         # Use a lightweight Firestore client directly; the existing
         # FirestoreClient in storage_client.py is hard-coded to a specific org.
+        from google.cloud import firestore
+
         db = firestore.Client(database=self.firestore_database)
         ref = (
             db.collection("organizations")

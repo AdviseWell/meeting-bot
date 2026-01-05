@@ -1,12 +1,15 @@
-"""
-Meeting Monitor - Interface with the meeting-bot API
+"""Meeting Monitor - Interface with the meeting-bot API
+
+This file contains long log lines and embedded docs/paths. We intentionally
+ignore E501 line-length linting here.
+
+# flake8: noqa: E501
 """
 
 import os
 import glob
 import time
 import logging
-import requests
 from typing import Optional, Dict, Literal
 
 from join_payload import build_join_payload
@@ -71,6 +74,8 @@ class MeetingMonitor:
 
         while time.time() - start_time < self.startup_timeout:
             try:
+                import requests  # type: ignore
+
                 # Try health check endpoint first
                 endpoint = f"{self.api_base_url}/health"
                 response = requests.get(endpoint, timeout=2)
@@ -115,6 +120,8 @@ class MeetingMonitor:
             Job ID if successful, None otherwise
         """
         try:
+            import requests  # type: ignore
+
             # Detect provider from URL
             provider = detect_meeting_provider(meeting_url)
             if not provider:
@@ -222,6 +229,8 @@ class MeetingMonitor:
             Job status dict if successful, None otherwise
         """
         try:
+            import requests  # type: ignore
+
             # Check if meeting-bot is currently busy processing
             endpoint = f"{self.api_base_url}/isbusy"
 
@@ -308,12 +317,51 @@ class MeetingMonitor:
                 # Recording file is in the shared volume
                 # Meeting-bot saves to: /usr/src/app/dist/_tempvideo/{userId}/recording.webm
                 # This is mounted to /recordings in the manager container (read-only access)
-                user_id = metadata.get("userId") or metadata.get("user_id")
+                # meeting-bot uses `userId` for its temp-video folder.
+                # Over time we've accumulated multiple metadata conventions
+                # (`userId`, `USER_ID`, `user_id`, etc.) across controller/manager.
+                # Be permissive here so a casing mismatch doesn't prevent us
+                # from locating the recording.
+                user_id = (
+                    metadata.get("userId")
+                    or metadata.get("USER_ID")
+                    or metadata.get("user_id")
+                    or metadata.get("USERID")
+                    or metadata.get("fs_user_id")
+                    or metadata.get("FS_USER_ID")
+                )
+
+                # Normalize so "   " doesn't slip through as a valid id.
+                if isinstance(user_id, str):
+                    user_id = user_id.strip()
+
                 if not user_id:
                     logger.error(
                         "❌ No userId found in metadata - cannot locate recording"
                     )
-                    logger.debug(f"Available metadata keys: {list(metadata.keys())}")
+                    candidate_keys = [
+                        "userId",
+                        "USER_ID",
+                        "user_id",
+                        "USERID",
+                        "fs_user_id",
+                        "FS_USER_ID",
+                    ]
+                    logger.debug(
+                        "UserId candidate values: %s",
+                        {k: metadata.get(k) for k in candidate_keys if k in metadata},
+                    )
+                    logger.debug(
+                        "Available metadata keys: %s",
+                        list(metadata.keys()),
+                    )
+                    logger.debug(
+                        "Metadata preview (redacted): %s",
+                        {
+                            k: ("***" if "token" in k.lower() else metadata.get(k))
+                            for k in sorted(metadata.keys())
+                        },
+                    )
                     return None
 
                 logger.info(f"Looking for recording in directory for userId: {user_id}")
@@ -372,11 +420,8 @@ class MeetingMonitor:
                     )
                     return None
 
-                if not recording_files:
-                    logger.error(
-                        f"❌ No .webm recording files found in {recording_dir}"
-                    )
-                    return None
+                # We break out of the loop on first match, so reaching here
+                # implies we found >= 1 file.
 
                 if len(recording_files) > 1:
                     logger.warning(
@@ -427,6 +472,8 @@ class MeetingMonitor:
             True if shutdown request was successful, False otherwise
         """
         try:
+            import requests  # type: ignore
+
             endpoint = f"{self.api_base_url}/shutdown"
 
             logger.info("Triggering meeting-bot shutdown...")
