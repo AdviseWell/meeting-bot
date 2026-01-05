@@ -26,10 +26,13 @@ import sys
 import time
 import socket
 import logging
+import hashlib
+from urllib.parse import urlsplit, urlunsplit
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, List, Optional
 
 from google.cloud import firestore, pubsub_v1
+from google.cloud import storage
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 import json
@@ -187,6 +190,10 @@ class MeetingController:
         self.db = firestore.Client(
             project=self.project_id, database=self.firestore_database
         )
+
+        # Initialize GCS client (used for post-processing fan-out copies).
+        self.gcs_client = storage.Client(project=self.project_id)
+        self.gcs_bucket_client = self.gcs_client.bucket(self.gcs_bucket)
 
         # Initialize Kubernetes client
         try:
@@ -712,6 +719,459 @@ class MeetingController:
         )
         return results
 
+    # --- Meeting session dedupe (org + meeting_url) ---
+    def _normalize_meeting_url(self, url: str) -> str:
+        """Normalize meeting URLs so equivalent invites hash to the same session.
+
+        Keep this intentionally conservative: strip whitespace, drop fragments,
+        and remove common tracking query params.
+        """
+
+        raw = (url or "").strip()
+        if not raw:
+            return ""
+
+        parts = urlsplit(raw)
+
+        # Drop fragment.
+        scheme = (parts.scheme or "https").lower()
+        netloc = parts.netloc.lower()
+        path = parts.path.rstrip("/")
+
+        # Filter query params (Teams/Zoom links often have tracking params).
+        # Keep provider-specific critical params if any are needed later.
+        filtered_query_items: List[str] = []
+        if parts.query:
+            for kv in parts.query.split("&"):
+                k = kv.split("=", 1)[0].lower()
+                if k in {
+                    "utm_source",
+                    "utm_medium",
+                    "utm_campaign",
+                    "utm_term",
+                    "utm_content",
+                }:
+                    continue
+                if k in {"fbclid", "gclid"}:
+                    continue
+                filtered_query_items.append(kv)
+
+        normalized_query = "&".join(filtered_query_items)
+        return urlunsplit((scheme, netloc, path, normalized_query, ""))
+
+    def _meeting_session_id(self, *, org_id: str, meeting_url: str) -> str:
+        normalized = self._normalize_meeting_url(meeting_url)
+        base = f"{(org_id or '').strip()}:{normalized}".encode("utf-8")
+        return hashlib.sha256(base).hexdigest()
+
+    def _meeting_session_ref(
+        self, *, org_id: str, session_id: str
+    ) -> firestore.DocumentReference:
+        """Return the Firestore ref for a meeting session.
+
+        Sessions are namespaced per org to avoid cross-org collisions and to keep
+        session lifecycle state isolated.
+        """
+
+        return (
+            self.db.collection("organizations")
+            .document(str(org_id))
+            .collection("meeting_sessions")
+            .document(str(session_id))
+        )
+
+    def _try_create_or_update_session_for_meeting(
+        self,
+        meeting_doc: firestore.DocumentSnapshot,
+    ) -> Optional[str]:
+        """Ensure a meeting_session exists and register the meeting's user as a subscriber.
+
+        This is the key behavior that makes "one bot per org+meeting" possible.
+
+        Returns:
+            session_id (sha256 hex) if session/subscription created/updated.
+        """
+
+        meeting_data = meeting_doc.to_dict() or {}
+        meeting_ref = meeting_doc.reference
+
+        meeting_url = (
+            meeting_data.get("meeting_url")
+            or meeting_data.get("meetingUrl")
+            or meeting_data.get("join_url")
+        )
+        if not meeting_url:
+            return None
+
+        org_id = (
+            meeting_data.get("organization_id")
+            or meeting_data.get("organizationId")
+            or meeting_data.get("teamId")
+            or meeting_data.get("team_id")
+            or ""
+        )
+        user_id = meeting_data.get("user_id") or meeting_data.get("userId") or ""
+        if not org_id:
+            # Without org we can't safely dedupe.
+            return None
+        if not user_id:
+            # Without user we can't subscribe/fan-out.
+            return None
+
+        session_id = self._meeting_session_id(
+            org_id=org_id, meeting_url=str(meeting_url)
+        )
+        session_ref = self._meeting_session_ref(org_id=org_id, session_id=session_id)
+        subscriber_ref = session_ref.collection("subscribers").document(str(user_id))
+
+        now = datetime.now(timezone.utc)
+
+        transaction = self.db.transaction()
+
+        @firestore.transactional
+        def _txn(txn: firestore.Transaction) -> Optional[str]:
+            fresh_meeting = meeting_ref.get(transaction=txn)
+            if not fresh_meeting.exists:
+                return None
+
+            fresh_data = fresh_meeting.to_dict() or {}
+            # Re-read fields inside txn.
+            fresh_meeting_url = (
+                fresh_data.get("meeting_url")
+                or fresh_data.get("meetingUrl")
+                or fresh_data.get("join_url")
+            )
+            if not fresh_meeting_url:
+                return None
+
+            # Create session doc if missing.
+            sess_snap = session_ref.get(transaction=txn)
+            if not sess_snap.exists:
+                canonical_gcs_path = f"recordings/sessions/{session_id}"
+                txn.set(
+                    session_ref,
+                    {
+                        "status": "queued",
+                        "org_id": org_id,
+                        "meeting_url": str(fresh_meeting_url),
+                        "canonical_gcs_path": canonical_gcs_path,
+                        "created_at": now,
+                        "updated_at": now,
+                    },
+                )
+            else:
+                # Keep meeting_url up-to-date if it changes (best effort).
+                txn.update(session_ref, {"updated_at": now})
+
+            # Ensure subscriber.
+            sub_snap = subscriber_ref.get(transaction=txn)
+            if not sub_snap.exists:
+                txn.set(
+                    subscriber_ref,
+                    {
+                        "user_id": str(user_id),
+                        # Where copies should land:
+                        "fs_meeting_id": meeting_doc.id,
+                        "status": "requested",
+                        "requested_at": now,
+                        "updated_at": now,
+                    },
+                )
+            else:
+                txn.update(subscriber_ref, {"updated_at": now})
+
+            # Link meeting to session (handy for debugging/UI).
+            txn.update(
+                meeting_ref,
+                {
+                    "meeting_session_id": session_id,
+                    "session_status": "queued",
+                    "session_enqueued_at": now,
+                },
+            )
+
+            return session_id
+
+        try:
+            return _txn(transaction)
+        except Exception as e:
+            logger.error(
+                "Failed to create/update meeting session for meeting %s: %s",
+                meeting_doc.id,
+                e,
+                exc_info=True,
+            )
+            return None
+
+    def _query_queued_meeting_sessions(self) -> List[firestore.DocumentSnapshot]:
+        # Query across all orgs.
+        q = (
+            self.db.collection_group("meeting_sessions")
+            .where(field_path="status", op_string="==", value="queued")
+            .limit(self.max_claim_per_poll)
+        )
+        results = list(q.stream())
+        logger.debug(
+            "Query meeting_sessions where status='queued': found %d docs", len(results)
+        )
+        return results
+
+    def _query_completed_sessions_needing_fanout(
+        self,
+    ) -> List[firestore.DocumentSnapshot]:
+        """Find completed sessions where fan-out hasn't succeeded yet."""
+
+        q = (
+            self.db.collection_group("meeting_sessions")
+            .where(field_path="status", op_string="==", value="complete")
+            .limit(self.max_claim_per_poll)
+        )
+        results = list(q.stream())
+
+        # Firestore has limited support for != queries without indexes; filter in memory.
+        pending: List[firestore.DocumentSnapshot] = []
+        for snap in results:
+            data = snap.to_dict() or {}
+            if data.get("fanout_status") != "complete":
+                pending.append(snap)
+
+        logger.debug(
+            "Query meeting_sessions status='complete' (fanout pending): found %d docs",
+            len(pending),
+        )
+        return pending
+
+    def _try_claim_meeting_session(
+        self, session_ref: firestore.DocumentReference
+    ) -> bool:
+        claim_expires_at_field = "claim_expires_at"
+        claimed_by_field = "claimed_by"
+        claimed_at_field = "claimed_at"
+        status_field = "status"
+        queued_value = "queued"
+        processing_value = "processing"
+
+        controller_id = (
+            os.getenv("CONTROLLER_ID") or os.getenv("HOSTNAME") or "controller"
+        )
+        now = datetime.now(timezone.utc)
+        expires = datetime.fromtimestamp(
+            now.timestamp() + self.claim_ttl_seconds, tz=timezone.utc
+        )
+
+        transaction = self.db.transaction()
+
+        @firestore.transactional
+        def _txn(txn: firestore.Transaction) -> bool:
+            snap = session_ref.get(transaction=txn)
+            if not snap.exists:
+                return False
+
+            data = snap.to_dict() or {}
+            if data.get(status_field) != queued_value:
+                return False
+
+            existing_exp = data.get(claim_expires_at_field)
+            if existing_exp is not None:
+                try:
+                    exp_dt = (
+                        existing_exp.replace(tzinfo=timezone.utc)
+                        if getattr(existing_exp, "tzinfo", None) is None
+                        else existing_exp
+                    )
+                except Exception:
+                    exp_dt = None
+                if exp_dt and exp_dt > now:
+                    return False
+
+            txn.update(
+                session_ref,
+                {
+                    claimed_by_field: controller_id,
+                    claimed_at_field: now,
+                    claim_expires_at_field: expires,
+                    status_field: processing_value,
+                    "updated_at": now,
+                },
+            )
+            return True
+
+        return bool(_txn(transaction))
+
+    def _mark_meeting_session_done(
+        self, session_ref: firestore.DocumentReference, ok: bool
+    ) -> None:
+        session_ref.update(
+            {
+                "status": "complete" if ok else "failed",
+                "processed_at": datetime.now(timezone.utc),
+                "updated_at": datetime.now(timezone.utc),
+            }
+        )
+
+    def _list_gcs_prefix(self, prefix: str) -> List[str]:
+        """List object names under a prefix."""
+        clean_prefix = (prefix or "").lstrip("/")
+        blobs = self.gcs_client.list_blobs(self.gcs_bucket, prefix=clean_prefix)
+        return [b.name for b in blobs]
+
+    def _gcs_blob_exists(self, name: str) -> bool:
+        blob = self.gcs_bucket_client.blob(name.lstrip("/"))
+        return bool(blob.exists())
+
+    def _copy_gcs_blob(self, *, src: str, dst: str) -> None:
+        src_name = src.lstrip("/")
+        dst_name = dst.lstrip("/")
+        src_blob = self.gcs_bucket_client.blob(src_name)
+        self.gcs_bucket_client.copy_blob(
+            src_blob,
+            self.gcs_bucket_client,
+            new_name=dst_name,
+        )
+
+    def _fanout_meeting_session_artifacts(
+        self, *, org_id: str, session_id: str
+    ) -> None:
+        """Copy canonical session artifacts into each subscriber's per-user prefix.
+
+        This is best-effort and idempotent: it skips objects that already exist.
+        """
+
+        try:
+            session_ref = self._meeting_session_ref(
+                org_id=org_id, session_id=session_id
+            )
+            session_snap = session_ref.get()
+            if not session_snap.exists:
+                return
+
+            session_data = session_snap.to_dict() or {}
+            canonical_prefix = (
+                session_data.get("canonical_gcs_path")
+                or f"recordings/sessions/{session_id}"
+            ).rstrip("/")
+
+            # List canonical objects.
+            src_objects = self._list_gcs_prefix(canonical_prefix + "/")
+            if not src_objects:
+                logger.info(
+                    "No canonical artifacts found yet for session %s (%s)",
+                    session_id,
+                    canonical_prefix,
+                )
+                return
+
+            subs = list(session_ref.collection("subscribers").stream())
+            for sub in subs:
+                sub_ref = sub.reference
+                sub_data = sub.to_dict() or {}
+                user_id = sub_data.get("user_id") or sub.id
+                fs_meeting_id = sub_data.get("fs_meeting_id")
+                if not user_id or not fs_meeting_id:
+                    continue
+
+                dst_prefix = f"recordings/{user_id}/{fs_meeting_id}".rstrip("/")
+
+                copied = 0
+                skipped = 0
+
+                for src in src_objects:
+                    if not src.startswith(canonical_prefix + "/"):
+                        continue
+                    rel = src[len(canonical_prefix) + 1 :]
+                    dst = f"{dst_prefix}/{rel}"
+                    if self._gcs_blob_exists(dst):
+                        skipped += 1
+                        continue
+                    self._copy_gcs_blob(src=src, dst=dst)
+                    copied += 1
+
+                sub_ref.set(
+                    {
+                        "status": "copied",
+                        "copied_at": datetime.now(timezone.utc),
+                        "copied_count": copied,
+                        "skipped_count": skipped,
+                        "total_count": len(src_objects),
+                        "updated_at": datetime.now(timezone.utc),
+                    },
+                    merge=True,
+                )
+
+            session_ref.set(
+                {
+                    "fanout_status": "complete",
+                    "fanout_completed_at": datetime.now(timezone.utc),
+                    "updated_at": datetime.now(timezone.utc),
+                },
+                merge=True,
+            )
+        except Exception as e:
+            logger.error(
+                "Fan-out failed for session %s: %s",
+                session_id,
+                e,
+                exc_info=True,
+            )
+            try:
+                self._meeting_session_ref(org_id=org_id, session_id=session_id).set(
+                    {
+                        "fanout_status": "failed",
+                        "fanout_last_error": str(e),
+                        "updated_at": datetime.now(timezone.utc),
+                    },
+                    merge=True,
+                )
+            except Exception:
+                pass
+
+    def _build_job_payload_from_meeting_session(
+        self, session_doc: firestore.DocumentSnapshot
+    ) -> Dict[str, Any]:
+        data = session_doc.to_dict() or {}
+        meeting_url = data.get("meeting_url")
+        if not meeting_url:
+            raise ValueError("meeting_session missing meeting_url")
+
+        org_id = data.get("org_id") or ""
+        canonical_gcs_path = (
+            data.get("canonical_gcs_path") or f"recordings/sessions/{session_doc.id}"
+        )
+
+        now = datetime.now(timezone.utc)
+
+        payload: Dict[str, Any] = {
+            "meeting_url": meeting_url,
+            # meeting_id is a best-effort identifier for logs/meeting-bot API.
+            "meeting_id": session_doc.id,
+            "fs_meeting_id": session_doc.id,
+            "gcs_path": canonical_gcs_path,
+            "teamId": org_id or session_doc.id,
+            "timezone": data.get("timezone") or "UTC",
+            # Manager expects user_id; provide a stable synthetic id.
+            "user_id": f"session:{session_doc.id}",
+            "initiated_at": data.get("initiated_at")
+            or (now.isoformat().replace("+00:00", "Z")),
+            "auto_joined": True,
+            "meeting_session_id": session_doc.id,
+        }
+
+        # Determine bot display name from org doc (same behavior as bot_instances path).
+        bot_display_name = "AdviseWell"
+        if org_id and getattr(self, "db", None) is not None:
+            try:
+                org_snap = self.db.collection("organizations").document(org_id).get()
+                if org_snap.exists:
+                    org_data = org_snap.to_dict() or {}
+                    candidate = org_data.get("meeting_bot_name")
+                    if isinstance(candidate, str) and candidate.strip():
+                        bot_display_name = candidate.strip()
+            except Exception:
+                pass
+        payload["name"] = bot_display_name
+
+        return payload
+
     def _query_meetings_needing_bots(self) -> List[firestore.DocumentSnapshot]:
         """Discover meetings that need a bot instance created.
 
@@ -1141,15 +1601,17 @@ class MeetingController:
                     logger.debug(f"Skipping {doc.id}: not a Teams meeting")
                     continue
 
-                # Create bot instance
-                logger.info(f"Enqueuing bot for meeting {doc.id}")
-                bot_id = self._try_create_bot_instance_for_meeting(doc)
-                if bot_id:
-                    logger.info(f"Created bot_instance {bot_id} for meeting {doc.id}")
-                else:
-                    logger.warning(
-                        f"Failed to create bot_instance for meeting {doc.id}"
+                # Create/update meeting session (dedupe across users in same org).
+                logger.info(f"Enqueuing session for meeting {doc.id}")
+                session_id = self._try_create_or_update_session_for_meeting(doc)
+                if session_id:
+                    logger.info(
+                        "Meeting %s subscribed to session %s",
+                        doc.id,
+                        session_id,
                     )
+                else:
+                    logger.warning("Failed to enqueue meeting session for %s", doc.id)
         except Exception as e:
             logger.error(f"Error scanning upcoming meetings: {e}", exc_info=True)
 
@@ -1274,40 +1736,54 @@ class MeetingController:
                 # Step 0: discover meetings starting soon (2min window)
                 self._scan_upcoming_meetings()
 
-                # Step 1: process queued bot instances.
-                bot_docs = self._query_queued_bot_instances()
-                if not bot_docs:
+                # Step 1: process queued meeting sessions (org+meeting_url dedupe).
+                session_docs = self._query_queued_meeting_sessions()
+                if not session_docs:
                     logger.info(
-                        "No queued meetings found. Waiting %ss...",
+                        "No queued sessions found. Waiting %ss...",
                         self.poll_interval,
                     )
                     time.sleep(self.poll_interval)
                     continue
 
-                logger.info("Found %s queued bot instance(s)", len(bot_docs))
+                logger.info("Found %s queued meeting session(s)", len(session_docs))
 
-                for bot_doc in bot_docs:
-                    bot_ref = bot_doc.reference
+                for session_doc in session_docs:
+                    session_ref = session_doc.reference
                     try:
-                        if not self._try_claim_bot_instance(bot_ref):
+                        if not self._try_claim_meeting_session(session_ref):
                             continue
 
-                        payload = self._build_job_payload_from_firestore(bot_doc)
-                        ok = self.create_manager_job(payload, bot_doc.id)
-                        # Mark done/failed based on job creation.
-                        self._mark_bot_instance_done(bot_ref, ok=ok)
+                        payload = self._build_job_payload_from_meeting_session(
+                            session_doc
+                        )
+                        ok = self.create_manager_job(payload, session_doc.id)
+                        if not ok:
+                            # Only mark failed if job creation failed.
+                            # Manager is responsible for marking complete after artifacts upload.
+                            self._mark_meeting_session_done(session_ref, ok=False)
                     except Exception as e:
                         logger.error(
-                            "Failed processing bot instance %s: %s",
-                            bot_doc.id,
+                            "Failed processing meeting session %s: %s",
+                            session_doc.id,
                             e,
                             exc_info=True,
                         )
                         try:
-                            self._mark_bot_instance_done(bot_ref, ok=False)
+                            self._mark_meeting_session_done(session_ref, ok=False)
                         except Exception:
-                            # Best-effort only.
                             pass
+
+                # Step 2: fan-out completed sessions.
+                completed = self._query_completed_sessions_needing_fanout()
+                for sess in completed:
+                    data = sess.to_dict() or {}
+                    org_id = data.get("org_id") or ""
+                    if not org_id:
+                        continue
+                    self._fanout_meeting_session_artifacts(
+                        org_id=org_id, session_id=sess.id
+                    )
 
             except KeyboardInterrupt:
                 logger.info("👋 Received shutdown signal")

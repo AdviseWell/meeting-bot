@@ -23,6 +23,9 @@ import logging
 from typing import Dict
 import tempfile
 from pathlib import Path
+from datetime import datetime, timezone
+
+from google.cloud import firestore
 
 from meeting_monitor import MeetingMonitor
 from storage_client import StorageClient, FirestoreClient
@@ -109,24 +112,45 @@ class MeetingManager:
             or os.environ.get("FS_USER_ID")
             or os.environ.get("fs_user_id")
         )
+        self.team_id = (
+            os.environ.get("teamId")
+            or os.environ.get("TEAMID")
+            or os.environ.get("team_id")
+            or os.environ.get("TEAM_ID")
+            or ""
+        )
         self.gcs_path = os.environ.get("GCS_PATH")
 
-        # Storage layout is always:
+        # Storage layout is typically:
         #   recordings/<user_firebase_document_id>/<meeting_firebase_document_id>/...
+        #
+        # However, for session-dedupe runs we intentionally allow a canonical
+        # shared prefix:
+        #   recordings/sessions/<meeting_session_id>/...
         #
         # For backward compatibility we accept legacy values, but we normalize
         # into the canonical prefix as early as possible.
-        storage_meeting_id = self.fs_meeting_id or self.meeting_id
-        if storage_meeting_id and self.user_id:
-            self.gcs_path = f"recordings/{self.user_id}/{storage_meeting_id}"
-        elif storage_meeting_id:
-            # Backward-compatible prefix (meeting only) when user id is unknown.
-            self.gcs_path = f"recordings/{storage_meeting_id}"
-        elif self.gcs_path:
-            # Last-resort fallback if FS_MEETING_ID/MEETING_ID are missing.
-            # Keep existing behavior: accept bare ids.
-            if not self.gcs_path.startswith("recordings/") and "/" not in self.gcs_path:
-                self.gcs_path = f"recordings/{self.gcs_path}"
+        explicit_gcs_path = (self.gcs_path or "").strip()
+        is_canonical_session_path = explicit_gcs_path.startswith("recordings/sessions/")
+
+        if is_canonical_session_path:
+            # Respect explicit canonical session path as-is.
+            self.gcs_path = explicit_gcs_path
+        else:
+            storage_meeting_id = self.fs_meeting_id or self.meeting_id
+            if storage_meeting_id and self.user_id:
+                self.gcs_path = f"recordings/{self.user_id}/{storage_meeting_id}"
+            elif storage_meeting_id:
+                # Backward-compatible prefix (meeting only) when user id is unknown.
+                self.gcs_path = f"recordings/{storage_meeting_id}"
+            elif self.gcs_path:
+                # Last-resort fallback if FS_MEETING_ID/MEETING_ID are missing.
+                # Keep existing behavior: accept bare ids.
+                if (
+                    not self.gcs_path.startswith("recordings/")
+                    and "/" not in self.gcs_path
+                ):
+                    self.gcs_path = f"recordings/{self.gcs_path}"
 
         # Optional meeting metadata
         self.metadata = load_meeting_metadata(
@@ -692,11 +716,87 @@ class MeetingManager:
                     os.path.join("/scratch", "meetings", self.meeting_id)
                 )
 
+            # Session-dedupe support: mark the meeting session complete and
+            # publish an artifact manifest so the controller can fan-out copies.
+            try:
+                self._mark_session_complete(
+                    ok=True,
+                    artifacts={
+                        "recording_webm": webm_gcs_path,
+                        "recording_mp4": (
+                            f"{self.gcs_path}/recording.mp4" if mp4_path else None
+                        ),
+                        "recording_m4a": audio_gcs_path,
+                        "transcript_txt": (
+                            f"{self.gcs_path}/transcript.txt"
+                            if transcript_txt_uploaded
+                            else None
+                        ),
+                        "transcript_json": (
+                            f"{self.gcs_path}/transcript.json"
+                            if transcript_json_uploaded
+                            else None
+                        ),
+                        "transcript_md": (
+                            f"{self.gcs_path}/transcript.md"
+                            if transcript_md_uploaded
+                            else None
+                        ),
+                        "transcript_vtt": (
+                            f"{self.gcs_path}/transcript.vtt"
+                            if transcript_vtt_uploaded
+                            else None
+                        ),
+                    },
+                )
+            except Exception as sess_err:
+                logger.debug("Session completion update failed (ignored): %s", sess_err)
+
             return True
 
         except Exception as e:
             logger.exception(f"Error processing meeting: {e}")
+            try:
+                self._mark_session_complete(ok=False, artifacts=None)
+            except Exception:
+                pass
             return False
+
+    def _mark_session_complete(self, *, ok: bool, artifacts: dict | None) -> None:
+        """Best-effort: update per-org session state when running in session mode."""
+
+        if not (self.gcs_path or "").startswith("recordings/sessions/"):
+            return
+
+        session_id = self.fs_meeting_id or self.meeting_id
+        if not session_id:
+            return
+
+        org_id = self.team_id or ""
+        if not org_id:
+            return
+
+        # Use a lightweight Firestore client directly; the existing
+        # FirestoreClient in storage_client.py is hard-coded to a specific org.
+        db = firestore.Client(database=self.firestore_database)
+        ref = (
+            db.collection("organizations")
+            .document(str(org_id))
+            .collection("meeting_sessions")
+            .document(str(session_id))
+        )
+
+        now = datetime.now(timezone.utc)
+        payload: dict = {
+            "status": "complete" if ok else "failed",
+            "processed_at": now,
+            "updated_at": now,
+        }
+
+        if artifacts is not None:
+            payload["artifacts"] = {k: v for k, v in artifacts.items() if v}
+
+        ref.set(payload, merge=True)
 
     def run(self):
         """Main run - process the meeting job"""

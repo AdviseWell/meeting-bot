@@ -61,6 +61,7 @@ def _import_controller():
         "google",
         "google.cloud",
         "google.cloud.firestore",
+        "google.cloud.storage",
         "google.cloud.pubsub_v1",
         "google.cloud.pubsub_v1.subscriber",
         "google.cloud.pubsub_v1.subscriber.message",

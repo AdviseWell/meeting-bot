@@ -1,30 +1,24 @@
-class _FakeRef:
-    def __init__(self, doc_id: str):
-        self.id = doc_id
+from __future__ import annotations
 
 
 class _FakeDoc:
     def __init__(self, doc_id: str, data: dict):
         self.id = doc_id
         self._data = data
-        self.reference = _FakeRef(doc_id)
+        self.reference = None
 
     def to_dict(self):
         return self._data
 
 
 def _import_controller():
-    """Import `controller/main.py` directly.
-
-    These tests should not accidentally import `manager/main.py` (root-level
-    `main.py` resolution can vary by cwd), and should avoid pulling heavy cloud
-    dependencies.
-    """
-
-    import importlib.util
+    # Import controller/main.py directly with dependency stubs.
     import sys
     import types
     from pathlib import Path
+    import importlib.util
+
+    controller_dir = Path(__file__).resolve().parent
 
     for mod in [
         "google",
@@ -44,11 +38,15 @@ def _import_controller():
     k8s_rest = sys.modules["kubernetes.client.rest"]
     k8s_rest.ApiException = Exception  # type: ignore[attr-defined]
 
+    # Types referenced in annotations.
     firestore_mod = sys.modules["google.cloud.firestore"]
     firestore_mod.DocumentSnapshot = object  # type: ignore[attr-defined]
     firestore_mod.DocumentReference = object  # type: ignore[attr-defined]
     firestore_mod.Transaction = object  # type: ignore[attr-defined]
-    firestore_mod.transactional = lambda f: f  # type: ignore[attr-defined]
+    # Provide decorator used in controller code.
+    transactional = lambda f: f  # noqa: E731
+    firestore_mod = sys.modules["google.cloud.firestore"]
+    firestore_mod.transactional = transactional  # type: ignore[attr-defined]
 
     sys.modules["google.cloud.pubsub_v1"].subscriber = sys.modules[
         "google.cloud.pubsub_v1.subscriber"
@@ -60,7 +58,6 @@ def _import_controller():
         object  # type: ignore[attr-defined]
     )
 
-    controller_dir = Path(__file__).resolve().parent
     spec = importlib.util.spec_from_file_location(
         "controller_main", controller_dir / "main.py"
     )
@@ -70,7 +67,44 @@ def _import_controller():
     return mod.MeetingController
 
 
-def test_try_create_bot_instance_skips_when_meeting_has_bot(monkeypatch):
+def test_normalize_meeting_url_strips_tracking_params():
+    MeetingController = _import_controller()
+    c = MeetingController.__new__(MeetingController)
+
+    url = "https://teams.microsoft.com/l/meeting-join/abc"
+    url += "?utm_source=x&foo=bar#fragment"
+    norm = c._normalize_meeting_url(url)  # noqa: SLF001
+    assert norm == "https://teams.microsoft.com/l/meeting-join/abc?foo=bar"
+
+
+def test_session_id_deterministic_for_equivalent_urls():
+    MeetingController = _import_controller()
+    c = MeetingController.__new__(MeetingController)
+
+    org = "org1"
+    a = "https://teams.microsoft.com/l/meeting-join/abc/?utm_source=x"
+    b = "https://TEAMS.microsoft.com/l/meeting-join/abc"
+    left = c._meeting_session_id(org_id=org, meeting_url=a)
+    right = c._meeting_session_id(org_id=org, meeting_url=b)
+    assert left == right
+
+
+def test_session_id_differs_across_orgs_for_same_url():
+    MeetingController = _import_controller()
+    c = MeetingController.__new__(MeetingController)
+
+    url = "https://teams.microsoft.com/l/meeting-join/abc"
+    org_a = "orgA"
+    org_b = "orgB"
+
+    a = c._meeting_session_id(org_id=org_a, meeting_url=url)
+    b = c._meeting_session_id(org_id=org_b, meeting_url=url)
+    assert a != b
+
+
+def test_build_payload_from_meeting_session_uses_canonical_gcs_path(
+    monkeypatch,
+):
     MeetingController = _import_controller()
 
     monkeypatch.setenv("GCP_PROJECT_ID", "demo")
@@ -79,40 +113,17 @@ def test_try_create_bot_instance_skips_when_meeting_has_bot(monkeypatch):
     monkeypatch.setenv("MEETING_BOT_IMAGE", "bot")
 
     c = MeetingController.__new__(MeetingController)
-    c.meeting_bot_instance_field = "bot_instance_id"
-
-    meeting = _FakeDoc(
-        "meet1",
+    doc = _FakeDoc(
+        "sess123",
         {
             "meeting_url": "https://teams.microsoft.com/l/meeting-join/...",
-            "status": "scheduled",
-            "bot_instance_id": "existing",
+            "org_id": "org1",
+            "canonical_gcs_path": "recordings/sessions/sess123",
+            "status": "queued",
         },
     )
 
-    # Method should return existing bot id without trying to touch Firestore.
-    out = c._try_create_bot_instance_for_meeting(meeting)  # noqa: SLF001
-    assert out == "existing"
-
-
-def test_try_create_bot_instance_skips_when_no_meeting_url(monkeypatch):
-    MeetingController = _import_controller()
-
-    monkeypatch.setenv("GCP_PROJECT_ID", "demo")
-    monkeypatch.setenv("GCS_BUCKET", "bucket")
-    monkeypatch.setenv("MANAGER_IMAGE", "manager")
-    monkeypatch.setenv("MEETING_BOT_IMAGE", "bot")
-
-    c = MeetingController.__new__(MeetingController)
-    c.meeting_bot_instance_field = "bot_instance_id"
-
-    meeting = _FakeDoc(
-        "meet2",
-        {
-            "status": "scheduled",
-            # No meeting_url
-        },
-    )
-
-    out = c._try_create_bot_instance_for_meeting(meeting)  # noqa: SLF001
-    assert out is None
+    payload = c._build_job_payload_from_meeting_session(doc)  # noqa: SLF001
+    assert payload["gcs_path"] == "recordings/sessions/sess123"
+    assert payload["fs_meeting_id"] == "sess123"
+    assert payload["user_id"].startswith("session:")
