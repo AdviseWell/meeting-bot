@@ -250,19 +250,6 @@ class MeetingController:
             meeting_id = message_data.get("meeting_id", message_id)
             meeting_url = message_data.get("meeting_url")
 
-            # Session-mode jobs are canonical/shared (one job per meeting session).
-            # They intentionally do NOT run under a specific user id.
-            meeting_session_id = (
-                message_data.get("meeting_session_id")
-                or message_data.get("MEETING_SESSION_ID")
-                or ""
-            )
-            msg_gcs_path = message_data.get("gcs_path") or message_data.get("GCS_PATH")
-            is_session_job = bool(meeting_session_id) or (
-                isinstance(msg_gcs_path, str)
-                and msg_gcs_path.strip().startswith("recordings/sessions/")
-            )
-
             # Storage layout is always:
             #   recordings/<user_firebase_document_id>/<meeting_firebase_document_id>/<files>
             # The manager container will append fixed filenames.
@@ -288,7 +275,7 @@ class MeetingController:
             if isinstance(user_doc_id, str):
                 user_doc_id = user_doc_id.strip()
 
-            if not user_doc_id and not is_session_job:
+            if not user_doc_id:
                 logger.error(
                     "Invalid message data - missing user id; refusing to create job. "
                     "Expected one of: user_id/USER_ID/fs_user_id/FS_USER_ID/creator_user_id. "
@@ -297,14 +284,8 @@ class MeetingController:
                 )
                 return False
 
-            # Compute the canonical storage prefix.
-            if is_session_job:
-                # Prefer explicit gcs_path from payload; otherwise derive from session id.
-                gcs_path = (
-                    msg_gcs_path.strip() if isinstance(msg_gcs_path, str) else ""
-                ) or f"recordings/sessions/{meeting_session_id or meeting_id}"
-            else:
-                gcs_path = f"recordings/{user_doc_id}/{meeting_doc_id}"
+            # All recordings go to recordings/{user_id}/{meeting_id}
+            gcs_path = f"recordings/{user_doc_id}/{meeting_doc_id}"
 
             if not meeting_url:
                 logger.error(
@@ -325,7 +306,6 @@ class MeetingController:
                 client.V1EnvVar(name="MEETING_URL", value=meeting_url),
                 client.V1EnvVar(name="MEETING_ID", value=meeting_id),
                 client.V1EnvVar(name="FS_MEETING_ID", value=str(meeting_doc_id)),
-                # For session-mode jobs, USER_ID may be blank by design.
                 client.V1EnvVar(name="USER_ID", value=str(user_doc_id)),
                 client.V1EnvVar(name="GCS_PATH", value=gcs_path),
                 client.V1EnvVar(name="GCS_BUCKET", value=self.gcs_bucket),
@@ -884,14 +864,12 @@ class MeetingController:
             # Now perform all writes.
             # Create session doc if missing.
             if not sess_snap.exists:
-                canonical_gcs_path = f"recordings/sessions/{session_id}"
                 txn.set(
                     session_ref,
                     {
                         "status": "queued",
                         "org_id": org_id,
                         "meeting_url": str(fresh_meeting_url),
-                        "canonical_gcs_path": canonical_gcs_path,
                         "created_at": now,
                         "updated_at": now,
                     },
@@ -908,6 +886,8 @@ class MeetingController:
                         "user_id": str(user_id),
                         # Where copies should land:
                         "fs_meeting_id": meeting_doc.id,
+                        # Store the meeting reference path for fanout updates
+                        "meeting_path": meeting_ref.path,
                         "status": "requested",
                         "requested_at": now,
                         "updated_at": now,
@@ -1071,9 +1051,10 @@ class MeetingController:
     def _fanout_meeting_session_artifacts(
         self, *, org_id: str, session_id: str
     ) -> None:
-        """Copy canonical session artifacts into each subscriber's per-user prefix.
+        """Copy session artifacts from the first subscriber to additional subscribers.
 
         This is best-effort and idempotent: it skips objects that already exist.
+        The first subscriber's files are the canonical source.
         """
 
         try:
@@ -1084,27 +1065,42 @@ class MeetingController:
             if not session_snap.exists:
                 return
 
-            session_data = session_snap.to_dict() or {}
-            canonical_prefix = (
-                session_data.get("canonical_gcs_path")
-                or f"recordings/sessions/{session_id}"
-            ).rstrip("/")
+            # Get all subscribers
+            subs = list(session_ref.collection("subscribers").stream())
+            if len(subs) == 0:
+                logger.info("No subscribers found for session %s", session_id)
+                return
 
-            # List canonical objects.
-            src_objects = self._list_gcs_prefix(canonical_prefix + "/")
-            if not src_objects:
-                logger.info(
-                    "No canonical artifacts found yet for session %s (%s)",
+            # First subscriber is the source
+            first_sub = subs[0]
+            first_sub_data = first_sub.to_dict() or {}
+            source_user_id = first_sub_data.get("user_id") or first_sub.id
+            source_meeting_id = first_sub_data.get("fs_meeting_id")
+
+            if not source_user_id or not source_meeting_id:
+                logger.error(
+                    "First subscriber for session %s missing user_id or fs_meeting_id",
                     session_id,
-                    canonical_prefix,
                 )
                 return
 
-            subs = list(session_ref.collection("subscribers").stream())
+            source_prefix = f"recordings/{source_user_id}/{source_meeting_id}".rstrip(
+                "/"
+            )
 
-            # Try to read transcription text from canonical location (if it exists)
+            # List source objects
+            src_objects = self._list_gcs_prefix(source_prefix + "/")
+            if not src_objects:
+                logger.info(
+                    "No artifacts found yet for session %s (%s)",
+                    session_id,
+                    source_prefix,
+                )
+                return
+
+            # Try to read transcription text from source location (if it exists)
             transcription_text = None
-            transcript_txt_path = f"{canonical_prefix}/transcript.txt"
+            transcript_txt_path = f"{source_prefix}/transcript.txt"
             try:
                 transcript_blob = self.gcs_bucket_client.blob(transcript_txt_path)
                 if transcript_blob.exists():
@@ -1119,23 +1115,63 @@ class MeetingController:
                     "Could not read transcription from %s: %s", transcript_txt_path, e
                 )
 
-            for sub in subs:
+            # Update the first subscriber's meeting with transcription
+            first_meeting_path = first_sub_data.get("meeting_path")
+            if first_meeting_path and transcription_text:
+                try:
+                    meeting_ref = self.db.document(first_meeting_path)
+                    meeting_ref.set(
+                        {
+                            "transcription": transcription_text,
+                            "recording_url": f"gs://{self.gcs_bucket}/{source_prefix}/recording.webm",
+                            "updated_at": datetime.now(timezone.utc),
+                        },
+                        merge=True,
+                    )
+                    logger.debug(
+                        "Updated first subscriber meeting doc %s with transcription",
+                        first_meeting_path,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Failed to update first subscriber meeting document %s: %s",
+                        first_meeting_path,
+                        e,
+                    )
+
+            # Mark first subscriber as complete (no copying needed)
+            first_sub.reference.set(
+                {
+                    "status": "complete",
+                    "updated_at": datetime.now(timezone.utc),
+                },
+                merge=True,
+            )
+
+            # Copy to remaining subscribers (if any)
+            for sub in subs[1:]:
                 sub_ref = sub.reference
                 sub_data = sub.to_dict() or {}
                 user_id = sub_data.get("user_id") or sub.id
                 fs_meeting_id = sub_data.get("fs_meeting_id")
+                meeting_path = sub_data.get("meeting_path")
+
                 if not user_id or not fs_meeting_id:
                     continue
 
                 dst_prefix = f"recordings/{user_id}/{fs_meeting_id}".rstrip("/")
 
+                # Skip if source and dest are the same
+                if dst_prefix == source_prefix:
+                    continue
+
                 copied = 0
                 skipped = 0
 
                 for src in src_objects:
-                    if not src.startswith(canonical_prefix + "/"):
+                    if not src.startswith(source_prefix + "/"):
                         continue
-                    rel = src[len(canonical_prefix) + 1 :]
+                    rel = src[len(source_prefix) + 1 :]
                     dst = f"{dst_prefix}/{rel}"
                     if self._gcs_blob_exists(dst):
                         skipped += 1
@@ -1155,35 +1191,28 @@ class MeetingController:
                     merge=True,
                 )
 
-                # Update the individual meeting document with transcription and file links
-                try:
-                    # Get meeting document reference from subscriber data
-                    # The meeting doc is at: organizations/{org_id}/meetings/{fs_meeting_id}
-                    meeting_ref = (
-                        self.db.collection("organizations")
-                        .document(org_id)
-                        .collection("meetings")
-                        .document(fs_meeting_id)
-                    )
+                # Update the meeting document with transcription and file links
+                if meeting_path:
+                    try:
+                        meeting_ref = self.db.document(meeting_path)
+                        meeting_update = {
+                            "updated_at": datetime.now(timezone.utc),
+                            "recording_url": f"gs://{self.gcs_bucket}/{dst_prefix}/recording.webm",
+                        }
 
-                    meeting_update = {
-                        "updated_at": datetime.now(timezone.utc),
-                        "recording_url": f"gs://{self.gcs_bucket}/{dst_prefix}/recording.webm",
-                    }
+                        # Add transcription if available
+                        if transcription_text:
+                            meeting_update["transcription"] = transcription_text
 
-                    # Add transcription if available
-                    if transcription_text:
-                        meeting_update["transcription"] = transcription_text
-
-                    meeting_ref.set(meeting_update, merge=True)
-                    logger.debug(
-                        "Updated meeting doc %s with transcription and file links",
-                        fs_meeting_id,
-                    )
-                except Exception as e:
-                    logger.warning(
-                        "Failed to update meeting document %s: %s", fs_meeting_id, e
-                    )
+                        meeting_ref.set(meeting_update, merge=True)
+                        logger.debug(
+                            "Updated meeting doc %s with transcription and file links",
+                            meeting_path,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "Failed to update meeting document %s: %s", meeting_path, e
+                        )
 
             session_ref.set(
                 {
@@ -1221,9 +1250,26 @@ class MeetingController:
             raise ValueError("meeting_session missing meeting_url")
 
         org_id = (data.get("org_id") or "").strip()
-        canonical_gcs_path = (
-            data.get("canonical_gcs_path") or f"recordings/sessions/{session_doc.id}"
-        )
+
+        # Get the first subscriber to determine where to write files
+        session_ref = session_doc.reference
+        subscribers = list(session_ref.collection("subscribers").limit(1).stream())
+
+        if not subscribers:
+            raise ValueError(f"meeting_session {session_doc.id} has no subscribers")
+
+        first_sub = subscribers[0]
+        sub_data = first_sub.to_dict() or {}
+        user_id = sub_data.get("user_id") or first_sub.id
+        fs_meeting_id = sub_data.get("fs_meeting_id")
+
+        if not user_id or not fs_meeting_id:
+            raise ValueError(
+                f"meeting_session {session_doc.id} subscriber missing user_id or fs_meeting_id"
+            )
+
+        # Write to the first subscriber's path
+        gcs_path = f"recordings/{user_id}/{fs_meeting_id}"
 
         now = datetime.now(timezone.utc)
 
@@ -1231,7 +1277,9 @@ class MeetingController:
             "meeting_url": meeting_url,
             # meeting_id is a best-effort identifier for logs/meeting-bot API.
             "meeting_id": session_doc.id,
-            "gcs_path": canonical_gcs_path,
+            "gcs_path": gcs_path,
+            "fs_meeting_id": fs_meeting_id,
+            "user_id": user_id,
             "teamId": org_id or session_doc.id,
             "timezone": data.get("timezone") or "UTC",
             "initiated_at": data.get("initiated_at")
