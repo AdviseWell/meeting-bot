@@ -378,7 +378,9 @@ class MediaConverter:
             logger.exception(f"Error during fallback M4A extraction: {e}")
             return False
 
-    def _extract_m4a_without_speechnorm(self, input_path: str, output_path: str) -> bool:
+    def _extract_m4a_without_speechnorm(
+        self, input_path: str, output_path: str
+    ) -> bool:
         """Retry extraction with the same 'fallback' chain but without speechnorm.
 
         This keeps most enhancement while remaining compatible with older

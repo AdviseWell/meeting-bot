@@ -324,7 +324,9 @@ class MeetingMonitor:
                 # This monitor needs to find the local WEBM output regardless of whether
                 # userId is present.
 
-                gcs_path = (metadata.get("gcs_path") or metadata.get("GCS_PATH") or "").strip()
+                gcs_path = (
+                    metadata.get("gcs_path") or metadata.get("GCS_PATH") or ""
+                ).strip()
                 is_session_job = gcs_path.startswith("recordings/sessions/")
                 session_id: Optional[str] = None
                 if is_session_job:
@@ -407,7 +409,9 @@ class MeetingMonitor:
                             os.path.join("/scratch/tempvideo", "sessions", session_id)
                         )
                         candidates.append(
-                            os.path.join("/usr/src/app/dist/_tempvideo", "sessions", session_id)
+                            os.path.join(
+                                "/usr/src/app/dist/_tempvideo", "sessions", session_id
+                            )
                         )
 
                     # 2) Per-user mode (legacy)
@@ -419,6 +423,24 @@ class MeetingMonitor:
                         candidates.append(os.path.join("/scratch/tempvideo", user_id))
                         candidates.append(
                             os.path.join("/usr/src/app/dist/_tempvideo", user_id)
+                        )
+
+                    # 3) Session-mode fallback: when userId is missing, join_payload
+                    # sets it to "AUTO-GENERATED", so the bot writes there.
+                    if is_session_job and not user_id:
+                        candidates.append("/recordings/AUTO-GENERATED")
+                        tempvideo_root = os.environ.get("TEMPVIDEO_DIR")
+                        if tempvideo_root:
+                            candidates.append(
+                                os.path.join(tempvideo_root, "AUTO-GENERATED")
+                            )
+                        candidates.append(
+                            os.path.join("/scratch/tempvideo", "AUTO-GENERATED")
+                        )
+                        candidates.append(
+                            os.path.join(
+                                "/usr/src/app/dist/_tempvideo", "AUTO-GENERATED"
+                            )
                         )
 
                     # Deduplicate while preserving order.
