@@ -279,6 +279,17 @@ class MediaConverter:
                 if "arnndn" in result.stderr or "rnnoise" in result.stderr.lower():
                     logger.warning("RNNoise not available, using fallback filter chain")
                     return self._extract_m4a_fallback(input_path, output_path)
+                # If speechnorm is missing in the ffmpeg build, retry with a
+                # chain that omits it. Some distro ffmpeg builds don't ship
+                # speechnorm.
+                if "No such filter: 'speechnorm'" in result.stderr or (
+                    "no such filter" in result.stderr.lower()
+                    and "speechnorm" in result.stderr.lower()
+                ):
+                    logger.warning(
+                        "ffmpeg filter 'speechnorm' not available; retrying without it"
+                    )
+                    return self._extract_m4a_without_speechnorm(input_path, output_path)
                 else:
                     logger.error(f"M4A extraction failed: {result.stderr}")
                     return False
@@ -349,11 +360,138 @@ class MediaConverter:
                 )
                 return True
             else:
+                # If speechnorm is missing here too, degrade further.
+                if "No such filter: 'speechnorm'" in result.stderr or (
+                    "no such filter" in result.stderr.lower()
+                    and "speechnorm" in result.stderr.lower()
+                ):
+                    logger.warning(
+                        "ffmpeg filter 'speechnorm' not available in fallback; "
+                        "retrying with minimal filter chain"
+                    )
+                    return self._extract_m4a_minimal(input_path, output_path)
+
                 logger.error(f"M4A extraction failed (fallback): {result.stderr}")
                 return False
 
         except Exception as e:
             logger.exception(f"Error during fallback M4A extraction: {e}")
+            return False
+
+    def _extract_m4a_without_speechnorm(self, input_path: str, output_path: str) -> bool:
+        """Retry extraction with the same 'fallback' chain but without speechnorm.
+
+        This keeps most enhancement while remaining compatible with older
+        ffmpeg builds.
+        """
+
+        try:
+            logger.info("Retrying audio extraction without speechnorm")
+
+            audio_filters = (
+                "highpass=f=80,"
+                "lowpass=f=12000,"
+                "equalizer=f=300:width_type=o:width=2:g=3,"
+                "equalizer=f=2000:width_type=o:width=2:g=2,"
+                "afftdn=nf=-25:tn=1,"
+                "compand=attacks=0.1:decays=0.2:points=-80/-80|-50/-40|-30/-20|0/-10"
+            )
+
+            cmd = [
+                "ffmpeg",
+                "-i",
+                input_path,
+                "-vn",
+                "-af",
+                audio_filters,
+                "-c:a",
+                "aac",
+                "-b:a",
+                "256k",
+                "-ar",
+                "48000",
+                "-ac",
+                "1",
+                "-y",
+                output_path,
+            ]
+
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=self._m4a_timeout_seconds,
+                stdin=subprocess.DEVNULL,
+            )
+
+            if result.returncode == 0:
+                logger.info(
+                    "Successfully extracted M4A audio (no speechnorm): %s",
+                    output_path,
+                )
+                return True
+
+            logger.error(
+                "M4A extraction failed (no speechnorm): %s",
+                result.stderr,
+            )
+            return False
+
+        except Exception as e:
+            logger.exception("Error during no-speechnorm extraction: %s", e)
+            return False
+
+    def _extract_m4a_minimal(self, input_path: str, output_path: str) -> bool:
+        """Last-resort extraction that should work on almost any ffmpeg build."""
+
+        try:
+            logger.info("Retrying audio extraction with minimal filter chain")
+
+            # Keep it very conservative: basic band-pass-ish cleanup.
+            audio_filters = "highpass=f=80,lowpass=f=12000"
+
+            cmd = [
+                "ffmpeg",
+                "-i",
+                input_path,
+                "-vn",
+                "-af",
+                audio_filters,
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k",
+                "-ar",
+                "48000",
+                "-ac",
+                "1",
+                "-y",
+                output_path,
+            ]
+
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=self._m4a_timeout_seconds,
+                stdin=subprocess.DEVNULL,
+            )
+
+            if result.returncode == 0:
+                logger.info(
+                    "Successfully extracted M4A audio (minimal): %s",
+                    output_path,
+                )
+                return True
+
+            logger.error(
+                "M4A extraction failed (minimal): %s",
+                result.stderr,
+            )
+            return False
+
+        except Exception as e:
+            logger.exception("Error during minimal extraction: %s", e)
             return False
 
     def cleanup(self, *file_paths: str):

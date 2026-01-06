@@ -314,10 +314,25 @@ class MeetingMonitor:
                         "Check meeting-bot container logs for errors."
                     )
 
-                # Recording file is in the shared volume
-                # Meeting-bot saves to: /usr/src/app/dist/_tempvideo/{userId}/recording.webm
-                # This is mounted to /recordings in the manager container (read-only access)
-                # meeting-bot uses `userId` for its temp-video folder.
+                # --- Recording discovery ---
+                #
+                # We support two storage modes:
+                # 1) Per-user jobs (legacy): meeting-bot writes into a folder keyed by userId.
+                # 2) Session-dedupe jobs (canonical): a single job records once under
+                #    recordings/sessions/<session_id>/... (no userId available/required).
+                #
+                # This monitor needs to find the local WEBM output regardless of whether
+                # userId is present.
+
+                gcs_path = (metadata.get("gcs_path") or metadata.get("GCS_PATH") or "").strip()
+                is_session_job = gcs_path.startswith("recordings/sessions/")
+                session_id: Optional[str] = None
+                if is_session_job:
+                    # recordings/sessions/<session_id>
+                    parts = gcs_path.split("/")
+                    if len(parts) >= 3:
+                        session_id = parts[2].strip() or None
+
                 # Over time we've accumulated multiple metadata conventions
                 # (`userId`, `USER_ID`, `user_id`, etc.) across controller/manager.
                 # Be permissive here so a casing mismatch doesn't prevent us
@@ -335,10 +350,7 @@ class MeetingMonitor:
                 if isinstance(user_id, str):
                     user_id = user_id.strip()
 
-                if not user_id:
-                    logger.error(
-                        "❌ No userId found in metadata - cannot locate recording"
-                    )
+                def _missing_id_debug() -> None:
                     candidate_keys = [
                         "userId",
                         "USER_ID",
@@ -346,6 +358,8 @@ class MeetingMonitor:
                         "USERID",
                         "fs_user_id",
                         "FS_USER_ID",
+                        "gcs_path",
+                        "GCS_PATH",
                     ]
                     logger.debug(
                         "UserId candidate values: %s",
@@ -362,9 +376,13 @@ class MeetingMonitor:
                             for k in sorted(metadata.keys())
                         },
                     )
-                    return None
 
-                logger.info(f"Looking for recording in directory for userId: {user_id}")
+                if not user_id and not is_session_job:
+                    logger.error(
+                        "❌ No userId found in metadata - cannot locate recording"
+                    )
+                    _missing_id_debug()
+                    return None
 
                 def _candidate_recording_dirs() -> list[str]:
                     """Return candidate directories where meeting-bot may write recordings.
@@ -376,23 +394,32 @@ class MeetingMonitor:
 
                     candidates: list[str] = []
 
-                    # 1) Legacy shared EmptyDir convention.
-                    candidates.append(f"/recordings/{user_id}")
+                    # 1) Session-mode: allow a folder keyed by session_id
+                    # (required because userId is intentionally missing).
+                    if is_session_job and session_id:
+                        candidates.append(f"/recordings/sessions/{session_id}")
+                        tempvideo_root = os.environ.get("TEMPVIDEO_DIR")
+                        if tempvideo_root:
+                            candidates.append(
+                                os.path.join(tempvideo_root, "sessions", session_id)
+                            )
+                        candidates.append(
+                            os.path.join("/scratch/tempvideo", "sessions", session_id)
+                        )
+                        candidates.append(
+                            os.path.join("/usr/src/app/dist/_tempvideo", "sessions", session_id)
+                        )
 
-                    # 2) Preferred: controller sets TEMPVIDEO_DIR in meeting-bot.
-                    # meeting-bot typically writes into TEMPVIDEO_DIR/<userId>/...
-                    tempvideo_root = os.environ.get("TEMPVIDEO_DIR")
-                    if tempvideo_root:
-                        candidates.append(os.path.join(tempvideo_root, user_id))
-
-                    # 3) Common scratch layout used by the controller.
-                    candidates.append(os.path.join("/scratch/tempvideo", user_id))
-
-                    # 4) Fallback to the in-container path (may also be backed by scratch
-                    # via a volume mount).
-                    candidates.append(
-                        os.path.join("/usr/src/app/dist/_tempvideo", user_id)
-                    )
+                    # 2) Per-user mode (legacy)
+                    if user_id:
+                        candidates.append(f"/recordings/{user_id}")
+                        tempvideo_root = os.environ.get("TEMPVIDEO_DIR")
+                        if tempvideo_root:
+                            candidates.append(os.path.join(tempvideo_root, user_id))
+                        candidates.append(os.path.join("/scratch/tempvideo", user_id))
+                        candidates.append(
+                            os.path.join("/usr/src/app/dist/_tempvideo", user_id)
+                        )
 
                     # Deduplicate while preserving order.
                     seen: set[str] = set()
@@ -402,6 +429,25 @@ class MeetingMonitor:
                             seen.add(d)
                             uniq.append(d)
                     return uniq
+
+                if is_session_job:
+                    logger.info(
+                        "Session-mode job detected (gcs_path=%s). Looking for recording under session_id=%s",
+                        gcs_path,
+                        session_id or "<missing>",
+                    )
+                    if not session_id:
+                        logger.error(
+                            "❌ Session-mode job but could not parse session_id from gcs_path: %s",
+                            gcs_path,
+                        )
+                        _missing_id_debug()
+                        return None
+                else:
+                    logger.info(
+                        "Looking for recording in directory for userId: %s",
+                        user_id,
+                    )
 
                 recording_files: list[str] = []
                 searched_dirs: list[str] = []
