@@ -250,6 +250,19 @@ class MeetingController:
             meeting_id = message_data.get("meeting_id", message_id)
             meeting_url = message_data.get("meeting_url")
 
+            # Session-mode jobs are canonical/shared (one job per meeting session).
+            # They intentionally do NOT run under a specific user id.
+            meeting_session_id = (
+                message_data.get("meeting_session_id")
+                or message_data.get("MEETING_SESSION_ID")
+                or ""
+            )
+            msg_gcs_path = message_data.get("gcs_path") or message_data.get("GCS_PATH")
+            is_session_job = bool(meeting_session_id) or (
+                isinstance(msg_gcs_path, str)
+                and msg_gcs_path.strip().startswith("recordings/sessions/")
+            )
+
             # Storage layout is always:
             #   recordings/<user_firebase_document_id>/<meeting_firebase_document_id>/<files>
             # The manager container will append fixed filenames.
@@ -275,7 +288,7 @@ class MeetingController:
             if isinstance(user_doc_id, str):
                 user_doc_id = user_doc_id.strip()
 
-            if not user_doc_id:
+            if not user_doc_id and not is_session_job:
                 logger.error(
                     "Invalid message data - missing user id; refusing to create job. "
                     "Expected one of: user_id/USER_ID/fs_user_id/FS_USER_ID/creator_user_id. "
@@ -284,11 +297,14 @@ class MeetingController:
                 )
                 return False
 
-            gcs_path = (
-                f"recordings/{user_doc_id}/{meeting_doc_id}"
-                if user_doc_id
-                else f"recordings/{meeting_doc_id}"
-            )
+            # Compute the canonical storage prefix.
+            if is_session_job:
+                # Prefer explicit gcs_path from payload; otherwise derive from session id.
+                gcs_path = (
+                    msg_gcs_path.strip() if isinstance(msg_gcs_path, str) else ""
+                ) or f"recordings/sessions/{meeting_session_id or meeting_id}"
+            else:
+                gcs_path = f"recordings/{user_doc_id}/{meeting_doc_id}"
 
             if not meeting_url:
                 logger.error(
@@ -309,6 +325,7 @@ class MeetingController:
                 client.V1EnvVar(name="MEETING_URL", value=meeting_url),
                 client.V1EnvVar(name="MEETING_ID", value=meeting_id),
                 client.V1EnvVar(name="FS_MEETING_ID", value=str(meeting_doc_id)),
+                # For session-mode jobs, USER_ID may be blank by design.
                 client.V1EnvVar(name="USER_ID", value=str(user_doc_id)),
                 client.V1EnvVar(name="GCS_PATH", value=gcs_path),
                 client.V1EnvVar(name="GCS_BUCKET", value=self.gcs_bucket),
@@ -900,10 +917,13 @@ class MeetingController:
                 txn.update(subscriber_ref, {"updated_at": now})
 
             # Link meeting to session (handy for debugging/UI).
+            clean_session_id = (
+                session_id.strip() if isinstance(session_id, str) else session_id
+            )
             txn.update(
                 meeting_ref,
                 {
-                    "meeting_session_id": session_id,
+                    "meeting_session_id": clean_session_id,
                     "session_status": "queued",
                     "session_enqueued_at": now,
                 },
@@ -1200,7 +1220,7 @@ class MeetingController:
         if not meeting_url:
             raise ValueError("meeting_session missing meeting_url")
 
-        org_id = data.get("org_id") or ""
+        org_id = (data.get("org_id") or "").strip()
         canonical_gcs_path = (
             data.get("canonical_gcs_path") or f"recordings/sessions/{session_doc.id}"
         )
@@ -1211,7 +1231,6 @@ class MeetingController:
             "meeting_url": meeting_url,
             # meeting_id is a best-effort identifier for logs/meeting-bot API.
             "meeting_id": session_doc.id,
-            "fs_meeting_id": session_doc.id,
             "gcs_path": canonical_gcs_path,
             "teamId": org_id or session_doc.id,
             "timezone": data.get("timezone") or "UTC",
@@ -1219,6 +1238,7 @@ class MeetingController:
             or (now.isoformat().replace("+00:00", "Z")),
             "auto_joined": True,
             "meeting_session_id": session_doc.id,
+            "org_id": org_id,
         }
 
         # Determine bot display name from org doc (same behavior as bot_instances path).

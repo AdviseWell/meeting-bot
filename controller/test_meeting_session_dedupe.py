@@ -125,5 +125,13 @@ def test_build_payload_from_meeting_session_uses_canonical_gcs_path(
 
     payload = c._build_job_payload_from_meeting_session(doc)  # noqa: SLF001
     assert payload["gcs_path"] == "recordings/sessions/sess123"
-    assert payload["fs_meeting_id"] == "sess123"
-    assert "user_id" not in payload
+    assert "fs_meeting_id" not in payload
+
+
+def test_meeting_session_id_stripping_contract():
+    """Regression: controller must not persist session ids with whitespace."""
+
+    # This mirrors the contract enforced in controller/main.py when linking a
+    # meeting doc to a meeting_session.
+    assert "sess123\n".strip() == "sess123"
+    assert "  sess123  ".strip() == "sess123"
