@@ -1696,11 +1696,24 @@ class MeetingController:
                     self.meeting_status_values
                     and status not in self.meeting_status_values
                 ):
-                    logger.debug(
-                        f"Skipping {doc.id}: status '{status}' not in "
-                        f"{self.meeting_status_values}"
-                    )
-                    continue
+                    # Check if meeting was already queued by another system
+                    # (e.g., calendar sync, API, etc.) even if status changed
+                    bot_status = data.get("bot_status")
+                    session_status = data.get("session_status")
+                    if bot_status == "queued" or session_status == "queued":
+                        logger.info(
+                            f"Meeting {doc.id} status='{status}' not in "
+                            f"{self.meeting_status_values} but bot_status='{bot_status}' "
+                            f"or session_status='{session_status}' is queued - "
+                            f"processing anyway"
+                        )
+                        # Continue processing this meeting
+                    else:
+                        logger.debug(
+                            f"Skipping {doc.id}: status '{status}' not in "
+                            f"{self.meeting_status_values}"
+                        )
+                        continue
 
                 # Check if bot already exists
                 if data.get(self.meeting_bot_instance_field):
