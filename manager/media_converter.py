@@ -152,15 +152,14 @@ class MediaConverter:
 
             # ffmpeg command for MP4 conversion
             # Using H.264 codec with ultra high quality settings
-            # Audio filter chain for professional quality:
+            # Audio filter chain optimized for speed with good quality:
             # 1. highpass: Remove low frequency rumble/noise below 80Hz
             # 2. lowpass: Remove high frequency hiss above 15kHz
-            # 3. afftdn: Advanced noise reduction using FFT
-            # 4. loudnorm: Professional loudness normalization (EBU R128)
+            # 3. loudnorm: Professional loudness normalization (EBU R128)
+            # Note: Removed afftdn for faster processing, loudnorm handles most issues
             audio_filters = (
                 "highpass=f=80,"  # Remove rumble
                 "lowpass=f=15000,"  # Remove hiss
-                "afftdn=nf=-25,"  # Noise reduction
                 "loudnorm=I=-16:TP=-1.5:LRA=11"  # Normalize loudness
             )
 
@@ -171,15 +170,15 @@ class MediaConverter:
                 "-c:v",
                 "libx264",  # Video codec
                 "-preset",
-                "slow",  # Slower encoding for better quality
+                "medium",  # Balanced quality/speed (was "slow")
                 "-crf",
-                "18",  # Quality (lower = better, 18 is very high quality, was 23)
+                "23",  # Quality (lower = better, 23 is high quality, was 18)
                 "-af",
                 audio_filters,  # Audio filter chain
                 "-c:a",
                 "aac",  # Audio codec
                 "-b:a",
-                "384k",  # Audio bitrate (3x from 128k)
+                "192k",  # Audio bitrate (was 384k, 192k is still excellent)
                 "-ar",
                 "48000",  # 48 kHz sample rate
                 "-movflags",
