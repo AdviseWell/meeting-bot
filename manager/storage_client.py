@@ -4,7 +4,9 @@ Google Cloud Storage Client for uploading processed files
 
 import logging
 import os
-from typing import Optional
+from datetime import datetime
+from typing import Any, Dict, Optional
+
 from google.cloud import storage, firestore
 
 logger = logging.getLogger(__name__)
@@ -425,4 +427,86 @@ class FirestoreClient:
 
         except Exception as e:
             logger.warning(f"Error checking if meeting exists: {e}")
+            return False
+
+    def get_meeting(
+        self, organization_id: str, meeting_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Get a meeting document from Firestore.
+
+        Args:
+            organization_id: Organization ID
+            meeting_id: Meeting document ID
+
+        Returns:
+            Meeting data dict if exists, None otherwise
+        """
+        try:
+            doc_ref = self.client.document(
+                f"organizations/{organization_id}/meetings/{meeting_id}"
+            )
+            doc_snap = doc_ref.get()
+
+            if doc_snap.exists:
+                return doc_snap.to_dict()
+            return None
+
+        except Exception as e:
+            logger.warning(f"Error getting meeting document: {e}")
+            return None
+
+    def update_adhoc_meeting_times(
+        self,
+        organization_id: str,
+        meeting_id: str,
+        start_time: datetime,
+        end_time: datetime,
+        duration_seconds: float,
+    ) -> bool:
+        """
+        Update an ad-hoc meeting document with start/end times.
+
+        This is needed when the frontend creates an ad-hoc meeting but
+        doesn't set the 'start' field, which is required for UI display.
+
+        Args:
+            organization_id: Organization ID
+            meeting_id: Meeting document ID
+            start_time: Meeting start datetime
+            end_time: Meeting end datetime
+            duration_seconds: Meeting duration in seconds
+
+        Returns:
+            True if update successful, False otherwise
+        """
+        try:
+            from datetime import timezone
+
+            doc_ref = self.client.document(
+                f"organizations/{organization_id}/meetings/{meeting_id}"
+            )
+
+            now = datetime.now(timezone.utc)
+
+            update_data = {
+                "start": start_time,
+                "end": end_time,
+                "duration_seconds": duration_seconds,
+                "updated_at": now,
+                # Mark as completed since recording is done
+                "status": "completed",
+            }
+
+            doc_ref.update(update_data)
+
+            logger.info(
+                f"Updated ad-hoc meeting {meeting_id} "
+                f"with start={start_time}, end={end_time}, "
+                f"duration={duration_seconds}s"
+            )
+            return True
+
+        except Exception as e:
+            logger.exception(f"Failed to update ad-hoc meeting times: {e}")
             return False

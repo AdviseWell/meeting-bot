@@ -378,22 +378,25 @@ class MeetingManager:
                 webm_gcs_path,
             )
 
-            # Step 3.1: Check for ad-hoc meeting and create if needed
+            # Step 3.1: Check for ad-hoc meeting and create/update if needed
             # Ad-hoc meetings occur when a user joins via Pub/Sub without
-            # a pre-scheduled meeting document in Firestore
+            # a pre-scheduled meeting document in Firestore.
+            # Even if the meeting exists (created by frontend), it may be
+            # missing the 'start' field which is required for UI display.
             if self.fs_meeting_id and self.team_id:
-                meeting_exists = self.firestore_client.meeting_exists(
+                meeting_data = self.firestore_client.get_meeting(
                     organization_id=self.team_id,
                     meeting_id=self.fs_meeting_id,
                 )
 
-                if not meeting_exists:
+                # Get recording duration to calculate meeting start time
+                from media_converter import get_recording_duration_seconds
+
+                duration_seconds = get_recording_duration_seconds(recording_path)
+
+                if not meeting_data:
+                    # Meeting doesn't exist - create it
                     logger.info("Meeting document not found - creating ad-hoc meeting")
-
-                    # Get recording duration to calculate meeting start time
-                    from media_converter import get_recording_duration_seconds
-
-                    duration_seconds = get_recording_duration_seconds(recording_path)
 
                     if duration_seconds:
                         from datetime import datetime, timezone, timedelta
@@ -431,6 +434,52 @@ class MeetingManager:
                             "Could not determine recording duration "
                             "- skipping ad-hoc meeting creation"
                         )
+                elif meeting_data.get("source") == "ad_hoc" and not meeting_data.get(
+                    "start"
+                ):
+                    # Ad-hoc meeting exists but is missing 'start' field
+                    # This happens when the frontend creates the meeting
+                    logger.info(
+                        f"Ad-hoc meeting {self.fs_meeting_id} exists but missing "
+                        "'start' field - updating"
+                    )
+
+                    if duration_seconds:
+                        from datetime import datetime, timezone, timedelta
+
+                        now = datetime.now(timezone.utc)
+                        start_time = now - timedelta(seconds=duration_seconds)
+
+                        # Update the meeting with the start time and end time
+                        updated = self.firestore_client.update_adhoc_meeting_times(
+                            organization_id=self.team_id,
+                            meeting_id=self.fs_meeting_id,
+                            start_time=start_time,
+                            end_time=now,
+                            duration_seconds=duration_seconds,
+                        )
+
+                        if updated:
+                            logger.info(
+                                f"✅ Updated ad-hoc meeting {self.fs_meeting_id} "
+                                f"with start={start_time.isoformat()}, "
+                                f"duration={duration_seconds}s"
+                            )
+                        else:
+                            logger.warning(
+                                f"Failed to update ad-hoc meeting {self.fs_meeting_id}"
+                            )
+                    else:
+                        logger.warning(
+                            "Could not determine recording duration "
+                            "- skipping ad-hoc meeting update"
+                        )
+                else:
+                    logger.debug(
+                        f"Meeting {self.fs_meeting_id} already exists with "
+                        f"source={meeting_data.get('source')}, "
+                        f"start={meeting_data.get('start')}"
+                    )
 
             # Step 3.25: Upload MP4 (optional) for browser fallback.
             if mp4_path and os.path.exists(mp4_path):
