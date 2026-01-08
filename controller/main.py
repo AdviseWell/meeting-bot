@@ -1788,7 +1788,8 @@ class MeetingController:
                 )
                 meeting_doc = meeting_ref.get()
                 if meeting_doc.exists:
-                    bot_instance_id = meeting_doc.get(self.meeting_bot_instance_field)
+                    meeting_data = meeting_doc.to_dict() or {}
+                    bot_instance_id = meeting_data.get(self.meeting_bot_instance_field)
 
             # 2. If not found, try the default ID convention (meeting_id)
             if not bot_instance_id:
