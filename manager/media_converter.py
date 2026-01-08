@@ -14,6 +14,61 @@ from typing import Optional, Tuple
 logger = logging.getLogger(__name__)
 
 
+def get_recording_duration_seconds(file_path: str) -> Optional[float]:
+    """
+    Get the duration of a media file in seconds using ffprobe.
+
+    Args:
+        file_path: Path to the media file
+
+    Returns:
+        Duration in seconds, or None if unable to determine
+    """
+    if not os.path.exists(file_path):
+        logger.warning(f"File not found for duration check: {file_path}")
+        return None
+
+    try:
+        cmd = [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            file_path,
+        ]
+
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            stdin=subprocess.DEVNULL,
+        )
+
+        if result.returncode == 0:
+            duration_str = result.stdout.strip()
+            if duration_str:
+                duration = float(duration_str)
+                logger.info(
+                    f"Recording duration: {duration:.2f} seconds ({duration/60:.2f} minutes)"
+                )
+                return duration
+        else:
+            logger.warning(f"ffprobe failed: {result.stderr}")
+
+    except subprocess.TimeoutExpired:
+        logger.warning("ffprobe timeout while checking duration")
+    except ValueError as e:
+        logger.warning(f"Invalid duration value from ffprobe: {e}")
+    except Exception as e:
+        logger.warning(f"Error getting recording duration: {e}")
+
+    return None
+
+
 class MediaConverter:
     """Convert media files using ffmpeg"""
 

@@ -378,6 +378,60 @@ class MeetingManager:
                 webm_gcs_path,
             )
 
+            # Step 3.1: Check for ad-hoc meeting and create if needed
+            # Ad-hoc meetings occur when a user joins via Pub/Sub without
+            # a pre-scheduled meeting document in Firestore
+            if self.fs_meeting_id and self.team_id:
+                meeting_exists = self.firestore_client.meeting_exists(
+                    organization_id=self.team_id,
+                    meeting_id=self.fs_meeting_id,
+                )
+
+                if not meeting_exists:
+                    logger.info("Meeting document not found - creating ad-hoc meeting")
+
+                    # Get recording duration to calculate meeting start time
+                    from media_converter import get_recording_duration_seconds
+
+                    duration_seconds = get_recording_duration_seconds(recording_path)
+
+                    if duration_seconds:
+                        from datetime import datetime, timezone, timedelta
+
+                        # Calculate meeting start: current time - duration
+                        now = datetime.now(timezone.utc)
+                        start_time = now - timedelta(seconds=duration_seconds)
+                        start_at = start_time.isoformat().replace("+00:00", "Z")
+
+                        logger.info(
+                            f"Creating ad-hoc meeting: duration={duration_seconds}s"
+                            f" ({duration_seconds/60:.1f}min), start_at={start_at}"
+                        )
+
+                        # Create the ad-hoc meeting document
+                        new_meeting_id = self.firestore_client.create_adhoc_meeting(
+                            organization_id=self.team_id,
+                            user_id=self.user_id,
+                            meeting_url=self.meeting_url,
+                            start_at=start_at,
+                        )
+
+                        if new_meeting_id:
+                            # Update fs_meeting_id to use the new meeting
+                            old_meeting_id = self.fs_meeting_id
+                            self.fs_meeting_id = new_meeting_id
+                            logger.info(
+                                f"✅ Created ad-hoc meeting {new_meeting_id}"
+                                f" (was {old_meeting_id})"
+                            )
+                        else:
+                            logger.warning("Failed to create ad-hoc meeting document")
+                    else:
+                        logger.warning(
+                            "Could not determine recording duration "
+                            "- skipping ad-hoc meeting creation"
+                        )
+
             # Step 3.25: Upload MP4 (optional) for browser fallback.
             if mp4_path and os.path.exists(mp4_path):
                 logger.info("Step 3.25: Uploading MP4 fallback to GCS...")

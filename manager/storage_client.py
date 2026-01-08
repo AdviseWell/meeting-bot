@@ -332,3 +332,97 @@ class FirestoreClient:
         except Exception as e:
             logger.exception(f"Failed to store transcription in Firestore: {e}")
             return False
+
+    def create_adhoc_meeting(
+        self,
+        organization_id: str,
+        user_id: str,
+        meeting_url: str,
+        start_at: str,
+    ) -> Optional[str]:
+        """
+        Create an ad-hoc meeting document in Firestore.
+
+        Args:
+            organization_id: Organization ID
+            user_id: User ID who initiated the meeting
+            meeting_url: Meeting URL (join URL)
+            start_at: ISO 8601 timestamp for meeting start time
+
+        Returns:
+            Meeting document ID if successful, None otherwise
+        """
+        try:
+            from datetime import datetime, timezone
+
+            # Create new meeting document with auto-generated ID
+            meetings_collection = self.client.collection(
+                f"organizations/{organization_id}/meetings"
+            )
+
+            now = datetime.now(timezone.utc)
+
+            # Detect platform from URL
+            platform = "unknown"
+            url_lower = meeting_url.lower()
+            if "meet.google.com" in url_lower:
+                platform = "google_meet"
+            elif "teams.microsoft.com" in url_lower:
+                platform = "microsoft_teams"
+            elif "zoom.us" in url_lower or "zoom.com" in url_lower:
+                platform = "zoom"
+
+            # Parse start_at to datetime for the 'start' field
+            # Handle both Z and +00:00 formats
+            start_datetime = datetime.fromisoformat(start_at.replace("Z", "+00:00"))
+
+            meeting_data = {
+                "title": "Ad-hoc meeting",
+                "join_url": meeting_url,  # Use join_url not meeting_url
+                "organization_id": organization_id,
+                "synced_by_user_id": user_id,  # Match existing schema
+                "start": start_datetime,  # datetime object for queries
+                "created_at": now,
+                "updated_at": now,
+                "status": "scheduled",  # Match existing ad-hocs
+                "source": "ad_hoc",  # Use source not type
+                "platform": platform,
+                "auto_joined": False,  # Will be updated by controller
+            }
+
+            # Create document with auto-generated ID
+            doc_ref = meetings_collection.document()
+            doc_ref.set(meeting_data)
+
+            meeting_id = doc_ref.id
+            logger.info(
+                f"Created ad-hoc meeting {meeting_id} in org {organization_id}"
+                f" with start={start_at}, platform={platform}"
+            )
+            return meeting_id
+
+        except Exception as e:
+            logger.exception(f"Failed to create ad-hoc meeting in Firestore: {e}")
+            return None
+
+    def meeting_exists(self, organization_id: str, meeting_id: str) -> bool:
+        """
+        Check if a meeting document exists in Firestore.
+
+        Args:
+            organization_id: Organization ID
+            meeting_id: Meeting document ID
+
+        Returns:
+            True if meeting exists, False otherwise
+        """
+        try:
+            doc_ref = self.client.document(
+                f"organizations/{organization_id}/meetings/{meeting_id}"
+            )
+            doc_snap = doc_ref.get()
+            return doc_snap.exists
+
+        except Exception as e:
+            logger.warning(f"Error checking if meeting exists: {e}")
+            return False
