@@ -1775,6 +1775,43 @@ class MeetingController:
                 message.ack()  # Ack invalid messages to remove them
                 return
 
+            # Unified Path: Check if this corresponds to a known meeting document
+            # If so, delegate to the session dedupe logic used by the poller.
+            # This prevents duplicate bots if Poller and Pub/Sub Trigger both fire.
+            meeting_doc = None
+            if org_id:
+                try:
+                    meeting_ref = (
+                        self.db.collection("organizations")
+                        .document(org_id)
+                        .collection("meetings")
+                        .document(meeting_id)
+                    )
+                    meeting_doc = meeting_ref.get()
+                except Exception as fetch_err:
+                    logger.warning(
+                        f"Could not fetch meeting doc for {meeting_id}: {fetch_err}"
+                    )
+
+            if meeting_doc and meeting_doc.exists:
+                logger.info(
+                    f"Found scheduled meeting {meeting_id}, delegating to session manager"
+                )
+                session_id = self._try_create_or_update_session_for_meeting(meeting_doc)
+                if session_id:
+                    logger.info(
+                        f"Successfully enqueued session {session_id} for "
+                        f"meeting {meeting_id}"
+                    )
+                    message.ack()
+                    return
+                else:
+                    logger.warning(
+                        f"Failed to enqueue session for {meeting_id}, "
+                        "falling back to legacy launch"
+                    )
+                    # Fall through to legacy behavior if session creation fails
+
             # Try to find the bot instance to claim it
             bot_instance_id = None
 

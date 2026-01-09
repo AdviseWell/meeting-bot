@@ -394,6 +394,11 @@ class MeetingManager:
 
                 duration_seconds = get_recording_duration_seconds(recording_path)
 
+                # Fallback to MP4 if WEBM duration failed (common with streaming WEBM)
+                if not duration_seconds and mp4_path and os.path.exists(mp4_path):
+                    logger.info("Falling back to MP4 for duration check...")
+                    duration_seconds = get_recording_duration_seconds(mp4_path)
+
                 if not meeting_data:
                     # Meeting doesn't exist - create it
                     logger.info("Meeting document not found - creating ad-hoc meeting")
