@@ -427,6 +427,16 @@ class MeetingManager:
                                 f"✅ Created ad-hoc meeting {new_meeting_id}"
                                 f" (was {old_meeting_id})"
                             )
+
+                            # Immediately update with end time and duration to meet schema requirements
+                            # (create_adhoc_meeting only sets start and status=scheduled)
+                            self.firestore_client.update_adhoc_meeting_times(
+                                organization_id=self.team_id,
+                                meeting_id=new_meeting_id,
+                                start_time=start_time,
+                                end_time=now,
+                                duration_seconds=duration_seconds,
+                            )
                         else:
                             logger.warning("Failed to create ad-hoc meeting document")
                     else:
