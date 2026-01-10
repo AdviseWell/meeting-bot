@@ -1794,21 +1794,41 @@ class MeetingController:
                     )
 
             if meeting_doc and meeting_doc.exists:
-                logger.info(
-                    f"Found scheduled meeting {meeting_id}, delegating to session manager"
-                )
-                session_id = self._try_create_or_update_session_for_meeting(meeting_doc)
-                if session_id:
+                # Verify the meeting belongs to the user before using the existing record
+                m_data = meeting_doc.to_dict() or {}
+                payload_user_id = data.get("user_id") or data.get("userId")
+                valid_owners = {
+                    m_data.get("user_id"),
+                    m_data.get("userId"),
+                    m_data.get("created_by"),
+                    m_data.get("synced_by_user_id"),
+                }
+                # Filter out None/Empty
+                valid_owners = {u for u in valid_owners if u}
+
+                if payload_user_id and payload_user_id in valid_owners:
                     logger.info(
-                        f"Successfully enqueued session {session_id} for "
-                        f"meeting {meeting_id}"
+                        f"Found scheduled meeting {meeting_id}, delegating to session manager"
                     )
-                    message.ack()
-                    return
+                    session_id = self._try_create_or_update_session_for_meeting(
+                        meeting_doc
+                    )
+                    if session_id:
+                        logger.info(
+                            f"Successfully enqueued session {session_id} for "
+                            f"meeting {meeting_id}"
+                        )
+                        message.ack()
+                        return
+                    else:
+                        logger.warning(
+                            f"Failed to enqueue session for {meeting_id}, "
+                            "falling back to legacy launch"
+                        )
                 else:
                     logger.warning(
-                        f"Failed to enqueue session for {meeting_id}, "
-                        "falling back to legacy launch"
+                        f"Meeting {meeting_id} exists but user verification failed "
+                        f"(Payload: {payload_user_id}, Valid: {valid_owners}). Treating as ad-hoc."
                     )
                     # Fall through to legacy behavior if session creation fails
 
