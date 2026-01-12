@@ -804,13 +804,27 @@ class MeetingController:
         meeting_data = meeting_doc.to_dict() or {}
         meeting_ref = meeting_doc.reference
 
+        logger.debug("=" * 80)
+        logger.debug("SESSION DEDUPLICATION LOGIC")
+        logger.debug("=" * 80)
+        logger.debug("Meeting ID: %s", meeting_doc.id)
+        logger.debug(
+            "Meeting data: %s", json.dumps(meeting_data, indent=2, default=str)
+        )
+
         meeting_url = (
             meeting_data.get("meeting_url")
             or meeting_data.get("meetingUrl")
             or meeting_data.get("join_url")
         )
         if not meeting_url:
+            logger.debug(
+                "DEDUPLICATION DECISION: No meeting URL found, cannot deduplicate"
+            )
+            logger.debug("Available fields: %s", list(meeting_data.keys()))
             return None
+
+        logger.debug("Meeting URL: %s", meeting_url)
 
         org_id = (
             meeting_data.get("organization_id")
@@ -820,18 +834,32 @@ class MeetingController:
             or ""
         )
         user_id = meeting_data.get("user_id") or meeting_data.get("userId") or ""
+
+        logger.debug("Organization ID: %s", org_id)
+        logger.debug("User ID: %s", user_id)
+
         if not org_id:
             # Without org we can't safely dedupe.
+            logger.debug(
+                "DEDUPLICATION DECISION: No organization ID, cannot deduplicate"
+            )
             return None
         if not user_id:
             # Without user we can't subscribe/fan-out.
+            logger.debug("DEDUPLICATION DECISION: No user ID, cannot subscribe/fan-out")
             return None
 
         session_id = self._meeting_session_id(
             org_id=org_id, meeting_url=str(meeting_url)
         )
+
+        logger.debug("Computed session ID (SHA256 of org+URL): %s", session_id)
+
         session_ref = self._meeting_session_ref(org_id=org_id, session_id=session_id)
         subscriber_ref = session_ref.collection("subscribers").document(str(user_id))
+
+        logger.debug("Session reference path: %s", session_ref.path)
+        logger.debug("Subscriber reference path: %s", subscriber_ref.path)
 
         now = datetime.now(timezone.utc)
 
@@ -841,8 +869,10 @@ class MeetingController:
         def _txn(txn: firestore.Transaction) -> Optional[str]:
             # IMPORTANT: Read ALL documents first, before any writes.
             # Firestore transactions do not allow reads after writes.
+            logger.debug("Transaction started: reading documents...")
             fresh_meeting = meeting_ref.get(transaction=txn)
             if not fresh_meeting.exists:
+                logger.debug("Transaction: meeting document no longer exists")
                 return None
 
             fresh_data = fresh_meeting.to_dict() or {}
@@ -853,17 +883,21 @@ class MeetingController:
                 or fresh_data.get("join_url")
             )
             if not fresh_meeting_url:
+                logger.debug("Transaction: meeting URL no longer available")
                 return None
 
             # Read session doc.
             sess_snap = session_ref.get(transaction=txn)
+            logger.debug("Transaction: session exists=%s", sess_snap.exists)
 
             # Read subscriber doc.
             sub_snap = subscriber_ref.get(transaction=txn)
+            logger.debug("Transaction: subscriber exists=%s", sub_snap.exists)
 
             # Now perform all writes.
             # Create session doc if missing.
             if not sess_snap.exists:
+                logger.debug("Transaction: Creating new session document")
                 txn.set(
                     session_ref,
                     {
@@ -874,12 +908,22 @@ class MeetingController:
                         "updated_at": now,
                     },
                 )
+                logger.debug(
+                    "DEDUPLICATION DECISION: New session created for org=%s, url=%s",
+                    org_id,
+                    fresh_meeting_url,
+                )
             else:
                 # Keep meeting_url up-to-date if it changes (best effort).
+                logger.debug("Transaction: Updating existing session document")
                 txn.update(session_ref, {"updated_at": now})
+                logger.debug(
+                    "DEDUPLICATION DECISION: Existing session found - bot will be shared"
+                )
 
             # Ensure subscriber.
             if not sub_snap.exists:
+                logger.debug("Transaction: Adding new subscriber user_id=%s", user_id)
                 txn.set(
                     subscriber_ref,
                     {
@@ -893,8 +937,15 @@ class MeetingController:
                         "updated_at": now,
                     },
                 )
+                logger.debug(
+                    "FANOUT RECIPIENT: User %s will receive copies via fanout", user_id
+                )
             else:
+                logger.debug(
+                    "Transaction: Subscriber already exists, updating timestamp"
+                )
                 txn.update(subscriber_ref, {"updated_at": now})
+                logger.debug("FANOUT RECIPIENT: User %s already subscribed", user_id)
 
             # Link meeting to session (handy for debugging/UI).
             clean_session_id = (
@@ -908,11 +959,16 @@ class MeetingController:
                     "session_enqueued_at": now,
                 },
             )
+            logger.debug("Transaction: Meeting linked to session %s", clean_session_id)
 
             return session_id
 
         try:
-            return _txn(transaction)
+            result = _txn(transaction)
+            if result:
+                logger.debug("Session deduplication successful: session_id=%s", result)
+            logger.debug("=" * 80)
+            return result
         except Exception as e:
             logger.error(
                 "Failed to create/update meeting session for meeting %s: %s",
@@ -1057,16 +1113,39 @@ class MeetingController:
         The first subscriber's files are the canonical source.
         """
 
+        logger.debug("=" * 80)
+        logger.debug("FANOUT LOGIC - ARTIFACT DISTRIBUTION")
+        logger.debug("=" * 80)
+        logger.debug("Organization ID: %s", org_id)
+        logger.debug("Session ID: %s", session_id)
+
         try:
             session_ref = self._meeting_session_ref(
                 org_id=org_id, session_id=session_id
             )
             session_snap = session_ref.get()
             if not session_snap.exists:
+                logger.debug("Session document does not exist, aborting fanout")
                 return
+
+            logger.debug(
+                "Session data: %s",
+                json.dumps(session_snap.to_dict() or {}, indent=2, default=str),
+            )
 
             # Get all subscribers
             subs = list(session_ref.collection("subscribers").stream())
+            logger.debug("Total subscribers found: %d", len(subs))
+
+            for idx, sub in enumerate(subs):
+                sub_data = sub.to_dict() or {}
+                logger.debug(
+                    "Subscriber %d: user_id=%s, data=%s",
+                    idx + 1,
+                    sub.id,
+                    json.dumps(sub_data, indent=2, default=str),
+                )
+
             if len(subs) == 0:
                 logger.info("No subscribers found for session %s", session_id)
                 return
@@ -1077,19 +1156,35 @@ class MeetingController:
             source_user_id = first_sub_data.get("user_id") or first_sub.id
             source_meeting_id = first_sub_data.get("fs_meeting_id")
 
+            logger.debug("=" * 80)
+            logger.debug("FANOUT SOURCE")
+            logger.debug("Source User ID: %s", source_user_id)
+            logger.debug("Source Meeting ID: %s", source_meeting_id)
+            logger.debug("=" * 80)
+
             if not source_user_id or not source_meeting_id:
                 logger.error(
                     "First subscriber for session %s missing user_id or fs_meeting_id",
                     session_id,
                 )
+                logger.debug("Cannot proceed with fanout - missing source information")
                 return
 
             source_prefix = f"recordings/{source_user_id}/{source_meeting_id}".rstrip(
                 "/"
             )
+            logger.debug(
+                "Source GCS prefix: gs://%s/%s", self.gcs_bucket, source_prefix
+            )
 
             # List source objects
+            logger.debug("Listing source objects from GCS...")
             src_objects = self._list_gcs_prefix(source_prefix + "/")
+            logger.debug("Found %d source objects", len(src_objects))
+
+            for obj in src_objects:
+                logger.debug("  - %s", obj)
+
             if not src_objects:
                 logger.info(
                     "No artifacts found yet for session %s (%s)",
@@ -1099,6 +1194,7 @@ class MeetingController:
                 return
 
             # Try to read transcription text from source location (if it exists)
+            logger.debug("Attempting to read transcription from source...")
             transcription_text = None
             transcript_txt_path = f"{source_prefix}/transcript.txt"
             try:
@@ -1110,14 +1206,25 @@ class MeetingController:
                         transcript_txt_path,
                         len(transcription_text),
                     )
+                else:
+                    logger.debug(
+                        "Transcription file does not exist: %s", transcript_txt_path
+                    )
             except Exception as e:
                 logger.warning(
                     "Could not read transcription from %s: %s", transcript_txt_path, e
                 )
 
             # Update the first subscriber's meeting with transcription
+            logger.debug("Updating first subscriber's meeting document...")
             first_meeting_path = first_sub_data.get("meeting_path")
+            logger.debug("First subscriber meeting path: %s", first_meeting_path)
+
             if first_meeting_path and transcription_text:
+                logger.debug(
+                    "Updating meeting %s with transcription and recording URL",
+                    first_meeting_path,
+                )
                 try:
                     meeting_ref = self.db.document(first_meeting_path)
                     meeting_ref.set(
@@ -1132,14 +1239,23 @@ class MeetingController:
                         "Updated first subscriber meeting doc %s with transcription",
                         first_meeting_path,
                     )
+                    logger.debug(
+                        "FANOUT RECIPIENT UPDATE: First subscriber %s received transcription",
+                        source_user_id,
+                    )
                 except Exception as e:
                     logger.warning(
                         "Failed to update first subscriber meeting document %s: %s",
                         first_meeting_path,
                         e,
                     )
+            elif not first_meeting_path:
+                logger.debug("No meeting path for first subscriber, skipping update")
+            elif not transcription_text:
+                logger.debug("No transcription available, skipping update")
 
             # Mark first subscriber as complete (no copying needed)
+            logger.debug("Marking first subscriber as complete (source user)")
             first_sub.reference.set(
                 {
                     "status": "complete",
@@ -1147,8 +1263,16 @@ class MeetingController:
                 },
                 merge=True,
             )
+            logger.debug(
+                "FANOUT RECIPIENT: First subscriber %s marked complete", source_user_id
+            )
 
             # Copy to remaining subscribers (if any)
+            logger.debug("=" * 80)
+            logger.debug("COPYING TO ADDITIONAL SUBSCRIBERS")
+            logger.debug("Additional subscribers to process: %d", len(subs) - 1)
+            logger.debug("=" * 80)
+
             for sub in subs[1:]:
                 sub_ref = sub.reference
                 sub_data = sub.to_dict() or {}
@@ -1156,18 +1280,31 @@ class MeetingController:
                 fs_meeting_id = sub_data.get("fs_meeting_id")
                 meeting_path = sub_data.get("meeting_path")
 
+                logger.debug("Processing additional subscriber:")
+                logger.debug("  User ID: %s", user_id)
+                logger.debug("  Meeting ID: %s", fs_meeting_id)
+                logger.debug("  Meeting Path: %s", meeting_path)
+
                 if not user_id or not fs_meeting_id:
+                    logger.warning(
+                        "Subscriber missing user_id or fs_meeting_id, skipping"
+                    )
                     continue
 
                 dst_prefix = f"recordings/{user_id}/{fs_meeting_id}".rstrip("/")
+                logger.debug(
+                    "  Destination GCS prefix: gs://%s/%s", self.gcs_bucket, dst_prefix
+                )
 
                 # Skip if source and dest are the same
                 if dst_prefix == source_prefix:
+                    logger.debug("  Destination same as source, skipping")
                     continue
 
                 copied = 0
                 skipped = 0
 
+                logger.debug("  Copying artifacts...")
                 for src in src_objects:
                     if not src.startswith(source_prefix + "/"):
                         continue
@@ -1175,9 +1312,21 @@ class MeetingController:
                     dst = f"{dst_prefix}/{rel}"
                     if self._gcs_blob_exists(dst):
                         skipped += 1
+                        logger.debug("    SKIP (exists): %s", rel)
                         continue
+                    logger.debug("    COPY: %s -> %s", src, dst)
                     self._copy_gcs_blob(src=src, dst=dst)
                     copied += 1
+
+                logger.debug(
+                    "  Copy complete: %d copied, %d skipped, %d total",
+                    copied,
+                    skipped,
+                    len(src_objects),
+                )
+                logger.debug(
+                    "  FANOUT RECIPIENT: User %s received %d files", user_id, copied
+                )
 
                 sub_ref.set(
                     {
@@ -1193,6 +1342,7 @@ class MeetingController:
 
                 # Update the meeting document with transcription and file links
                 if meeting_path:
+                    logger.debug("  Updating meeting document %s", meeting_path)
                     try:
                         meeting_ref = self.db.document(meeting_path)
                         meeting_update = {
@@ -1203,17 +1353,28 @@ class MeetingController:
                         # Add transcription if available
                         if transcription_text:
                             meeting_update["transcription"] = transcription_text
+                            logger.debug("  Added transcription to meeting update")
 
                         meeting_ref.set(meeting_update, merge=True)
                         logger.debug(
                             "Updated meeting doc %s with transcription and file links",
                             meeting_path,
                         )
+                        logger.debug(
+                            "  FANOUT RECIPIENT UPDATE: User %s meeting updated with transcription",
+                            user_id,
+                        )
                     except Exception as e:
                         logger.warning(
                             "Failed to update meeting document %s: %s", meeting_path, e
                         )
+                else:
+                    logger.debug(
+                        "  No meeting path for subscriber, skipping meeting update"
+                    )
 
+            logger.debug("=" * 80)
+            logger.debug("Marking session fanout as complete")
             session_ref.set(
                 {
                     "fanout_status": "complete",
@@ -1222,6 +1383,8 @@ class MeetingController:
                 },
                 merge=True,
             )
+            logger.debug("Fanout completed successfully")
+            logger.debug("=" * 80)
         except Exception as e:
             logger.error(
                 "Fan-out failed for session %s: %s",
@@ -1229,6 +1392,7 @@ class MeetingController:
                 e,
                 exc_info=True,
             )
+            logger.debug("=" * 80)
             try:
                 self._meeting_session_ref(org_id=org_id, session_id=session_id).set(
                     {
@@ -1317,10 +1481,16 @@ class MeetingController:
         - Skip if meeting already has bot_instance_id
         """
 
+        logger.debug("=" * 80)
+        logger.debug("SCHEDULED MEETING DISCOVERY")
+        logger.debug("=" * 80)
+
         if self.meetings_query_mode == "collection_group":
             coll = self.db.collection_group(self.meetings_collection_path)
+            logger.debug("Query mode: collection_group")
         else:
             coll = self.db.collection(self.meetings_collection_path)
+            logger.debug("Query mode: collection")
 
         # Firestore doesn't support IN queries combined with some inequality
         # patterns consistently without composite indexes. Keep this simple:
@@ -1344,6 +1514,10 @@ class MeetingController:
 
         scanned_count = 0
 
+        logger.debug(
+            "Starting pagination loop (max_scan=%d, page_size=%d)", max_scan, page_size
+        )
+
         while len(candidates) < self.max_claim_per_poll and scanned_count < max_scan:
             q = coll.where(
                 field_path=self.meeting_status_field,
@@ -1355,7 +1529,10 @@ class MeetingController:
                 q = q.start_after(last_doc)
 
             batch = list(q.stream())
+            logger.debug("Fetched batch: %d documents", len(batch))
+
             if not batch:
+                logger.debug("No more documents, ending pagination")
                 break
 
             for doc in batch:
@@ -1363,20 +1540,36 @@ class MeetingController:
                 last_doc = doc
                 data = doc.to_dict() or {}
 
+                logger.debug("Evaluating meeting %s:", doc.id)
+                logger.debug(
+                    "  Meeting data: %s", json.dumps(data, indent=2, default=str)
+                )
+
                 # Skip if already has bot instance
                 if data.get(self.meeting_bot_instance_field):
+                    logger.debug(
+                        "  SKIP: Already has bot_instance_id=%s",
+                        data.get(self.meeting_bot_instance_field),
+                    )
                     continue
 
                 # Skip if missing meeting_url (required to create bot)
-                if not (data.get("meeting_url") or data.get("meetingUrl")):
+                meeting_url = data.get("meeting_url") or data.get("meetingUrl")
+                if not meeting_url:
+                    logger.debug("  SKIP: Missing meeting_url")
                     continue
 
+                logger.debug("  CANDIDATE: Meeting needs bot (url=%s)", meeting_url)
                 candidates.append(doc)
                 if len(candidates) >= self.max_claim_per_poll:
+                    logger.debug(
+                        "Reached max_claim_per_poll limit (%d)", self.max_claim_per_poll
+                    )
                     break
 
             # If we got fewer docs than page_size, we reached the end
             if len(batch) < page_size:
+                logger.debug("Fetched fewer than page_size, reached end of results")
                 break
 
         if scanned_count >= max_scan:
@@ -1385,6 +1578,13 @@ class MeetingController:
                 "Consider cleaning up old 'scheduled' meetings.",
                 scanned_count,
             )
+
+        logger.debug(
+            "Discovery complete: scanned=%d, candidates=%d",
+            scanned_count,
+            len(candidates),
+        )
+        logger.debug("=" * 80)
 
         return candidates
 
@@ -1768,18 +1968,34 @@ class MeetingController:
             meeting_id = data.get("meeting_id")
             org_id = data.get("teamId")
 
+            logger.debug("=" * 80)
+            logger.debug("PUB/SUB MESSAGE RECEIVED")
+            logger.debug("=" * 80)
+            logger.debug("Message ID: %s", message.message_id)
+            logger.debug(
+                "Full message data: %s", json.dumps(data, indent=2, default=str)
+            )
+            logger.debug("Meeting ID: %s", meeting_id)
+            logger.debug("Organization ID: %s", org_id)
+            logger.debug("=" * 80)
+
             logger.info(f"Received Pub/Sub message for meeting: {meeting_id}")
 
             if not meeting_id:
                 logger.error("Message missing meeting_id")
+                logger.debug("Acknowledging invalid message (missing meeting_id)")
                 message.ack()  # Ack invalid messages to remove them
                 return
 
+            logger.debug("Checking for known meeting document in Firestore...")
             # Unified Path: Check if this corresponds to a known meeting document
             # If so, delegate to the session dedupe logic used by the poller.
             # This prevents duplicate bots if Poller and Pub/Sub Trigger both fire.
             meeting_doc = None
             if org_id:
+                logger.debug(
+                    "Organization ID present, attempting to fetch meeting document..."
+                )
                 try:
                     meeting_ref = (
                         self.db.collection("organizations")
@@ -1788,14 +2004,27 @@ class MeetingController:
                         .document(meeting_id)
                     )
                     meeting_doc = meeting_ref.get()
+                    logger.debug(
+                        "Meeting document fetch result: exists=%s",
+                        meeting_doc.exists if meeting_doc else False,
+                    )
                 except Exception as fetch_err:
                     logger.warning(
                         f"Could not fetch meeting doc for {meeting_id}: {fetch_err}"
                     )
+            else:
+                logger.debug(
+                    "No organization ID in message, skipping meeting document lookup"
+                )
 
             if meeting_doc and meeting_doc.exists:
+                logger.debug("Meeting document found, validating user ownership...")
                 # Verify the meeting belongs to the user before using the existing record
                 m_data = meeting_doc.to_dict() or {}
+                logger.debug(
+                    "Meeting document data: %s",
+                    json.dumps(m_data, indent=2, default=str),
+                )
                 payload_user_id = data.get("user_id") or data.get("userId")
                 valid_owners = {
                     m_data.get("user_id"),
@@ -1806,9 +2035,15 @@ class MeetingController:
                 # Filter out None/Empty
                 valid_owners = {u for u in valid_owners if u}
 
+                logger.debug("Payload user ID: %s", payload_user_id)
+                logger.debug("Valid owner IDs: %s", valid_owners)
+
                 if payload_user_id and payload_user_id in valid_owners:
                     logger.info(
                         f"Found scheduled meeting {meeting_id}, delegating to session manager"
+                    )
+                    logger.debug(
+                        "Creating or updating session for scheduled meeting..."
                     )
                     session_id = self._try_create_or_update_session_for_meeting(
                         meeting_doc
@@ -1817,6 +2052,9 @@ class MeetingController:
                         logger.info(
                             f"Successfully enqueued session {session_id} for "
                             f"meeting {meeting_id}"
+                        )
+                        logger.debug(
+                            "Session enqueued successfully, acknowledging Pub/Sub message"
                         )
                         message.ack()
                         return
@@ -1830,13 +2068,24 @@ class MeetingController:
                         f"Meeting {meeting_id} exists but user verification failed "
                         f"(Payload: {payload_user_id}, Valid: {valid_owners}). Treating as ad-hoc."
                     )
+                    logger.debug(
+                        "User verification failed, falling through to legacy behavior"
+                    )
                     # Fall through to legacy behavior if session creation fails
+            else:
+                logger.debug(
+                    "No meeting document found or doesn't exist, proceeding with legacy flow"
+                )
 
             # Try to find the bot instance to claim it
+            logger.debug("Attempting to find or create bot instance for legacy flow...")
             bot_instance_id = None
 
             # 1. Check if meeting doc has bot_instance_id
             if org_id:
+                logger.debug(
+                    "Checking meeting document for existing bot_instance_id..."
+                )
                 meeting_ref = (
                     self.db.collection("organizations")
                     .document(org_id)
@@ -1847,12 +2096,22 @@ class MeetingController:
                 if meeting_doc.exists:
                     meeting_data = meeting_doc.to_dict() or {}
                     bot_instance_id = meeting_data.get(self.meeting_bot_instance_field)
+                    logger.debug(
+                        "Bot instance ID from meeting doc: %s", bot_instance_id
+                    )
+                else:
+                    logger.debug("Meeting document does not exist")
 
             # 2. If not found, try the default ID convention (meeting_id)
             if not bot_instance_id:
+                logger.debug(
+                    "No bot_instance_id found, using meeting_id as default: %s",
+                    meeting_id,
+                )
                 bot_instance_id = meeting_id
 
             # 3. Try to claim the bot instance
+            logger.debug("Attempting to claim bot_instance: %s", bot_instance_id)
             bot_ref = self.db.collection("bot_instances").document(str(bot_instance_id))
 
             # If bot instance doesn't exist, launch anyway
@@ -1863,31 +2122,47 @@ class MeetingController:
 
             if claimed:
                 logger.info(f"Claimed bot instance {bot_instance_id} via Pub/Sub")
+                logger.debug("Creating Kubernetes job for claimed bot instance...")
                 if self.create_manager_job(data, message.message_id):
+                    logger.debug(
+                        "Job created successfully, marking bot instance as done"
+                    )
                     self._mark_bot_instance_done(bot_ref, ok=True)
                     message.ack()
                 else:
+                    logger.error(
+                        "Failed to create job for bot instance %s", bot_instance_id
+                    )
                     self._mark_bot_instance_done(bot_ref, ok=False)
                     message.nack()
             else:
                 # Could not claim. Check if it exists
                 # If missing, launch without state tracking
                 # If exists, someone else is handling it
-                if not bot_ref.get().exists:
+                logger.debug("Failed to claim bot instance, checking if it exists...")
+                bot_doc = bot_ref.get()
+                if not bot_doc.exists:
                     logger.warning(
                         f"Bot instance {bot_instance_id} not found. "
                         f"Launching without state tracking."
                     )
+                    logger.debug("Creating job without state tracking...")
                     if self.create_manager_job(data, message.message_id):
+                        logger.debug("Job created successfully without state tracking")
                         message.ack()
                     else:
+                        logger.error("Failed to create job without state tracking")
                         message.nack()
                 else:
                     logger.info(f"Bot instance {bot_instance_id} already processing")
+                    logger.debug(
+                        "Bot instance already claimed/processing, acknowledging message"
+                    )
                     message.ack()  # Ack: someone else handling it
 
         except Exception as e:
-            logger.error(f"Error processing Pub/Sub message: {e}")
+            logger.error(f"Error processing Pub/Sub message: {e}", exc_info=True)
+            logger.debug("Exception occurred, nacking message")
             message.nack()
 
     def _start_pubsub_listener(self):

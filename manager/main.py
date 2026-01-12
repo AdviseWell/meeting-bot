@@ -20,6 +20,7 @@ Designed to run as a Kubernetes Job, spawned by the controller.
 import os
 import sys
 import logging
+import json
 from typing import Dict, Optional
 import tempfile
 from pathlib import Path
@@ -246,6 +247,7 @@ class MeetingManager:
         try:
             # Only import and initialize heavy dependencies once we know the
             # configuration is valid.
+            logger.debug("Initializing clients...")
             self._init_clients()
 
             logger.info(f"Processing meeting {self.meeting_id}")
@@ -254,32 +256,58 @@ class MeetingManager:
 
             # Step 0: Wait for meeting-bot API to be ready
             logger.info("Step 0: Waiting for meeting-bot API to become ready...")
+            logger.debug("PRE-MEETING CHECK: Verifying meeting-bot API availability")
             if not self.meeting_monitor.wait_for_api_ready():
                 logger.error("Meeting-bot API did not become ready in time")
+                logger.debug("PRE-MEETING DECISION: Aborting - API not ready")
                 return False
+
+            logger.debug("PRE-MEETING DECISION: API ready, proceeding to join meeting")
 
             # Step 1: Join the meeting
             logger.info("Step 1: Joining meeting...")
+            logger.debug("PRE-MEETING: Sending join request to meeting-bot API")
+            logger.debug("Join parameters:")
+            logger.debug("  URL: %s", self.meeting_url)
+            logger.debug(
+                "  Metadata: %s",
+                (
+                    json.dumps(self.metadata, indent=2, default=str)
+                    if self.metadata
+                    else "None"
+                ),
+            )
+
             job_id = self.meeting_monitor.join_meeting(
                 self.meeting_url,
                 self.metadata,
             )
             if not job_id:
                 logger.error("Failed to join meeting")
+                logger.debug(
+                    "PRE-MEETING DECISION: Bot did not join - could indicate meeting not started, incorrect URL, or API issue"
+                )
                 return False
 
             logger.info(f"Successfully joined meeting with job ID: {job_id}")
+            logger.debug("PRE-MEETING DECISION: Bot successfully joined meeting")
 
             # Step 2: Monitor the meeting (check every 10 seconds)
             logger.info("Step 2: Monitoring meeting status...")
+            logger.debug("DURING MEETING: Starting monitoring loop")
             recording_path = self.meeting_monitor.monitor_until_complete(
                 job_id, self.metadata, check_interval=10
             )
             if not recording_path:
                 logger.error("Meeting monitoring failed or no recording generated")
+                logger.debug(
+                    "POST-MEETING DECISION: No recording file - meeting may have ended prematurely or recording failed"
+                )
                 return False
 
             logger.info(f"Meeting completed. Recording at: {recording_path}")
+            logger.debug("POST-MEETING: Recording file created successfully")
+            logger.debug("Recording path: %s", recording_path)
 
             # Use PVC-backed scratch space for any heavy processing. This avoids
             # GKE Autopilot ephemeral storage limits.
@@ -347,8 +375,12 @@ class MeetingManager:
 
             # Step 3: Upload original WEBM file to GCS (required)
             logger.info("Step 3: Uploading original WEBM file to GCS...")
+            logger.debug("POST-MEETING: Verifying recording file exists")
             if not os.path.exists(recording_path):
                 logger.error(f"Recording file not found: {recording_path}")
+                logger.debug(
+                    "POST-MEETING DECISION: Recording file missing - cannot proceed"
+                )
                 return False
 
             webm_size = os.path.getsize(recording_path)
@@ -357,19 +389,25 @@ class MeetingManager:
                 webm_size,
                 webm_size / (1024 * 1024),
             )
+            logger.debug("POST-MEETING: Validating file size")
             if webm_size < 1000:
                 logger.error(
                     "❌ WEBM file too small (%s bytes) - file is " "empty or corrupted",
                     webm_size,
                 )
+                logger.debug("POST-MEETING DECISION: File too small, likely corrupted")
                 return False
 
+            logger.debug("POST-MEETING: Uploading to GCS path: %s", self.gcs_path)
             webm_gcs_path = f"{self.gcs_path}/recording.webm"
             webm_uploaded = self.storage_client.upload_file(
                 recording_path, webm_gcs_path
             )
             if not webm_uploaded:
                 logger.error("Failed to upload original WEBM file")
+                logger.debug(
+                    "POST-MEETING DECISION: Upload failed - storage issue or permissions"
+                )
                 return False
 
             logger.info(
@@ -377,21 +415,33 @@ class MeetingManager:
                 self.gcs_bucket,
                 webm_gcs_path,
             )
+            logger.debug("POST-MEETING: WEBM upload successful")
 
             # Step 3.1: Check for ad-hoc meeting and create/update if needed
             # Ad-hoc meetings occur when a user joins via Pub/Sub without
             # a pre-scheduled meeting document in Firestore.
             # Even if the meeting exists (created by frontend), it may be
             # missing the 'start' field which is required for UI display.
+            logger.debug("POST-MEETING: Checking for ad-hoc meeting requirements")
             if self.fs_meeting_id and self.team_id:
+                logger.debug("Fetching meeting document from Firestore...")
                 meeting_data = self.firestore_client.get_meeting(
                     organization_id=self.team_id,
                     meeting_id=self.fs_meeting_id,
+                )
+                logger.debug(
+                    "Meeting data from Firestore: %s",
+                    (
+                        json.dumps(meeting_data, indent=2, default=str)
+                        if meeting_data
+                        else "None"
+                    ),
                 )
 
                 # Get recording duration to calculate meeting start time
                 from media_converter import get_recording_duration_seconds
 
+                logger.debug("Calculating recording duration...")
                 duration_seconds = get_recording_duration_seconds(recording_path)
 
                 # Fallback to MP4 if WEBM duration failed (common with streaming WEBM)
@@ -399,9 +449,14 @@ class MeetingManager:
                     logger.info("Falling back to MP4 for duration check...")
                     duration_seconds = get_recording_duration_seconds(mp4_path)
 
+                logger.debug("Recording duration: %s seconds", duration_seconds)
+
                 if not meeting_data:
                     # Meeting doesn't exist - create it
                     logger.info("Meeting document not found - creating ad-hoc meeting")
+                    logger.debug(
+                        "POST-MEETING DECISION: Creating ad-hoc meeting document"
+                    )
 
                     if duration_seconds:
                         from datetime import datetime, timezone, timedelta
@@ -415,6 +470,11 @@ class MeetingManager:
                             f"Creating ad-hoc meeting: duration={duration_seconds}s"
                             f" ({duration_seconds/60:.1f}min), start_at={start_at}"
                         )
+                        logger.debug("Ad-hoc meeting details:")
+                        logger.debug("  organization_id: %s", self.team_id)
+                        logger.debug("  user_id: %s", self.user_id)
+                        logger.debug("  meeting_url: %s", self.meeting_url)
+                        logger.debug("  start_at: %s", start_at)
 
                         # Create the ad-hoc meeting document
                         new_meeting_id = self.firestore_client.create_adhoc_meeting(
@@ -539,15 +599,24 @@ class MeetingManager:
             transcript_json_path = None
             transcript_md_path = None
 
+            logger.debug("POST-MEETING: Starting transcription process")
+            logger.debug("Transcription mode: %s", self.transcription_mode)
+
             if self.transcription_mode == "none":
                 logger.info("Step 4: Transcription skipped (TRANSCRIPTION_MODE=none)")
+                logger.debug("POST-MEETING DECISION: Skipping transcription")
             elif self.transcription_mode == "offline":
                 logger.info(
                     "Step 4: Transcribing offline with whisper.cpp + " "diarization..."
                 )
+                logger.debug("POST-MEETING: Using offline transcription (whisper.cpp)")
                 try:
                     # Prefer extracted audio when available.
                     local_input = audio_path or recording_path
+                    logger.debug("Transcription input file: %s", local_input)
+                    logger.debug("Transcription language: %s", self.offline_language)
+                    logger.debug("Max speakers: %d", self.offline_max_speakers)
+
                     out_dir = Path(tempfile.gettempdir())
 
                     def _run_offline(diarize: bool):
@@ -583,12 +652,17 @@ class MeetingManager:
                         transcript_txt_path,
                         transcript_json_path,
                     )
+                    logger.debug(
+                        "POST-MEETING: Transcription files generated successfully"
+                    )
 
                     # Best-effort: persist offline transcript into Firestore.
                     # We write into the same `transcription` field used by the
                     # Gemini path.
+                    logger.debug("POST-MEETING: Persisting transcript to Firestore")
                     try:
                         firestore_meeting_id = self.fs_meeting_id or self.meeting_id
+                        logger.debug("Firestore meeting ID: %s", firestore_meeting_id)
                         from firestore_persistence import (
                             persist_transcript_to_firestore,
                         )
@@ -599,20 +673,30 @@ class MeetingManager:
                             markdown_path=transcript_md_path,
                             logger=logger,
                         )
+                        logger.debug(
+                            "POST-MEETING: Transcript persisted to Firestore successfully"
+                        )
                     except Exception as firestore_err:
                         logger.exception(
                             "Error storing offline transcript in " "Firestore: %s",
                             firestore_err,
+                        )
+                        logger.debug(
+                            "POST-MEETING: Failed to persist transcript to Firestore (non-fatal)"
                         )
                 except Exception as e:
                     logger.exception(
                         "Offline transcription failed (non-fatal): %s",
                         e,
                     )
+                    logger.debug(
+                        "POST-MEETING: Transcription failed (continuing without it)"
+                    )
             else:
                 logger.info(
                     "Step 4: Transcribing with Gemini " "(audio-only preferred)..."
                 )
+                logger.debug("POST-MEETING: Using Gemini transcription")
 
             if self.transcription_mode == "gemini":
                 try:
@@ -765,34 +849,61 @@ class MeetingManager:
 
             # Step 5: Upload transcripts if available
             logger.info("Step 5: Uploading transcripts to GCS (if available)...")
+            logger.debug("POST-MEETING: Checking for transcript files to upload")
+            logger.debug("  transcript_txt_path: %s", transcript_txt_path)
+            logger.debug("  transcript_json_path: %s", transcript_json_path)
+            logger.debug("  transcript_md_path: %s", transcript_md_path)
+
             transcript_txt_uploaded = False
             transcript_json_uploaded = False
             transcript_md_uploaded = False
             transcript_vtt_uploaded = False
+
             if transcript_txt_path and os.path.exists(transcript_txt_path):
+                logger.debug("Uploading transcript.txt...")
                 transcript_txt_uploaded = self.storage_client.upload_file(
                     transcript_txt_path, f"{self.gcs_path}/transcript.txt"
                 )
+                logger.debug("  transcript.txt uploaded: %s", transcript_txt_uploaded)
+
             if transcript_json_path and os.path.exists(transcript_json_path):
+                logger.debug("Uploading transcript.json...")
                 transcript_json_uploaded = self.storage_client.upload_file(
                     transcript_json_path, f"{self.gcs_path}/transcript.json"
                 )
+                logger.debug("  transcript.json uploaded: %s", transcript_json_uploaded)
+
             if transcript_md_path and os.path.exists(transcript_md_path):
+                logger.debug("Uploading transcript.md...")
                 transcript_md_uploaded = self.storage_client.upload_file(
                     transcript_md_path,
                     f"{self.gcs_path}/transcript.md",
                     content_type="text/markdown",
                 )
+                logger.debug("  transcript.md uploaded: %s", transcript_md_uploaded)
 
             # offline_pipeline writes a .vtt file next to the txt/json outputs.
             if transcript_txt_path:
                 transcript_vtt_path = os.path.splitext(transcript_txt_path)[0] + ".vtt"
                 if os.path.exists(transcript_vtt_path):
+                    logger.debug("Uploading transcript.vtt...")
                     transcript_vtt_uploaded = self.storage_client.upload_file(
                         transcript_vtt_path,
                         f"{self.gcs_path}/transcript.vtt",
                         content_type="text/vtt",
                     )
+                    logger.debug(
+                        "  transcript.vtt uploaded: %s", transcript_vtt_uploaded
+                    )
+
+            logger.debug("POST-MEETING: Transcript upload summary:")
+            logger.debug(
+                "  TXT: %s, JSON: %s, MD: %s, VTT: %s",
+                transcript_txt_uploaded,
+                transcript_json_uploaded,
+                transcript_md_uploaded,
+                transcript_vtt_uploaded,
+            )
 
             logger.info(
                 "Successfully uploaded recording to gs://%s/%s/",
@@ -863,37 +974,44 @@ class MeetingManager:
 
             # Session-dedupe support: mark the meeting session complete and
             # publish an artifact manifest so the controller can fan-out copies.
+            logger.debug("=" * 80)
+            logger.debug("POST-MEETING: Marking session complete")
+            logger.debug("=" * 80)
+
+            artifacts_manifest = {
+                "recording_webm": webm_gcs_path,
+                "recording_mp4": (
+                    f"{self.gcs_path}/recording.mp4" if mp4_path else None
+                ),
+                "recording_m4a": audio_gcs_path,
+                "transcript_txt": (
+                    f"{self.gcs_path}/transcript.txt"
+                    if transcript_txt_uploaded
+                    else None
+                ),
+                "transcript_json": (
+                    f"{self.gcs_path}/transcript.json"
+                    if transcript_json_uploaded
+                    else None
+                ),
+                "transcript_md": (
+                    f"{self.gcs_path}/transcript.md" if transcript_md_uploaded else None
+                ),
+                "transcript_vtt": (
+                    f"{self.gcs_path}/transcript.vtt"
+                    if transcript_vtt_uploaded
+                    else None
+                ),
+            }
+
+            logger.debug("Artifacts manifest:")
+            logger.debug(json.dumps(artifacts_manifest, indent=2, default=str))
+            logger.debug(
+                "FANOUT: These artifacts will be copied to all session subscribers"
+            )
+
             try:
-                self._mark_session_complete(
-                    ok=True,
-                    artifacts={
-                        "recording_webm": webm_gcs_path,
-                        "recording_mp4": (
-                            f"{self.gcs_path}/recording.mp4" if mp4_path else None
-                        ),
-                        "recording_m4a": audio_gcs_path,
-                        "transcript_txt": (
-                            f"{self.gcs_path}/transcript.txt"
-                            if transcript_txt_uploaded
-                            else None
-                        ),
-                        "transcript_json": (
-                            f"{self.gcs_path}/transcript.json"
-                            if transcript_json_uploaded
-                            else None
-                        ),
-                        "transcript_md": (
-                            f"{self.gcs_path}/transcript.md"
-                            if transcript_md_uploaded
-                            else None
-                        ),
-                        "transcript_vtt": (
-                            f"{self.gcs_path}/transcript.vtt"
-                            if transcript_vtt_uploaded
-                            else None
-                        ),
-                    },
-                )
+                self._mark_session_complete(ok=True, artifacts=artifacts_manifest)
             except Exception as sess_err:
                 logger.debug("Session completion update failed (ignored): %s", sess_err)
 
@@ -950,6 +1068,18 @@ class MeetingManager:
         logger.info("=" * 50)
         logger.info("Meeting Bot Manager starting...")
         logger.info("=" * 50)
+        logger.debug("ENVIRONMENT VARIABLES:")
+        logger.debug("  MEETING_ID: %s", self.meeting_id)
+        logger.debug("  FS_MEETING_ID: %s", self.fs_meeting_id)
+        logger.debug("  MEETING_URL: %s", self.meeting_url)
+        logger.debug("  USER_ID: %s", self.user_id)
+        logger.debug("  TEAM_ID: %s", self.team_id)
+        logger.debug("  GCS_BUCKET: %s", self.gcs_bucket)
+        logger.debug("  GCS_PATH: %s", self.gcs_path)
+        logger.debug("  MEETING_BOT_API_URL: %s", self.meeting_bot_api)
+        logger.debug("  TRANSCRIPTION_MODE: %s", self.transcription_mode)
+        logger.debug("  FIRESTORE_DATABASE: %s", self.firestore_database)
+
         logger.info(f"Meeting ID: {self.meeting_id}")
         if self.fs_meeting_id:
             logger.info(f"Firestore Meeting ID: {self.fs_meeting_id}")
@@ -957,6 +1087,12 @@ class MeetingManager:
         logger.info(f"GCS Bucket: {self.gcs_bucket}")
         logger.info(f"GCS Path: {self.gcs_path}")
         logger.info(f"Meeting Bot API: {self.meeting_bot_api}")
+
+        if self.metadata:
+            logger.debug(
+                "Meeting metadata: %s", json.dumps(self.metadata, indent=2, default=str)
+            )
+
         logger.info("=" * 50)
 
         exit_code = 0
