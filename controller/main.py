@@ -1859,8 +1859,49 @@ class MeetingController:
             self.is_leader = False
             return False
 
+    def _parse_start_time(self, start_value) -> Optional[datetime]:
+        """Parse a start time value that may be a datetime, timestamp, or ISO string.
+        
+        Calendar sync systems may store 'start' as an ISO string instead of a
+        Firestore Timestamp. This helper normalizes both formats.
+        
+        Returns:
+            datetime object in UTC, or None if parsing fails.
+        """
+        if start_value is None:
+            return None
+        
+        # Already a datetime
+        if isinstance(start_value, datetime):
+            if start_value.tzinfo is None:
+                return start_value.replace(tzinfo=timezone.utc)
+            return start_value
+        
+        # Firestore DatetimeWithNanoseconds (has .timestamp() method)
+        if hasattr(start_value, "timestamp"):
+            return datetime.fromtimestamp(start_value.timestamp(), tz=timezone.utc)
+        
+        # ISO string format (e.g., "2026-01-12T22:15:00+00:00")
+        if isinstance(start_value, str):
+            try:
+                # Handle both "Z" and "+00:00" suffixes
+                parsed = datetime.fromisoformat(start_value.replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                return parsed
+            except ValueError:
+                logger.warning(f"Could not parse start time string: {start_value}")
+                return None
+        
+        logger.warning(f"Unknown start time type: {type(start_value)}")
+        return None
+
     def _scan_upcoming_meetings(self):
-        """Scan for meetings starting soon and enqueue them."""
+        """Scan for meetings starting soon and enqueue them.
+        
+        Note: This method handles both Firestore Timestamp and ISO string formats
+        for the 'start' field, as calendar sync systems may use either format.
+        """
         now = datetime.now(timezone.utc)
         target_time = now + timedelta(minutes=2)
         window_start = target_time - timedelta(seconds=30)
@@ -1873,15 +1914,54 @@ class MeetingController:
         else:
             coll = self.db.collection(self.meetings_collection_path)
 
-        # Query by time window
+        # Query by time window using Firestore Timestamp comparison.
+        # This works for documents where 'start' is stored as a Timestamp.
         query = coll.where("start", ">=", window_start).where("start", "<=", window_end)
 
         try:
             docs = list(query.stream())
+            
+            # Also query for meetings with ISO string 'start' fields.
+            # Calendar sync systems may store 'start' as a string like
+            # "2026-01-12T22:15:00+00:00" instead of a Firestore Timestamp.
+            # These won't be found by the timestamp query above.
+            window_start_iso = window_start.isoformat()
+            window_end_iso = window_end.isoformat()
+            
+            string_query = (
+                coll.where("start", ">=", window_start_iso)
+                .where("start", "<=", window_end_iso)
+            )
+            string_docs = list(string_query.stream())
+            
+            # Merge results, avoiding duplicates by document ID
+            seen_ids = {doc.id for doc in docs}
+            for doc in string_docs:
+                if doc.id not in seen_ids:
+                    docs.append(doc)
+                    seen_ids.add(doc.id)
+            
             logger.info(f"Found {len(docs)} meetings in time window")
 
             for doc in docs:
                 data = doc.to_dict()
+                
+                # Parse and validate the start time
+                start_time = self._parse_start_time(data.get("start"))
+                if start_time is None:
+                    logger.warning(
+                        f"Skipping {doc.id}: could not parse 'start' field"
+                    )
+                    continue
+                
+                # Double-check the start time is in our window
+                # (needed for string queries which may have edge cases)
+                if not (window_start <= start_time <= window_end):
+                    logger.debug(
+                        f"Skipping {doc.id}: start time {start_time} "
+                        f"outside window after parsing"
+                    )
+                    continue
 
                 logger.debug(
                     f"Evaluating meeting {doc.id}: "
