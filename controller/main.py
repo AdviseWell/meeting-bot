@@ -789,6 +789,146 @@ class MeetingController:
             .document(str(session_id))
         )
 
+    # --- Duplicate meeting detection and consolidation ---
+    def _extract_meeting_key(self, url: str) -> Optional[str]:
+        """
+        Extract a unique meeting key from the URL.
+
+        For Teams: The meeting ID from the URL
+        For Meet: The meeting code
+        For Zoom: The meeting ID
+
+        Returns:
+            A unique key like "teams:123456" or None if can't extract
+        """
+        if not url:
+            return None
+
+        import re
+
+        url_lower = url.lower()
+
+        # Teams Meet URLs: /meet/4393898968980?p=...
+        if "teams.microsoft.com/meet/" in url_lower:
+            match = re.search(r"/meet/(\d+)", url)
+            if match:
+                return f"teams:{match.group(1)}"
+
+        # Teams meetup-join URLs: /meetup-join/19%3ameeting_xxx/...
+        if "teams.microsoft.com/l/meetup-join" in url_lower:
+            # Extract the meeting GUID from encoded URL
+            match = re.search(r"meeting_([A-Za-z0-9]+)", url)
+            if match:
+                return f"teams:meeting_{match.group(1)}"
+
+        # Google Meet: /abc-defg-hij
+        if "meet.google.com/" in url_lower:
+            match = re.search(r"meet\.google\.com/([a-z]+-[a-z]+-[a-z]+)", url_lower)
+            if match:
+                return f"meet:{match.group(1)}"
+
+        # Zoom: /j/12345678901
+        if "zoom.us/j/" in url_lower or "zoom.com/j/" in url_lower:
+            match = re.search(r"/j/(\d+)", url)
+            if match:
+                return f"zoom:{match.group(1)}"
+
+        return None
+
+    def _find_duplicate_meetings(
+        self,
+        org_id: str,
+        meeting_url: str,
+        exclude_meeting_id: Optional[str] = None,
+    ) -> List[firestore.DocumentSnapshot]:
+        """
+        Find other meetings in the same org with the same meeting URL.
+
+        This helps detect when the Firebase function has created duplicate
+        meeting documents for the same meeting (e.g., due to double-clicking).
+
+        Args:
+            org_id: Organization ID
+            meeting_url: The meeting URL to search for
+            exclude_meeting_id: Optional meeting ID to exclude from results
+
+        Returns:
+            List of meeting documents with the same URL
+        """
+        if not org_id or not meeting_url:
+            return []
+
+        meeting_key = self._extract_meeting_key(meeting_url)
+        if not meeting_key:
+            return []
+
+        # Query meetings with the same join_url
+        meetings_ref = (
+            self.db.collection("organizations")
+            .document(org_id)
+            .collection("meetings")
+        )
+
+        # Query by join_url (exact match)
+        try:
+            query = meetings_ref.where(
+                filter=firestore.FieldFilter("join_url", "==", meeting_url)
+            )
+            results = list(query.stream())
+        except Exception as e:
+            logger.warning(f"Failed to query for duplicate meetings: {e}")
+            return []
+
+        # Filter out the excluded meeting
+        if exclude_meeting_id:
+            results = [doc for doc in results if doc.id != exclude_meeting_id]
+
+        return results
+
+    def _consolidate_duplicate_meeting(
+        self,
+        canonical_meeting: firestore.DocumentSnapshot,
+        duplicate_meeting: firestore.DocumentSnapshot,
+    ) -> bool:
+        """
+        Mark a duplicate meeting as merged into the canonical one.
+
+        This prevents the duplicate from being processed again and
+        keeps a reference to where the user's data ended up.
+
+        Args:
+            canonical_meeting: The meeting to keep
+            duplicate_meeting: The meeting to mark as merged
+
+        Returns:
+            True if consolidation succeeded
+        """
+        try:
+            now = datetime.now(timezone.utc)
+            duplicate_ref = duplicate_meeting.reference
+
+            # Mark as merged with reference to canonical meeting
+            duplicate_ref.update(
+                {
+                    "status": "merged",
+                    "merged_into": canonical_meeting.id,
+                    "merged_at": now,
+                    "updated_at": now,
+                }
+            )
+
+            logger.info(
+                f"Merged duplicate meeting {duplicate_meeting.id} into "
+                f"canonical meeting {canonical_meeting.id}"
+            )
+            return True
+
+        except Exception as e:
+            logger.warning(
+                f"Failed to consolidate duplicate meeting {duplicate_meeting.id}: {e}"
+            )
+            return False
+
     def _try_create_or_update_session_for_meeting(
         self,
         meeting_doc: firestore.DocumentSnapshot,
@@ -914,12 +1054,57 @@ class MeetingController:
                     fresh_meeting_url,
                 )
             else:
-                # Keep meeting_url up-to-date if it changes (best effort).
-                logger.debug("Transaction: Updating existing session document")
-                txn.update(session_ref, {"updated_at": now})
+                # Session exists - check if it's in a terminal state.
+                # For recurring meetings with the same URL, a previous session
+                # may be complete/failed. We need to re-queue it for the new
+                # occurrence.
+                sess_data = sess_snap.to_dict() or {}
+                sess_status = sess_data.get("status", "")
+                
                 logger.debug(
-                    "DEDUPLICATION DECISION: Existing session found - bot will be shared"
+                    "Transaction: Existing session has status='%s'", sess_status
                 )
+                
+                # Terminal states that indicate a previous meeting occurrence
+                # has finished - we should re-queue for the new occurrence.
+                terminal_states = {"complete", "failed", "cancelled", "error"}
+                
+                if sess_status in terminal_states:
+                    # Re-queue the session for this new meeting occurrence
+                    logger.info(
+                        "DEDUPLICATION: Session %s was '%s', re-queuing for new "
+                        "meeting occurrence",
+                        session_id[:16],
+                        sess_status,
+                    )
+                    txn.update(
+                        session_ref,
+                        {
+                            "status": "queued",
+                            "updated_at": now,
+                            "requeued_at": now,
+                            "previous_status": sess_status,
+                        },
+                    )
+                    logger.debug(
+                        "DEDUPLICATION DECISION: Session re-queued (was %s)",
+                        sess_status,
+                    )
+                elif sess_status == "queued":
+                    # Already queued, just update timestamp
+                    logger.debug("Transaction: Session already queued, updating timestamp")
+                    txn.update(session_ref, {"updated_at": now})
+                    logger.debug(
+                        "DEDUPLICATION DECISION: Existing queued session - bot will be shared"
+                    )
+                else:
+                    # Session is in progress (e.g., "processing", "claimed")
+                    # Just update timestamp, don't interfere
+                    logger.debug("Transaction: Session in progress (%s)", sess_status)
+                    txn.update(session_ref, {"updated_at": now})
+                    logger.debug(
+                        "DEDUPLICATION DECISION: Session in progress - bot already running"
+                    )
 
             # Ensure subscriber.
             if not sub_snap.exists:
@@ -1861,26 +2046,26 @@ class MeetingController:
 
     def _parse_start_time(self, start_value) -> Optional[datetime]:
         """Parse a start time value that may be a datetime, timestamp, or ISO string.
-        
+
         Calendar sync systems may store 'start' as an ISO string instead of a
         Firestore Timestamp. This helper normalizes both formats.
-        
+
         Returns:
             datetime object in UTC, or None if parsing fails.
         """
         if start_value is None:
             return None
-        
+
         # Already a datetime
         if isinstance(start_value, datetime):
             if start_value.tzinfo is None:
                 return start_value.replace(tzinfo=timezone.utc)
             return start_value
-        
+
         # Firestore DatetimeWithNanoseconds (has .timestamp() method)
         if hasattr(start_value, "timestamp"):
             return datetime.fromtimestamp(start_value.timestamp(), tz=timezone.utc)
-        
+
         # ISO string format (e.g., "2026-01-12T22:15:00+00:00")
         if isinstance(start_value, str):
             try:
@@ -1892,13 +2077,13 @@ class MeetingController:
             except ValueError:
                 logger.warning(f"Could not parse start time string: {start_value}")
                 return None
-        
+
         logger.warning(f"Unknown start time type: {type(start_value)}")
         return None
 
     def _scan_upcoming_meetings(self):
         """Scan for meetings starting soon and enqueue them.
-        
+
         Note: This method handles both Firestore Timestamp and ISO string formats
         for the 'start' field, as calendar sync systems may use either format.
         """
@@ -1920,40 +2105,37 @@ class MeetingController:
 
         try:
             docs = list(query.stream())
-            
+
             # Also query for meetings with ISO string 'start' fields.
             # Calendar sync systems may store 'start' as a string like
             # "2026-01-12T22:15:00+00:00" instead of a Firestore Timestamp.
             # These won't be found by the timestamp query above.
             window_start_iso = window_start.isoformat()
             window_end_iso = window_end.isoformat()
-            
-            string_query = (
-                coll.where("start", ">=", window_start_iso)
-                .where("start", "<=", window_end_iso)
+
+            string_query = coll.where("start", ">=", window_start_iso).where(
+                "start", "<=", window_end_iso
             )
             string_docs = list(string_query.stream())
-            
+
             # Merge results, avoiding duplicates by document ID
             seen_ids = {doc.id for doc in docs}
             for doc in string_docs:
                 if doc.id not in seen_ids:
                     docs.append(doc)
                     seen_ids.add(doc.id)
-            
+
             logger.info(f"Found {len(docs)} meetings in time window")
 
             for doc in docs:
                 data = doc.to_dict()
-                
+
                 # Parse and validate the start time
                 start_time = self._parse_start_time(data.get("start"))
                 if start_time is None:
-                    logger.warning(
-                        f"Skipping {doc.id}: could not parse 'start' field"
-                    )
+                    logger.warning(f"Skipping {doc.id}: could not parse 'start' field")
                     continue
-                
+
                 # Double-check the start time is in our window
                 # (needed for string queries which may have edge cases)
                 if not (window_start <= start_time <= window_end):
@@ -2026,6 +2208,66 @@ class MeetingController:
                 if "teams.microsoft.com" not in join_url:
                     logger.debug(f"Skipping {doc.id}: not a Teams meeting")
                     continue
+
+                # Check for duplicate meetings with same URL (prevents double-click issues)
+                org_id = (
+                    data.get("organization_id")
+                    or data.get("organizationId")
+                    or data.get("teamId")
+                    or data.get("team_id")
+                )
+                if org_id and join_url:
+                    duplicates = self._find_duplicate_meetings(
+                        org_id=org_id,
+                        meeting_url=join_url,
+                        exclude_meeting_id=doc.id,
+                    )
+                    if duplicates:
+                        # Check if current meeting should be the canonical one
+                        # Prefer meetings with bot_instance_id, then oldest
+                        current_has_bot = bool(
+                            data.get(self.meeting_bot_instance_field)
+                        )
+                        current_created = data.get("created_at")
+
+                        is_canonical = True
+                        for dup in duplicates:
+                            dup_data = dup.to_dict()
+                            dup_has_bot = bool(
+                                dup_data.get(self.meeting_bot_instance_field)
+                            )
+                            dup_created = dup_data.get("created_at")
+
+                            # If dup has bot and we don't, dup is canonical
+                            if dup_has_bot and not current_has_bot:
+                                is_canonical = False
+                                break
+                            # If neither has bot, older is canonical
+                            if (
+                                not dup_has_bot
+                                and not current_has_bot
+                                and dup_created
+                                and current_created
+                                and dup_created < current_created
+                            ):
+                                is_canonical = False
+                                break
+
+                        if not is_canonical:
+                            logger.info(
+                                f"Skipping duplicate meeting {doc.id}: "
+                                f"another meeting with same URL exists"
+                            )
+                            # Mark this meeting as merged
+                            canonical_id = duplicates[0].id
+                            self._consolidate_duplicate_meeting(
+                                duplicates[0], doc
+                            )
+                            continue
+                        else:
+                            # Current is canonical, merge any duplicates
+                            for dup in duplicates:
+                                self._consolidate_duplicate_meeting(doc, dup)
 
                 # Create/update meeting session (dedupe across users in same org).
                 logger.info(f"Enqueuing session for meeting {doc.id}")
@@ -2117,6 +2359,57 @@ class MeetingController:
 
                 logger.debug("Payload user ID: %s", payload_user_id)
                 logger.debug("Valid owner IDs: %s", valid_owners)
+
+                # Check for duplicate meetings with same URL
+                join_url = m_data.get("join_url") or m_data.get("meeting_url") or ""
+                if org_id and join_url:
+                    duplicates = self._find_duplicate_meetings(
+                        org_id=org_id,
+                        meeting_url=join_url,
+                        exclude_meeting_id=meeting_id,
+                    )
+                    if duplicates:
+                        current_has_bot = bool(
+                            m_data.get(self.meeting_bot_instance_field)
+                        )
+                        current_created = m_data.get("created_at")
+
+                        is_canonical = True
+                        for dup in duplicates:
+                            dup_data = dup.to_dict()
+                            dup_has_bot = bool(
+                                dup_data.get(self.meeting_bot_instance_field)
+                            )
+                            dup_created = dup_data.get("created_at")
+
+                            if dup_has_bot and not current_has_bot:
+                                is_canonical = False
+                                break
+                            if (
+                                not dup_has_bot
+                                and not current_has_bot
+                                and dup_created
+                                and current_created
+                                and dup_created < current_created
+                            ):
+                                is_canonical = False
+                                break
+
+                        if not is_canonical:
+                            # This meeting is a duplicate, use the canonical one instead
+                            logger.info(
+                                f"Meeting {meeting_id} is a duplicate, using "
+                                f"canonical meeting {duplicates[0].id} instead"
+                            )
+                            self._consolidate_duplicate_meeting(duplicates[0], meeting_doc)
+                            # Switch to processing the canonical meeting
+                            meeting_doc = duplicates[0]
+                            meeting_id = duplicates[0].id
+                            m_data = duplicates[0].to_dict() or {}
+                        else:
+                            # Current is canonical, merge any duplicates
+                            for dup in duplicates:
+                                self._consolidate_duplicate_meeting(meeting_doc, dup)
 
                 if payload_user_id and payload_user_id in valid_owners:
                     logger.info(
