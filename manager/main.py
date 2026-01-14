@@ -291,6 +291,17 @@ class MeetingManager:
 
             logger.info(f"Successfully joined meeting with job ID: {job_id}")
             logger.debug("PRE-MEETING DECISION: Bot successfully joined meeting")
+            
+            # Enhanced logging for session claim
+            session_id = self.fs_meeting_id or self.meeting_id
+            logger.info(
+                "SESSION_CLAIMED: session_id=%s, org_id=%s, meeting_url=%s, "
+                "bot_job_id=%s",
+                session_id[:16] if session_id else "unknown",
+                self.team_id or "unknown",
+                self.meeting_url[:50] if self.meeting_url else "unknown",
+                job_id,
+            )
 
             # Step 2: Monitor the meeting (check every 10 seconds)
             logger.info("Step 2: Monitoring meeting status...")
@@ -308,6 +319,16 @@ class MeetingManager:
             logger.info(f"Meeting completed. Recording at: {recording_path}")
             logger.debug("POST-MEETING: Recording file created successfully")
             logger.debug("Recording path: %s", recording_path)
+            
+            # Enhanced logging for recording complete
+            session_id = self.fs_meeting_id or self.meeting_id
+            logger.info(
+                "RECORDING_COMPLETE: session_id=%s, org_id=%s, "
+                "recording_path=%s",
+                session_id[:16] if session_id else "unknown",
+                self.team_id or "unknown",
+                recording_path,
+            )
 
             # Use PVC-backed scratch space for any heavy processing. This avoids
             # GKE Autopilot ephemeral storage limits.
@@ -1052,14 +1073,26 @@ class MeetingManager:
         )
 
         now = datetime.now(timezone.utc)
+        new_status = "complete" if ok else "failed"
         payload: dict = {
-            "status": "complete" if ok else "failed",
+            "status": new_status,
             "processed_at": now,
             "updated_at": now,
         }
 
         if artifacts is not None:
             payload["artifacts"] = {k: v for k, v in artifacts.items() if v}
+
+        # Enhanced logging for session status change
+        logger.info(
+            "SESSION_STATUS_CHANGE: session_id=%s, org_id=%s, "
+            "to_status=%s, trigger=recording_%s, artifact_count=%d",
+            session_id[:16] if session_id else "unknown",
+            org_id,
+            new_status,
+            "complete" if ok else "failed",
+            len(payload.get("artifacts", {})),
+        )
 
         ref.set(payload, merge=True)
 

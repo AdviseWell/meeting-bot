@@ -220,6 +220,39 @@ class MeetingController:
             self.meetings_collection_path,
         )
 
+    def _log_meeting_context(
+        self,
+        event: str,
+        *,
+        session_id: str = "",
+        org_id: str = "",
+        meeting_url: str = "",
+        user_id: str = "",
+        status: str = "",
+        extra: Dict[str, Any] = None,
+    ) -> None:
+        """
+        Log structured context optimized for LLM analysis.
+        
+        These logs are designed to be copy-pasted into LLM prompts
+        for debugging session/job issues.
+        """
+        context = {
+            "event": event,
+            "session_id": session_id[:16] if session_id else "",
+            "org_id": org_id,
+            "meeting_url": meeting_url[:60] if meeting_url else "",
+            "user_id": user_id,
+            "status": status,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        if extra:
+            context.update(extra)
+        
+        # Single-line structured log for easy grep/parsing
+        log_parts = [f"{k}={v}" for k, v in context.items() if v]
+        logger.info("MEETING_CONTEXT: %s", ", ".join(log_parts))
+
     def _validate_config(self):
         """Validate required environment variables"""
         required_vars = {
@@ -246,9 +279,13 @@ class MeetingController:
         Returns:
             True if job created successfully, False otherwise
         """
+        # Extract key identifiers early for logging
+        meeting_id = message_data.get("meeting_id", message_id)
+        meeting_url = message_data.get("meeting_url", "")
+        org_id = message_data.get("team_id") or message_data.get("org_id") or ""
+        session_id = message_data.get("session_id", "")[:16] if message_data.get("session_id") else ""
+        
         try:
-            meeting_id = message_data.get("meeting_id", message_id)
-            meeting_url = message_data.get("meeting_url")
 
             # Storage layout is always:
             #   recordings/<user_firebase_document_id>/<meeting_firebase_document_id>/<files>
@@ -276,11 +313,23 @@ class MeetingController:
                 user_doc_id = user_doc_id.strip()
 
             if not user_doc_id:
+                # LLM-FRIENDLY: Structured context for missing user_id diagnosis
                 logger.error(
-                    "Invalid message data - missing user id; refusing to create job. "
-                    "Expected one of: user_id/USER_ID/fs_user_id/FS_USER_ID/creator_user_id. "
-                    "Message keys: %s",
+                    "BOT_JOB_BLOCKED: reason=missing_user_id, "
+                    "session_id=%s, org_id=%s, meeting_url=%s, "
+                    "available_keys=%s",
+                    session_id,
+                    org_id,
+                    meeting_url[:50] if meeting_url else "none",
                     list(message_data.keys()),
+                )
+                logger.error(
+                    "LLM_CONTEXT: Job creation blocked. The message_data payload "
+                    "is missing a user identifier. Expected fields: user_id, USER_ID, "
+                    "fs_user_id, FS_USER_ID, creator_user_id, user_firebase_document_id, "
+                    "or user_doc_id. Received keys: %s. Full payload sample: %s",
+                    list(message_data.keys()),
+                    {k: str(v)[:100] for k, v in list(message_data.items())[:10]},
                 )
                 return False
 
@@ -288,8 +337,19 @@ class MeetingController:
             gcs_path = f"recordings/{user_doc_id}/{meeting_doc_id}"
 
             if not meeting_url:
+                # LLM-FRIENDLY: Structured context for missing meeting_url
                 logger.error(
-                    f"Invalid message data - missing meeting_url: {message_data}"
+                    "BOT_JOB_BLOCKED: reason=missing_meeting_url, "
+                    "session_id=%s, org_id=%s, user_id=%s",
+                    session_id,
+                    org_id,
+                    user_doc_id,
+                )
+                logger.error(
+                    "LLM_CONTEXT: Job creation blocked. No meeting_url in payload. "
+                    "This typically means the meeting document is malformed. "
+                    "Payload keys: %s",
+                    list(message_data.keys()),
                 )
                 return False
 
@@ -606,13 +666,49 @@ class MeetingController:
                 },
             )
 
+            # LLM-FRIENDLY: Comprehensive job creation success log
+            logger.info(
+                "BOT_JOB_CREATED: job_name=%s, session_id=%s, org_id=%s, "
+                "meeting_id=%s, meeting_url=%s, user_id=%s, gcs_path=%s",
+                job_name,
+                session_id,
+                org_id,
+                meeting_id,
+                meeting_url[:50] if meeting_url else "none",
+                user_doc_id,
+                gcs_path,
+            )
             logger.info(f"✅ Created job '{job_name}' for meeting {meeting_id}")
             return True
 
         except ApiException as e:
-            logger.error(f"❌ Kubernetes API error creating job: {e}")
+            # LLM-FRIENDLY: K8s API error with full context
+            logger.error(
+                "BOT_JOB_FAILED: reason=k8s_api_error, session_id=%s, "
+                "org_id=%s, meeting_url=%s, error=%s",
+                session_id,
+                org_id,
+                meeting_url[:50] if meeting_url else "none",
+                str(e)[:200],
+            )
+            logger.error(
+                "LLM_CONTEXT: Kubernetes API rejected job creation. "
+                "Common causes: resource quota exceeded, invalid job spec, "
+                "namespace issues, RBAC permissions. Error: %s",
+                str(e),
+            )
             return False
         except Exception as e:
+            # LLM-FRIENDLY: Generic error with context
+            logger.error(
+                "BOT_JOB_FAILED: reason=exception, session_id=%s, "
+                "org_id=%s, meeting_url=%s, error_type=%s, error=%s",
+                session_id,
+                org_id,
+                meeting_url[:50] if meeting_url else "none",
+                type(e).__name__,
+                str(e)[:200],
+            )
             logger.error(f"❌ Error creating manager job: {e}")
             return False
 
@@ -883,6 +979,17 @@ class MeetingController:
         if exclude_meeting_id:
             results = [doc for doc in results if doc.id != exclude_meeting_id]
 
+        # Enhanced logging for duplicate detection
+        if len(results) > 0:
+            logger.warning(
+                "DUPLICATE_MEETINGS_DETECTED: org_id=%s, url=%s, count=%d, "
+                "meeting_ids=%s",
+                org_id,
+                meeting_url[:50],
+                len(results),
+                [doc.id for doc in results],
+            )
+
         return results
 
     def _consolidate_duplicate_meeting(
@@ -918,8 +1025,10 @@ class MeetingController:
             )
 
             logger.info(
-                f"Merged duplicate meeting {duplicate_meeting.id} into "
-                f"canonical meeting {canonical_meeting.id}"
+                "MEETINGS_CONSOLIDATED: canonical_id=%s, merged_id=%s, "
+                "action=marked_merged",
+                canonical_meeting.id,
+                duplicate_meeting.id,
             )
             return True
 
@@ -1061,8 +1170,13 @@ class MeetingController:
                 sess_data = sess_snap.to_dict() or {}
                 sess_status = sess_data.get("status", "")
                 
-                logger.debug(
-                    "Transaction: Existing session has status='%s'", sess_status
+                # Enhanced logging for session check
+                logger.info(
+                    "SESSION_CHECK: session_id=%s, org_id=%s, exists=true, "
+                    "current_status=%s",
+                    session_id[:16],
+                    org_id,
+                    sess_status,
                 )
                 
                 # Terminal states that indicate a previous meeting occurrence
@@ -1072,8 +1186,8 @@ class MeetingController:
                 if sess_status in terminal_states:
                     # Re-queue the session for this new meeting occurrence
                     logger.info(
-                        "DEDUPLICATION: Session %s was '%s', re-queuing for new "
-                        "meeting occurrence",
+                        "SESSION_REQUEUE_DECISION: session_id=%s, "
+                        "current_status=%s, is_terminal=true, action=requeue",
                         session_id[:16],
                         sess_status,
                     )
@@ -1086,8 +1200,10 @@ class MeetingController:
                             "previous_status": sess_status,
                         },
                     )
-                    logger.debug(
-                        "DEDUPLICATION DECISION: Session re-queued (was %s)",
+                    logger.info(
+                        "SESSION_STATUS_CHANGE: session_id=%s, from_status=%s, "
+                        "to_status=queued, trigger=recurring_requeue",
+                        session_id[:16],
                         sess_status,
                     )
                 elif sess_status == "queued":
@@ -1175,6 +1291,87 @@ class MeetingController:
             "Query meeting_sessions where status='queued': found %d docs", len(results)
         )
         return results
+
+    def _validate_claimed_sessions_have_jobs(self) -> None:
+        """
+        Validate that sessions in 'claimed' or 'processing' status have corresponding K8s jobs.
+        
+        This helps detect orphaned sessions where job creation failed silently
+        or the job was deleted but the session wasn't updated.
+        """
+        try:
+            # Query sessions that should have running jobs
+            q = (
+                self.db.collection_group("meeting_sessions")
+                .where(field_path="status", op_string="in", value=["claimed", "processing"])
+                .limit(50)
+            )
+            claimed_sessions = list(q.stream())
+            
+            if not claimed_sessions:
+                return
+            
+            # Get list of running jobs
+            try:
+                jobs = self.batch_v1.list_namespaced_job(
+                    namespace=self.k8s_namespace,
+                    label_selector="app=meeting-bot-manager",
+                )
+                running_job_names = {job.metadata.name for job in jobs.items}
+            except Exception as e:
+                logger.warning("Failed to list K8s jobs for validation: %s", e)
+                return
+            
+            orphaned_count = 0
+            for session in claimed_sessions:
+                session_data = session.to_dict() or {}
+                session_id = session.id
+                org_id = session_data.get("org_id", "unknown")
+                status = session_data.get("status", "unknown")
+                claimed_at = session_data.get("claimed_at")
+                
+                # Check if there's a job for this session
+                # Job names are based on meeting_id, not session_id, so we check by pattern
+                has_job = any(session_id[:8] in job_name for job_name in running_job_names)
+                
+                if not has_job:
+                    orphaned_count += 1
+                    age_minutes = 0
+                    if claimed_at:
+                        try:
+                            if hasattr(claimed_at, 'timestamp'):
+                                age_minutes = (datetime.now(timezone.utc).timestamp() - claimed_at.timestamp()) / 60
+                        except Exception:
+                            pass
+                    
+                    # LLM-FRIENDLY: Orphaned session detected
+                    logger.warning(
+                        "SESSION_ORPHANED: session_id=%s, org_id=%s, status=%s, "
+                        "age_minutes=%.1f, has_k8s_job=false",
+                        session_id[:16],
+                        org_id,
+                        status,
+                        age_minutes,
+                    )
+                    logger.warning(
+                        "LLM_CONTEXT: Session %s is in '%s' status but has no "
+                        "corresponding K8s job. This session may be stuck. "
+                        "Possible causes: job creation failed, job was deleted, "
+                        "or job completed but didn't update session status. "
+                        "Consider resetting to 'queued' or 'failed'.",
+                        session_id[:16],
+                        status,
+                    )
+            
+            if orphaned_count > 0:
+                logger.warning(
+                    "SESSION_VALIDATION_SUMMARY: total_claimed=%d, orphaned=%d",
+                    len(claimed_sessions),
+                    orphaned_count,
+                )
+                
+        except Exception as e:
+            logger.debug("Session validation check failed: %s", e)
 
     def _query_completed_sessions_needing_fanout(
         self,
@@ -1321,6 +1518,17 @@ class MeetingController:
             # Get all subscribers
             subs = list(session_ref.collection("subscribers").stream())
             logger.debug("Total subscribers found: %d", len(subs))
+            
+            # Enhanced logging for fanout start
+            subscriber_ids = [sub.id for sub in subs]
+            logger.info(
+                "FANOUT_STARTING: session_id=%s, org_id=%s, "
+                "subscriber_count=%d, subscribers=%s",
+                session_id[:16],
+                org_id,
+                len(subs),
+                subscriber_ids,
+            )
 
             for idx, sub in enumerate(subs):
                 sub_data = sub.to_dict() or {}
@@ -1509,8 +1717,15 @@ class MeetingController:
                     skipped,
                     len(src_objects),
                 )
-                logger.debug(
-                    "  FANOUT RECIPIENT: User %s received %d files", user_id, copied
+                
+                # Enhanced per-subscriber fanout logging
+                logger.info(
+                    "FANOUT_SUBSCRIBER: session_id=%s, user_id=%s, "
+                    "files_copied=%d, files_skipped=%d, status=success",
+                    session_id[:16],
+                    user_id,
+                    copied,
+                    skipped,
                 )
 
                 sub_ref.set(
@@ -1568,9 +1783,24 @@ class MeetingController:
                 },
                 merge=True,
             )
-            logger.debug("Fanout completed successfully")
+            
+            # Enhanced logging for fanout completion
+            logger.info(
+                "FANOUT_COMPLETE: session_id=%s, org_id=%s, "
+                "total_subscribers=%d, status=success",
+                session_id[:16],
+                org_id,
+                len(subs),
+            )
             logger.debug("=" * 80)
         except Exception as e:
+            # Enhanced logging for fanout failure
+            logger.error(
+                "FANOUT_FAILED: session_id=%s, org_id=%s, error=%s",
+                session_id[:16],
+                org_id,
+                str(e),
+            )
             logger.error(
                 "Fan-out failed for session %s: %s",
                 session_id,
@@ -2587,9 +2817,20 @@ class MeetingController:
 
                 # Step 0: discover meetings starting soon (2min window)
                 self._scan_upcoming_meetings()
+                
+                # Step 0.5: validate claimed sessions have jobs (periodic check)
+                self._validate_claimed_sessions_have_jobs()
 
                 # Step 1: process queued meeting sessions (org+meeting_url dedupe).
                 session_docs = self._query_queued_meeting_sessions()
+                
+                # LLM-FRIENDLY: Periodic status summary
+                logger.info(
+                    "POLL_CYCLE_STATUS: queued_sessions=%d, timestamp=%s",
+                    len(session_docs),
+                    datetime.now(timezone.utc).isoformat(),
+                )
+                
                 if not session_docs:
                     logger.info(
                         "No queued sessions found. Waiting %ss...",
@@ -2602,19 +2843,65 @@ class MeetingController:
 
                 for session_doc in session_docs:
                     session_ref = session_doc.reference
+                    session_data = session_doc.to_dict() or {}
+                    session_id_short = session_doc.id[:16]
+                    session_org = session_data.get("org_id", "unknown")
+                    session_url = session_data.get("meeting_url", "")[:50]
+                    
                     try:
                         if not self._try_claim_meeting_session(session_ref):
+                            # LLM-FRIENDLY: Log why we didn't claim
+                            logger.info(
+                                "SESSION_CLAIM_SKIPPED: session_id=%s, org_id=%s, "
+                                "reason=already_claimed_or_conflict",
+                                session_id_short,
+                                session_org,
+                            )
                             continue
 
                         payload = self._build_job_payload_from_meeting_session(
                             session_doc
                         )
                         ok = self.create_manager_job(payload, session_doc.id)
-                        if not ok:
+                        
+                        if ok:
+                            # LLM-FRIENDLY: Successful job creation for session
+                            logger.info(
+                                "SESSION_JOB_SUCCESS: session_id=%s, org_id=%s, "
+                                "meeting_url=%s, status=job_created",
+                                session_id_short,
+                                session_org,
+                                session_url,
+                            )
+                        else:
+                            # LLM-FRIENDLY: Job creation failed - this is a problem!
+                            logger.error(
+                                "SESSION_JOB_FAILED: session_id=%s, org_id=%s, "
+                                "meeting_url=%s, status=job_creation_failed",
+                                session_id_short,
+                                session_org,
+                                session_url,
+                            )
+                            logger.error(
+                                "LLM_CONTEXT: Session %s was claimed but job creation "
+                                "failed. The session will be marked as failed. "
+                                "Check BOT_JOB_BLOCKED or BOT_JOB_FAILED logs above "
+                                "for the specific reason. Common causes: missing user_id, "
+                                "missing meeting_url, K8s quota, or API errors.",
+                                session_id_short,
+                            )
                             # Only mark failed if job creation failed.
                             # Manager is responsible for marking complete after artifacts upload.
                             self._mark_meeting_session_done(session_ref, ok=False)
                     except Exception as e:
+                        logger.error(
+                            "SESSION_PROCESSING_ERROR: session_id=%s, org_id=%s, "
+                            "error_type=%s, error=%s",
+                            session_id_short,
+                            session_org,
+                            type(e).__name__,
+                            str(e)[:200],
+                        )
                         logger.error(
                             "Failed processing meeting session %s: %s",
                             session_doc.id,
