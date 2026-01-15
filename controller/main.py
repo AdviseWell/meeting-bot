@@ -233,7 +233,7 @@ class MeetingController:
     ) -> None:
         """
         Log structured context optimized for LLM analysis.
-        
+
         These logs are designed to be copy-pasted into LLM prompts
         for debugging session/job issues.
         """
@@ -248,7 +248,7 @@ class MeetingController:
         }
         if extra:
             context.update(extra)
-        
+
         # Single-line structured log for easy grep/parsing
         log_parts = [f"{k}={v}" for k, v in context.items() if v]
         logger.info("MEETING_CONTEXT: %s", ", ".join(log_parts))
@@ -283,8 +283,12 @@ class MeetingController:
         meeting_id = message_data.get("meeting_id", message_id)
         meeting_url = message_data.get("meeting_url", "")
         org_id = message_data.get("team_id") or message_data.get("org_id") or ""
-        session_id = message_data.get("session_id", "")[:16] if message_data.get("session_id") else ""
-        
+        session_id = (
+            message_data.get("session_id", "")[:16]
+            if message_data.get("session_id")
+            else ""
+        )
+
         try:
 
             # Storage layout is always:
@@ -960,9 +964,7 @@ class MeetingController:
 
         # Query meetings with the same join_url
         meetings_ref = (
-            self.db.collection("organizations")
-            .document(org_id)
-            .collection("meetings")
+            self.db.collection("organizations").document(org_id).collection("meetings")
         )
 
         # Query by join_url (exact match)
@@ -1169,7 +1171,7 @@ class MeetingController:
                 # occurrence.
                 sess_data = sess_snap.to_dict() or {}
                 sess_status = sess_data.get("status", "")
-                
+
                 # Enhanced logging for session check
                 logger.info(
                     "SESSION_CHECK: session_id=%s, org_id=%s, exists=true, "
@@ -1178,11 +1180,11 @@ class MeetingController:
                     org_id,
                     sess_status,
                 )
-                
+
                 # Terminal states that indicate a previous meeting occurrence
                 # has finished - we should re-queue for the new occurrence.
                 terminal_states = {"complete", "failed", "cancelled", "error"}
-                
+
                 if sess_status in terminal_states:
                     # Re-queue the session for this new meeting occurrence
                     logger.info(
@@ -1208,7 +1210,9 @@ class MeetingController:
                     )
                 elif sess_status == "queued":
                     # Already queued, just update timestamp
-                    logger.debug("Transaction: Session already queued, updating timestamp")
+                    logger.debug(
+                        "Transaction: Session already queued, updating timestamp"
+                    )
                     txn.update(session_ref, {"updated_at": now})
                     logger.debug(
                         "DEDUPLICATION DECISION: Existing queued session - bot will be shared"
@@ -1295,7 +1299,7 @@ class MeetingController:
     def _validate_claimed_sessions_have_jobs(self) -> None:
         """
         Validate that sessions in 'claimed' or 'processing' status have corresponding K8s jobs.
-        
+
         This helps detect orphaned sessions where job creation failed silently
         or the job was deleted but the session wasn't updated.
         """
@@ -1303,14 +1307,16 @@ class MeetingController:
             # Query sessions that should have running jobs
             q = (
                 self.db.collection_group("meeting_sessions")
-                .where(field_path="status", op_string="in", value=["claimed", "processing"])
+                .where(
+                    field_path="status", op_string="in", value=["claimed", "processing"]
+                )
                 .limit(50)
             )
             claimed_sessions = list(q.stream())
-            
+
             if not claimed_sessions:
                 return
-            
+
             # Get list of running jobs
             try:
                 jobs = self.batch_v1.list_namespaced_job(
@@ -1321,7 +1327,7 @@ class MeetingController:
             except Exception as e:
                 logger.warning("Failed to list K8s jobs for validation: %s", e)
                 return
-            
+
             orphaned_count = 0
             for session in claimed_sessions:
                 session_data = session.to_dict() or {}
@@ -1329,21 +1335,26 @@ class MeetingController:
                 org_id = session_data.get("org_id", "unknown")
                 status = session_data.get("status", "unknown")
                 claimed_at = session_data.get("claimed_at")
-                
+
                 # Check if there's a job for this session
                 # Job names are based on meeting_id, not session_id, so we check by pattern
-                has_job = any(session_id[:8] in job_name for job_name in running_job_names)
-                
+                has_job = any(
+                    session_id[:8] in job_name for job_name in running_job_names
+                )
+
                 if not has_job:
                     orphaned_count += 1
                     age_minutes = 0
                     if claimed_at:
                         try:
-                            if hasattr(claimed_at, 'timestamp'):
-                                age_minutes = (datetime.now(timezone.utc).timestamp() - claimed_at.timestamp()) / 60
+                            if hasattr(claimed_at, "timestamp"):
+                                age_minutes = (
+                                    datetime.now(timezone.utc).timestamp()
+                                    - claimed_at.timestamp()
+                                ) / 60
                         except Exception:
                             pass
-                    
+
                     # LLM-FRIENDLY: Orphaned session detected
                     logger.warning(
                         "SESSION_ORPHANED: session_id=%s, org_id=%s, status=%s, "
@@ -1362,14 +1373,14 @@ class MeetingController:
                         session_id[:16],
                         status,
                     )
-            
+
             if orphaned_count > 0:
                 logger.warning(
                     "SESSION_VALIDATION_SUMMARY: total_claimed=%d, orphaned=%d",
                     len(claimed_sessions),
                     orphaned_count,
                 )
-                
+
         except Exception as e:
             logger.debug("Session validation check failed: %s", e)
 
@@ -1518,7 +1529,7 @@ class MeetingController:
             # Get all subscribers
             subs = list(session_ref.collection("subscribers").stream())
             logger.debug("Total subscribers found: %d", len(subs))
-            
+
             # Enhanced logging for fanout start
             subscriber_ids = [sub.id for sub in subs]
             logger.info(
@@ -1717,7 +1728,7 @@ class MeetingController:
                     skipped,
                     len(src_objects),
                 )
-                
+
                 # Enhanced per-subscriber fanout logging
                 logger.info(
                     "FANOUT_SUBSCRIBER: session_id=%s, user_id=%s, "
@@ -1783,7 +1794,7 @@ class MeetingController:
                 },
                 merge=True,
             )
-            
+
             # Enhanced logging for fanout completion
             logger.info(
                 "FANOUT_COMPLETE: session_id=%s, org_id=%s, "
@@ -2490,9 +2501,7 @@ class MeetingController:
                             )
                             # Mark this meeting as merged
                             canonical_id = duplicates[0].id
-                            self._consolidate_duplicate_meeting(
-                                duplicates[0], doc
-                            )
+                            self._consolidate_duplicate_meeting(duplicates[0], doc)
                             continue
                         else:
                             # Current is canonical, merge any duplicates
@@ -2631,7 +2640,9 @@ class MeetingController:
                                 f"Meeting {meeting_id} is a duplicate, using "
                                 f"canonical meeting {duplicates[0].id} instead"
                             )
-                            self._consolidate_duplicate_meeting(duplicates[0], meeting_doc)
+                            self._consolidate_duplicate_meeting(
+                                duplicates[0], meeting_doc
+                            )
                             # Switch to processing the canonical meeting
                             meeting_doc = duplicates[0]
                             meeting_id = duplicates[0].id
@@ -2817,20 +2828,20 @@ class MeetingController:
 
                 # Step 0: discover meetings starting soon (2min window)
                 self._scan_upcoming_meetings()
-                
+
                 # Step 0.5: validate claimed sessions have jobs (periodic check)
                 self._validate_claimed_sessions_have_jobs()
 
                 # Step 1: process queued meeting sessions (org+meeting_url dedupe).
                 session_docs = self._query_queued_meeting_sessions()
-                
+
                 # LLM-FRIENDLY: Periodic status summary
                 logger.info(
                     "POLL_CYCLE_STATUS: queued_sessions=%d, timestamp=%s",
                     len(session_docs),
                     datetime.now(timezone.utc).isoformat(),
                 )
-                
+
                 if not session_docs:
                     logger.info(
                         "No queued sessions found. Waiting %ss...",
@@ -2847,7 +2858,7 @@ class MeetingController:
                     session_id_short = session_doc.id[:16]
                     session_org = session_data.get("org_id", "unknown")
                     session_url = session_data.get("meeting_url", "")[:50]
-                    
+
                     try:
                         if not self._try_claim_meeting_session(session_ref):
                             # LLM-FRIENDLY: Log why we didn't claim
@@ -2863,7 +2874,7 @@ class MeetingController:
                             session_doc
                         )
                         ok = self.create_manager_job(payload, session_doc.id)
-                        
+
                         if ok:
                             # LLM-FRIENDLY: Successful job creation for session
                             logger.info(

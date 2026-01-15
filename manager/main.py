@@ -100,6 +100,14 @@ class MeetingManager:
         self.fs_meeting_id = os.environ.get(
             "FS_MEETING_ID"
         )  # Firestore-specific meeting ID
+
+        # Session-based consolidation: if set, this job is for a deduplicated
+        # meeting session and we must update the session status on completion.
+        self.meeting_session_id = (
+            os.environ.get("MEETING_SESSION_ID")
+            or os.environ.get("meeting_session_id")
+            or ""
+        ).strip()
         self.user_id = (
             os.environ.get("USER_ID")
             or os.environ.get("user_id")
@@ -291,7 +299,7 @@ class MeetingManager:
 
             logger.info(f"Successfully joined meeting with job ID: {job_id}")
             logger.debug("PRE-MEETING DECISION: Bot successfully joined meeting")
-            
+
             # Enhanced logging for session claim
             session_id = self.fs_meeting_id or self.meeting_id
             logger.info(
@@ -319,12 +327,11 @@ class MeetingManager:
             logger.info(f"Meeting completed. Recording at: {recording_path}")
             logger.debug("POST-MEETING: Recording file created successfully")
             logger.debug("Recording path: %s", recording_path)
-            
+
             # Enhanced logging for recording complete
             session_id = self.fs_meeting_id or self.meeting_id
             logger.info(
-                "RECORDING_COMPLETE: session_id=%s, org_id=%s, "
-                "recording_path=%s",
+                "RECORDING_COMPLETE: session_id=%s, org_id=%s, " "recording_path=%s",
                 session_id[:16] if session_id else "unknown",
                 self.team_id or "unknown",
                 recording_path,
@@ -1047,17 +1054,22 @@ class MeetingManager:
             return False
 
     def _mark_session_complete(self, *, ok: bool, artifacts: Optional[dict]) -> None:
-        """Best-effort: update per-org session state when running in session mode."""
+        """Best-effort: update per-org session state when running in session mode.
 
-        if not (self.gcs_path or "").startswith("recordings/sessions/"):
+        Session mode is detected by the presence of MEETING_SESSION_ID env var.
+        """
+
+        # Session mode is identified by meeting_session_id, not GCS path
+        if not self.meeting_session_id:
             return
 
-        session_id = self.fs_meeting_id or self.meeting_id
-        if not session_id:
-            return
-
+        session_id = self.meeting_session_id
         org_id = self.team_id or ""
         if not org_id:
+            logger.warning(
+                "SESSION_COMPLETE_SKIPPED: session_id=%s, reason=missing_org_id",
+                session_id[:16] if session_id else "unknown",
+            )
             return
 
         # Use a lightweight Firestore client directly; the existing
@@ -1104,6 +1116,7 @@ class MeetingManager:
         logger.debug("ENVIRONMENT VARIABLES:")
         logger.debug("  MEETING_ID: %s", self.meeting_id)
         logger.debug("  FS_MEETING_ID: %s", self.fs_meeting_id)
+        logger.debug("  MEETING_SESSION_ID: %s", self.meeting_session_id)
         logger.debug("  MEETING_URL: %s", self.meeting_url)
         logger.debug("  USER_ID: %s", self.user_id)
         logger.debug("  TEAM_ID: %s", self.team_id)
@@ -1112,6 +1125,15 @@ class MeetingManager:
         logger.debug("  MEETING_BOT_API_URL: %s", self.meeting_bot_api)
         logger.debug("  TRANSCRIPTION_MODE: %s", self.transcription_mode)
         logger.debug("  FIRESTORE_DATABASE: %s", self.firestore_database)
+
+        # Log session mode detection
+        if self.meeting_session_id:
+            logger.info(
+                "SESSION_MODE_DETECTED: session_id=%s, org_id=%s - "
+                "Will update session status on completion for fanout",
+                self.meeting_session_id[:16] if self.meeting_session_id else "unknown",
+                self.team_id or "unknown",
+            )
 
         logger.info(f"Meeting ID: {self.meeting_id}")
         if self.fs_meeting_id:
