@@ -1005,6 +1005,9 @@ class MeetingController:
         This prevents the duplicate from being processed again and
         keeps a reference to where the user's data ended up.
 
+        IMPORTANT: Also adds the duplicate meeting's user as a subscriber
+        to the session, so they receive fanout copies of the transcription.
+
         Args:
             canonical_meeting: The meeting to keep
             duplicate_meeting: The meeting to mark as merged
@@ -1015,6 +1018,7 @@ class MeetingController:
         try:
             now = datetime.now(timezone.utc)
             duplicate_ref = duplicate_meeting.reference
+            duplicate_data = duplicate_meeting.to_dict() or {}
 
             # Mark as merged with reference to canonical meeting
             duplicate_ref.update(
@@ -1032,6 +1036,77 @@ class MeetingController:
                 canonical_meeting.id,
                 duplicate_meeting.id,
             )
+
+            # CRITICAL: Add the duplicate meeting's user as a subscriber
+            # to the session so they receive fanout copies.
+            canonical_data = canonical_meeting.to_dict() or {}
+            session_id = canonical_data.get("meeting_session_id")
+            org_id = (
+                duplicate_data.get("organization_id")
+                or duplicate_data.get("organizationId")
+                or duplicate_data.get("teamId")
+                or duplicate_data.get("team_id")
+            )
+            duplicate_user_id = (
+                duplicate_data.get("user_id")
+                or duplicate_data.get("userId")
+                or duplicate_data.get("synced_by_user_id")
+            )
+
+            if session_id and org_id and duplicate_user_id:
+                # Add as subscriber to existing session
+                session_ref = self._meeting_session_ref(
+                    org_id=org_id, session_id=session_id
+                )
+                subscriber_ref = session_ref.collection("subscribers").document(
+                    str(duplicate_user_id)
+                )
+
+                # Check if already subscribed
+                sub_snap = subscriber_ref.get()
+                if not sub_snap.exists:
+                    subscriber_ref.set(
+                        {
+                            "user_id": str(duplicate_user_id),
+                            "fs_meeting_id": duplicate_meeting.id,
+                            "meeting_path": duplicate_ref.path,
+                            "status": "requested",
+                            "requested_at": now,
+                            "updated_at": now,
+                            "added_via": "merge_consolidation",
+                        }
+                    )
+                    logger.info(
+                        "SUBSCRIBER_ADDED_VIA_MERGE: session_id=%s, user_id=%s, "
+                        "duplicate_meeting_id=%s",
+                        session_id[:16] if session_id else "None",
+                        duplicate_user_id,
+                        duplicate_meeting.id,
+                    )
+
+                    # Also link the duplicate meeting to the session
+                    duplicate_ref.update(
+                        {
+                            "meeting_session_id": session_id,
+                            "session_status": "merged",
+                        }
+                    )
+                else:
+                    logger.debug(
+                        "User %s already subscribed to session %s",
+                        duplicate_user_id,
+                        session_id[:16] if session_id else "None",
+                    )
+            else:
+                logger.warning(
+                    "Cannot add subscriber for merged meeting %s: "
+                    "session_id=%s, org_id=%s, user_id=%s",
+                    duplicate_meeting.id,
+                    session_id,
+                    org_id,
+                    duplicate_user_id,
+                )
+
             return True
 
         except Exception as e:
