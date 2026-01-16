@@ -1694,28 +1694,45 @@ class MeetingController:
                     "Could not read transcription from %s: %s", transcript_txt_path, e
                 )
 
-            # Update the first subscriber's meeting with transcription
+            # Get session artifacts to copy to meeting documents
+            session_data = session_snap.to_dict() or {}
+            session_artifacts = session_data.get("artifacts", {})
+            logger.debug(
+                "Session artifacts to distribute: %s", list(session_artifacts.keys())
+            )
+
+            # Update the first subscriber's meeting with transcription and artifacts
             logger.debug("Updating first subscriber's meeting document...")
             first_meeting_path = first_sub_data.get("meeting_path")
             logger.debug("First subscriber meeting path: %s", first_meeting_path)
 
-            if first_meeting_path and transcription_text:
+            if first_meeting_path:
                 logger.debug(
-                    "Updating meeting %s with transcription and recording URL",
+                    "Updating meeting %s with transcription, recording URL, and artifacts",
                     first_meeting_path,
                 )
                 try:
                     meeting_ref = self.db.document(first_meeting_path)
-                    meeting_ref.set(
-                        {
-                            "transcription": transcription_text,
-                            "recording_url": f"gs://{self.gcs_bucket}/{source_prefix}/recording.webm",
-                            "updated_at": datetime.now(timezone.utc),
-                        },
-                        merge=True,
-                    )
+                    first_meeting_update = {
+                        "recording_url": f"gs://{self.gcs_bucket}/{source_prefix}/recording.webm",
+                        "updated_at": datetime.now(timezone.utc),
+                    }
+
+                    # Add transcription if available
+                    if transcription_text:
+                        first_meeting_update["transcription"] = transcription_text
+
+                    # Add artifacts (first subscriber uses original paths)
+                    if session_artifacts:
+                        first_meeting_update["artifacts"] = session_artifacts
+                        logger.debug(
+                            "Added %d artifacts to first subscriber",
+                            len(session_artifacts),
+                        )
+
+                    meeting_ref.set(first_meeting_update, merge=True)
                     logger.debug(
-                        "Updated first subscriber meeting doc %s with transcription",
+                        "Updated first subscriber meeting doc %s with transcription and artifacts",
                         first_meeting_path,
                     )
                     logger.debug(
@@ -1826,7 +1843,7 @@ class MeetingController:
                     merge=True,
                 )
 
-                # Update the meeting document with transcription and file links
+                # Update the meeting document with transcription, artifacts, and file links
                 if meeting_path:
                     logger.debug("  Updating meeting document %s", meeting_path)
                     try:
@@ -1841,13 +1858,32 @@ class MeetingController:
                             meeting_update["transcription"] = transcription_text
                             logger.debug("  Added transcription to meeting update")
 
+                        # Build artifacts dict with updated paths for this subscriber
+                        if session_artifacts:
+                            subscriber_artifacts = {}
+                            for artifact_key, artifact_path in session_artifacts.items():
+                                # Replace source prefix with destination prefix
+                                if source_prefix in artifact_path:
+                                    new_path = artifact_path.replace(
+                                        source_prefix, dst_prefix
+                                    )
+                                    subscriber_artifacts[artifact_key] = new_path
+                                else:
+                                    # Keep original if path doesn't match expected format
+                                    subscriber_artifacts[artifact_key] = artifact_path
+                            meeting_update["artifacts"] = subscriber_artifacts
+                            logger.debug(
+                                "  Added %d artifacts to subscriber meeting",
+                                len(subscriber_artifacts),
+                            )
+
                         meeting_ref.set(meeting_update, merge=True)
                         logger.debug(
-                            "Updated meeting doc %s with transcription and file links",
+                            "Updated meeting doc %s with transcription, artifacts, and file links",
                             meeting_path,
                         )
                         logger.debug(
-                            "  FANOUT RECIPIENT UPDATE: User %s meeting updated with transcription",
+                            "  FANOUT RECIPIENT UPDATE: User %s meeting updated with transcription and artifacts",
                             user_id,
                         )
                     except Exception as e:
