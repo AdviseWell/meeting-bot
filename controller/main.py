@@ -1104,7 +1104,7 @@ class MeetingController:
             payload["name"] = "Meeting Bot"
 
         # Create the job
-        success = self.create_manager_job(payload, session_id=meeting_id[:16])
+        success = self.create_manager_job(payload, meeting_id[:16])
 
         if success:
             # Update meeting doc with job reference
