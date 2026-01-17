@@ -29,7 +29,8 @@ import logging
 import hashlib
 from urllib.parse import urlsplit, urlunsplit
 from datetime import datetime, timezone, timedelta
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
+import re
 
 from google.cloud import firestore, pubsub_v1
 from google.cloud import storage
@@ -581,17 +582,26 @@ class MeetingController:
             # This avoids relying on RWX provisioning and keeps large artifacts
             # off node ephemeral storage.
             scratch_pvc_name = f"{job_name}-scratch"
+
+            # Compute URL hash for K8s label-based deduplication (used for both PVC and Job)
+            url_hash = self._meeting_url_hash(meeting_url)
+
+            # PVC labels (subset of job labels for easy identification)
+            pvc_labels = {
+                "app": "meeting-bot-manager",
+                "managed-by": "meeting-bot-controller",
+                "meeting-id": meeting_id[:63],
+                "org-id": self._sanitize_label_value(org_id),
+                "meeting-url-hash": url_hash,
+            }
+
             scratch_pvc = client.V1PersistentVolumeClaim(
                 api_version="v1",
                 kind="PersistentVolumeClaim",
                 metadata=client.V1ObjectMeta(
                     name=scratch_pvc_name,
                     namespace=self.k8s_namespace,
-                    labels={
-                        "app": "meeting-bot-manager",
-                        "meeting-id": meeting_id[:63],
-                        "managed-by": "meeting-bot-controller",
-                    },
+                    labels=pvc_labels,
                 ),
                 spec=client.V1PersistentVolumeClaimSpec(
                     access_modes=["ReadWriteOnce"],
@@ -603,6 +613,27 @@ class MeetingController:
                     ),
                 ),
             )
+
+            # Check if the PVC already exists (e.g., from a previous failed attempt)
+            # and delete it before creating a new one to avoid 409 Conflict errors.
+            try:
+                existing_pvc = self.core_v1.read_namespaced_persistent_volume_claim(
+                    name=scratch_pvc_name, namespace=self.k8s_namespace
+                )
+                logger.warning(
+                    "PVC_CLEANUP: Found existing PVC %s (phase=%s), deleting before recreation",
+                    scratch_pvc_name,
+                    existing_pvc.status.phase if existing_pvc.status else "unknown",
+                )
+                self.core_v1.delete_namespaced_persistent_volume_claim(
+                    name=scratch_pvc_name, namespace=self.k8s_namespace
+                )
+                # Brief wait for deletion to propagate
+                time.sleep(1)
+            except ApiException as e:
+                if e.status != 404:
+                    # Re-raise if it's not a "not found" error
+                    raise
 
             self.core_v1.create_namespaced_persistent_volume_claim(
                 namespace=self.k8s_namespace, body=scratch_pvc
@@ -621,6 +652,20 @@ class MeetingController:
                 ),
             )
 
+            # Build job labels (used for deduplication and debugging)
+            # Note: url_hash computed earlier for PVC labels
+            job_labels = {
+                "app": "meeting-bot-manager",
+                "managed-by": "meeting-bot-controller",
+                "meeting-id": meeting_id[:63],
+                # NEW: Labels for K8s-based deduplication
+                "org-id": self._sanitize_label_value(org_id),
+                "meeting-url-hash": url_hash,
+                # NEW: Debug labels
+                "user-id": self._sanitize_label_value(user_doc_id),
+                "fs-meeting-id": self._sanitize_label_value(meeting_doc_id),
+            }
+
             # Define and create the job.
             job = client.V1Job(
                 api_version="batch/v1",
@@ -628,11 +673,7 @@ class MeetingController:
                 metadata=client.V1ObjectMeta(
                     name=job_name,
                     namespace=self.k8s_namespace,
-                    labels={
-                        "app": "meeting-bot-manager",
-                        "meeting-id": meeting_id[:63],
-                        "managed-by": "meeting-bot-controller",
-                    },
+                    labels=job_labels,
                 ),
                 spec=client.V1JobSpec(
                     template=template,
@@ -872,6 +913,79 @@ class MeetingController:
         normalized = self._normalize_meeting_url(meeting_url)
         base = f"{(org_id or '').strip()}:{normalized}".encode("utf-8")
         return hashlib.sha256(base).hexdigest()
+
+    def _meeting_url_hash(self, meeting_url: str) -> str:
+        """Compute a 16-char hash of the normalized meeting URL for K8s labels."""
+        normalized = self._normalize_meeting_url(meeting_url)
+        return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+
+    def _sanitize_label_value(self, value: str) -> str:
+        """Sanitize a value for use as a K8s label.
+
+        K8s labels must:
+        - Be max 63 characters
+        - Contain only alphanumeric, '-', '_', '.'
+        - Start and end with alphanumeric
+        """
+        if not value:
+            return ""
+        # Replace invalid chars with dashes
+        sanitized = re.sub(r"[^a-zA-Z0-9_.-]", "-", str(value))
+        # Strip leading/trailing dashes
+        sanitized = sanitized.strip("-")
+        return sanitized[:63]
+
+    def _is_bot_already_assigned(
+        self, org_id: str, meeting_url: str
+    ) -> Tuple[bool, Optional[str]]:
+        """Check if an active bot job exists for this org + meeting URL.
+
+        Uses K8s job labels to determine if a bot is already assigned to a meeting.
+        This replaces the Firestore session-based deduplication.
+
+        Returns:
+            (is_assigned, job_name): Whether a bot is active and its name if so
+        """
+        url_hash = self._meeting_url_hash(meeting_url)
+        sanitized_org = self._sanitize_label_value(org_id)
+
+        if not sanitized_org or not url_hash:
+            logger.warning(
+                "Cannot check bot assignment: org_id=%s, url_hash=%s", org_id, url_hash
+            )
+            return False, None
+
+        label_selector = (
+            f"app=meeting-bot-manager,"
+            f"org-id={sanitized_org},"
+            f"meeting-url-hash={url_hash}"
+        )
+
+        try:
+            jobs = self.batch_v1.list_namespaced_job(
+                namespace=self.k8s_namespace,
+                label_selector=label_selector,
+            )
+        except ApiException as e:
+            logger.warning("Failed to query K8s jobs for dedup: %s", e)
+            return False, None
+
+        for job in jobs.items:
+            conditions = job.status.conditions or []
+            is_terminal = any(
+                c.type in ("Complete", "Failed") and c.status == "True"
+                for c in conditions
+            )
+            if not is_terminal:
+                logger.info(
+                    "BOT_ALREADY_ASSIGNED: org_id=%s, url_hash=%s, job=%s",
+                    org_id,
+                    url_hash,
+                    job.metadata.name,
+                )
+                return True, job.metadata.name
+
+        return False, None
 
     def _meeting_session_ref(
         self, *, org_id: str, session_id: str
@@ -1114,6 +1228,130 @@ class MeetingController:
                 f"Failed to consolidate duplicate meeting {duplicate_meeting.id}: {e}"
             )
             return False
+
+    def _create_bot_for_meeting(
+        self,
+        meeting_doc: firestore.DocumentSnapshot,
+        org_id: str,
+        meeting_url: str,
+        user_id: str,
+    ) -> bool:
+        """Create a K8s job directly for a meeting using K8s-based deduplication.
+
+        This is the new simplified flow that bypasses Firestore session management
+        and uses K8s job labels for deduplication instead.
+
+        Args:
+            meeting_doc: The Firestore meeting document
+            org_id: Organization ID
+            meeting_url: The meeting URL
+            user_id: The user ID requesting the bot
+
+        Returns:
+            True if job created successfully, False otherwise
+        """
+        data = meeting_doc.to_dict() or {}
+        meeting_ref = meeting_doc.reference
+
+        # Compute meeting_id (same as session_id for consistency)
+        meeting_id = self._meeting_session_id(org_id=org_id, meeting_url=meeting_url)
+
+        # Build job payload
+        payload = {
+            "meeting_id": meeting_id,
+            "meeting_url": meeting_url,
+            "org_id": org_id,
+            "team_id": org_id,
+            "user_id": user_id,
+            "fs_meeting_id": meeting_doc.id,
+            "gcs_path": f"recordings/{user_id}/{meeting_doc.id}",
+            # Include other fields from meeting doc
+            "meeting_title": data.get("title") or data.get("subject"),
+            "timezone": data.get("timezone", "UTC"),
+            "auto_joined": True,
+            "initiated_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+        # Get org-specific bot name
+        try:
+            org_ref = self.db.collection("organizations").document(org_id)
+            org_doc = org_ref.get()
+            if org_doc.exists:
+                org_data = org_doc.to_dict() or {}
+                payload["name"] = org_data.get("bot_display_name", "Meeting Bot")
+        except Exception as e:
+            logger.warning("Failed to get org bot name: %s", e)
+            payload["name"] = "Meeting Bot"
+
+        # Create the job
+        success = self.create_manager_job(payload, session_id=meeting_id[:16])
+
+        if success:
+            # Update meeting doc with job reference
+            now = datetime.now(timezone.utc)
+            try:
+                meeting_ref.update(
+                    {
+                        "bot_status": "joining",
+                        "bot_job_created_at": now,
+                        "meeting_session_id": meeting_id[:16],
+                        "session_status": "processing",
+                    }
+                )
+            except Exception as e:
+                logger.warning("Failed to update meeting doc after job creation: %s", e)
+
+            logger.info(
+                "BOT_CREATED_FOR_MEETING: meeting_id=%s, org_id=%s, user_id=%s",
+                meeting_doc.id,
+                org_id,
+                user_id,
+            )
+        else:
+            logger.error(
+                "BOT_CREATION_FAILED: meeting_id=%s, org_id=%s, user_id=%s",
+                meeting_doc.id,
+                org_id,
+                user_id,
+            )
+
+        return success
+
+    def _link_meeting_to_existing_bot(
+        self,
+        meeting_doc: firestore.DocumentSnapshot,
+        existing_job_name: str,
+    ) -> None:
+        """Link a meeting document to an existing bot job.
+
+        When K8s deduplication finds an active job for the same org+URL,
+        this method links the new meeting to that job for fanout purposes.
+
+        Args:
+            meeting_doc: The Firestore meeting document
+            existing_job_name: Name of the existing K8s job
+        """
+        try:
+            now = datetime.now(timezone.utc)
+            meeting_doc.reference.update(
+                {
+                    "bot_job_name": existing_job_name,
+                    "bot_status": "assigned",
+                    "assigned_at": now,
+                }
+            )
+            logger.info(
+                "MEETING_LINKED_TO_BOT: meeting_id=%s, job=%s",
+                meeting_doc.id,
+                existing_job_name,
+            )
+        except Exception as e:
+            logger.warning(
+                "Failed to link meeting %s to job %s: %s",
+                meeting_doc.id,
+                existing_job_name,
+                e,
+            )
 
     def _try_create_or_update_session_for_meeting(
         self,
@@ -1861,7 +2099,10 @@ class MeetingController:
                         # Build artifacts dict with updated paths for this subscriber
                         if session_artifacts:
                             subscriber_artifacts = {}
-                            for artifact_key, artifact_path in session_artifacts.items():
+                            for (
+                                artifact_key,
+                                artifact_path,
+                            ) in session_artifacts.items():
                                 # Replace source prefix with destination prefix
                                 if source_prefix in artifact_path:
                                     new_path = artifact_path.replace(
@@ -1941,6 +2182,240 @@ class MeetingController:
                 )
             except Exception:
                 pass
+
+    # --- NEW: URL-based fanout for K8s deduplication approach ---
+
+    def _query_completed_meetings_needing_fanout(
+        self,
+    ) -> List[firestore.DocumentSnapshot]:
+        """Find completed meetings where fanout hasn't succeeded yet.
+
+        This queries meetings directly (not sessions) for the K8s-based
+        deduplication approach. Looks for meetings with:
+        - bot_status = "complete"
+        - fanout_status != "complete"
+        """
+        results = []
+
+        try:
+            # Query all organizations for completed meetings
+            orgs = self.db.collection("organizations").stream()
+            for org_doc in orgs:
+                org_id = org_doc.id
+                meetings_ref = (
+                    self.db.collection("organizations")
+                    .document(org_id)
+                    .collection("meetings")
+                )
+
+                # Query for bot_status = "complete"
+                query = meetings_ref.where(
+                    filter=firestore.FieldFilter("bot_status", "==", "complete")
+                ).limit(self.max_claim_per_poll)
+
+                for meeting_doc in query.stream():
+                    data = meeting_doc.to_dict() or {}
+                    # Filter for pending fanout
+                    if data.get("fanout_status") != "complete":
+                        results.append(meeting_doc)
+
+                        if len(results) >= self.max_claim_per_poll:
+                            break
+
+                if len(results) >= self.max_claim_per_poll:
+                    break
+
+        except Exception as e:
+            logger.warning("Failed to query completed meetings for fanout: %s", e)
+
+        logger.debug(
+            "Query meetings with bot_status='complete' (fanout pending): found %d docs",
+            len(results),
+        )
+        return results
+
+    def _fanout_completed_meeting_by_url(
+        self, source_meeting_doc: firestore.DocumentSnapshot
+    ) -> None:
+        """Copy artifacts from source meeting to all meetings with same URL in org.
+
+        This is the new fanout approach for K8s-based deduplication:
+        - Finds all meetings with the same join_url in the same org
+        - Copies artifacts from source to each matching meeting
+        - Updates each meeting document with artifact references
+        """
+        data = source_meeting_doc.to_dict() or {}
+        org_id = (
+            data.get("organization_id")
+            or data.get("organizationId")
+            or data.get("teamId")
+            or data.get("team_id")
+        )
+        meeting_url = data.get("join_url") or data.get("meeting_url")
+
+        if not org_id or not meeting_url:
+            logger.warning(
+                "FANOUT_SKIPPED: meeting=%s, reason=missing_org_or_url",
+                source_meeting_doc.id,
+            )
+            source_meeting_doc.reference.update(
+                {
+                    "fanout_status": "skipped",
+                    "fanout_reason": "missing_org_id_or_meeting_url",
+                    "updated_at": datetime.now(timezone.utc),
+                }
+            )
+            return
+
+        source_user_id = data.get("user_id")
+        source_meeting_id = source_meeting_doc.id
+        source_artifacts = data.get("artifacts", {})
+        source_transcription = data.get("transcription")
+
+        if not source_user_id:
+            logger.warning(
+                "FANOUT_SKIPPED: meeting=%s, reason=missing_user_id", source_meeting_id
+            )
+            source_meeting_doc.reference.update(
+                {
+                    "fanout_status": "skipped",
+                    "fanout_reason": "missing_user_id",
+                    "updated_at": datetime.now(timezone.utc),
+                }
+            )
+            return
+
+        logger.info(
+            "FANOUT_BY_URL_START: source_meeting=%s, org=%s, url=%s",
+            source_meeting_id,
+            org_id,
+            meeting_url[:50],
+        )
+
+        # Find all meetings with same URL in this org
+        meetings_ref = (
+            self.db.collection("organizations").document(org_id).collection("meetings")
+        )
+
+        try:
+            matching_meetings = list(
+                meetings_ref.where(
+                    filter=firestore.FieldFilter("join_url", "==", meeting_url)
+                ).stream()
+            )
+        except Exception as e:
+            logger.error(
+                "FANOUT_FAILED: meeting=%s, error=query_failed: %s",
+                source_meeting_id,
+                e,
+            )
+            return
+
+        logger.info(
+            "FANOUT_BY_URL_MATCHES: source=%s, matching_count=%d",
+            source_meeting_id,
+            len(matching_meetings),
+        )
+
+        source_prefix = f"recordings/{source_user_id}/{source_meeting_id}".rstrip("/")
+        copied_count = 0
+        skipped_count = 0
+
+        for meeting_doc in matching_meetings:
+            if meeting_doc.id == source_meeting_id:
+                continue  # Skip source meeting
+
+            meeting_data = meeting_doc.to_dict() or {}
+            dst_user_id = meeting_data.get("user_id")
+            dst_meeting_id = meeting_doc.id
+
+            if not dst_user_id:
+                logger.debug(
+                    "Skipping fanout to meeting %s: no user_id", dst_meeting_id
+                )
+                skipped_count += 1
+                continue
+
+            # Skip if already copied
+            if meeting_data.get("fanout_status") == "copied":
+                logger.debug("Skipping meeting %s: already copied", dst_meeting_id)
+                skipped_count += 1
+                continue
+
+            dst_prefix = f"recordings/{dst_user_id}/{dst_meeting_id}".rstrip("/")
+
+            # Copy artifacts
+            try:
+                src_objects = self._list_gcs_prefix(source_prefix + "/")
+                files_copied = 0
+
+                for src in src_objects:
+                    rel = src[len(source_prefix) + 1 :]
+                    dst = f"{dst_prefix}/{rel}"
+
+                    try:
+                        self._copy_gcs_blob(src=src, dst=dst)
+                        files_copied += 1
+                    except Exception as e:
+                        logger.debug("Failed to copy %s to %s: %s", src, dst, e)
+
+                # Rewrite artifact paths for destination
+                dst_artifacts = {}
+                for key, path in source_artifacts.items():
+                    if source_prefix in str(path):
+                        dst_artifacts[key] = str(path).replace(
+                            source_prefix, dst_prefix
+                        )
+                    else:
+                        dst_artifacts[key] = path
+
+                # Update destination meeting with artifacts
+                meeting_doc.reference.update(
+                    {
+                        "transcription": source_transcription,
+                        "artifacts": dst_artifacts,
+                        "recording_url": f"gs://{self.gcs_bucket}/{dst_prefix}/recording.webm",
+                        "fanout_status": "copied",
+                        "fanout_source": source_meeting_id,
+                        "fanout_at": datetime.now(timezone.utc),
+                        "updated_at": datetime.now(timezone.utc),
+                    }
+                )
+
+                logger.info(
+                    "FANOUT_COPIED: src=%s, dst=%s, files=%d",
+                    source_meeting_id,
+                    dst_meeting_id,
+                    files_copied,
+                )
+                copied_count += 1
+
+            except Exception as e:
+                logger.error(
+                    "FANOUT_COPY_FAILED: src=%s, dst=%s, error=%s",
+                    source_meeting_id,
+                    dst_meeting_id,
+                    e,
+                )
+                skipped_count += 1
+
+        # Mark source meeting fanout complete
+        source_meeting_doc.reference.update(
+            {
+                "fanout_status": "complete",
+                "fanout_copied_count": copied_count,
+                "fanout_skipped_count": skipped_count,
+                "fanout_completed_at": datetime.now(timezone.utc),
+                "updated_at": datetime.now(timezone.utc),
+            }
+        )
+
+        logger.info(
+            "FANOUT_BY_URL_COMPLETE: source=%s, copied=%d, skipped=%d",
+            source_meeting_id,
+            copied_count,
+            skipped_count,
+        )
 
     def _build_job_payload_from_meeting_session(
         self, session_doc: firestore.DocumentSnapshot
@@ -2619,17 +3094,37 @@ class MeetingController:
                             for dup in duplicates:
                                 self._consolidate_duplicate_meeting(doc, dup)
 
-                # Create/update meeting session (dedupe across users in same org).
-                logger.info(f"Enqueuing session for meeting {doc.id}")
-                session_id = self._try_create_or_update_session_for_meeting(doc)
-                if session_id:
+                # K8s-based deduplication: Check if a bot is already assigned
+                # to this org+URL combination by querying active K8s jobs.
+                is_assigned, existing_job = self._is_bot_already_assigned(
+                    org_id, join_url
+                )
+
+                if is_assigned:
+                    # Bot already exists - link this meeting to it for fanout
                     logger.info(
-                        "Meeting %s subscribed to session %s",
+                        "BOT_ALREADY_EXISTS: meeting=%s, org=%s, job=%s",
                         doc.id,
-                        session_id,
+                        org_id,
+                        existing_job,
                     )
+                    self._link_meeting_to_existing_bot(doc, existing_job)
                 else:
-                    logger.warning("Failed to enqueue meeting session for %s", doc.id)
+                    # No active bot - create new job directly
+                    logger.info(f"Creating bot for meeting {doc.id}")
+                    success = self._create_bot_for_meeting(
+                        doc, org_id, join_url, user_id
+                    )
+                    if success:
+                        logger.info(
+                            "BOT_JOB_CREATED_FOR_MEETING: meeting=%s, org=%s",
+                            doc.id,
+                            org_id,
+                        )
+                    else:
+                        logger.warning(
+                            "Failed to create bot job for meeting %s", doc.id
+                        )
         except Exception as e:
             logger.error(f"Error scanning upcoming meetings: {e}", exc_info=True)
 
@@ -3035,7 +3530,7 @@ class MeetingController:
                         except Exception:
                             pass
 
-                # Step 2: fan-out completed sessions.
+                # Step 2: fan-out completed sessions (legacy session-based approach).
                 completed = self._query_completed_sessions_needing_fanout()
                 for sess in completed:
                     data = sess.to_dict() or {}
@@ -3045,6 +3540,12 @@ class MeetingController:
                     self._fanout_meeting_session_artifacts(
                         org_id=org_id, session_id=sess.id
                     )
+
+                # Step 3: fan-out completed meetings (new URL-based approach).
+                # This handles meetings created with K8s-based deduplication.
+                completed_meetings = self._query_completed_meetings_needing_fanout()
+                for meeting_doc in completed_meetings:
+                    self._fanout_completed_meeting_by_url(meeting_doc)
 
             except KeyboardInterrupt:
                 logger.info("👋 Received shutdown signal")
