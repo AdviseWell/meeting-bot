@@ -1,0 +1,112 @@
+# Controller deployment for local KinD development
+# Connects to Firebase emulator running on the host
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: meeting-bot
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: meeting-bot-controller
+  namespace: meeting-bot
+---
+# RBAC for controller to manage jobs
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: meeting-bot-controller
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: meeting-bot-controller
+subjects:
+  - kind: ServiceAccount
+    name: meeting-bot-controller
+    namespace: meeting-bot
+roleRef:
+  kind: ClusterRole
+  name: meeting-bot-controller
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: controller-config
+  namespace: meeting-bot
+data:
+  # Connect to real GCP services (with DRY_RUN)
+  GCP_PROJECT_ID: "aw-development-7226"
+  FIRESTORE_DATABASE: "(default)"
+  GCS_BUCKET: "advisewell-firebase-development"
+  
+  # Controller settings
+  K8S_NAMESPACE: "meeting-bot"
+  POLL_INTERVAL: "5"
+  PUBSUB_SUBSCRIPTION: ""
+  DRY_RUN: "true"
+  SKIP_LEADER_ELECTION: "true"
+  
+  # Manager image - will be loaded into KinD
+  MANAGER_IMAGE: "meeting-bot-manager:local"
+  MEETING_BOT_IMAGE: "meeting-bot:local"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: controller
+  namespace: meeting-bot
+  labels:
+    app: meeting-bot-controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: meeting-bot-controller
+  template:
+    metadata:
+      labels:
+        app: meeting-bot-controller
+    spec:
+      serviceAccountName: meeting-bot-controller
+      volumes:
+        - name: gcp-credentials
+          secret:
+            secretName: gcp-credentials
+      containers:
+        - name: controller
+          image: meeting-bot-controller:latest
+          imagePullPolicy: Never  # Use locally loaded image
+          envFrom:
+            - configMapRef:
+                name: controller-config
+          env:
+            # Override to disable Pub/Sub subscription mode and use polling only
+            - name: PUBSUB_SUBSCRIPTION
+              value: ""
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: "/etc/gcp/credentials.json"
+          volumeMounts:
+            - name: gcp-credentials
+              mountPath: "/etc/gcp"
+              readOnly: true
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"

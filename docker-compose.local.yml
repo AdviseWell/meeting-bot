@@ -1,0 +1,50 @@
+# Docker Compose for local development with Firebase emulator
+# Run controller against the Firebase emulator for fast iteration
+
+services:
+  controller:
+    build:
+      context: .
+      dockerfile: Dockerfile.controller
+    environment:
+      # Firebase emulator endpoints
+      - FIRESTORE_EMULATOR_HOST=host.docker.internal:8080
+      - PUBSUB_EMULATOR_HOST=host.docker.internal:8085
+      - FIREBASE_AUTH_EMULATOR_HOST=host.docker.internal:9099
+      
+      # GCP project (emulator doesn't validate)
+      - GCP_PROJECT_ID=demo-advisewell
+      - FIRESTORE_DATABASE=(default)
+      - GCS_BUCKET=advisewell-firebase-development
+      
+      # Controller settings
+      - K8S_NAMESPACE=default
+      - POLL_INTERVAL=5
+      - PYTHONUNBUFFERED=1
+      
+      # Disable Pub/Sub subscription (use polling only)
+      - PUBSUB_SUBSCRIPTION=
+      
+      # Manager image settings (not used in polling mode without K8s)
+      - MANAGER_IMAGE=meeting-bot-manager:local
+      - MEETING_BOT_IMAGE=meeting-bot:local
+      
+      # Skip K8s job creation (dry-run mode)
+      - DRY_RUN=true
+    extra_hosts:
+      # Enable host.docker.internal on Linux
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # Mount controller source for live reloading
+      - ./controller:/app:ro
+      # Mount kubeconfig for optional K8s access
+      - ${HOME}/.kube:/home/controller/.kube:ro
+    networks:
+      - firebase-network
+    # Auto-restart on crash
+    restart: unless-stopped
+    
+networks:
+  firebase-network:
+    external: true
+    name: advisewell_app-network  # Connect to existing Firebase emulator network

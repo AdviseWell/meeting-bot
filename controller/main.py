@@ -62,7 +62,9 @@ if log_level > logging.DEBUG:
 class HealthCheckServer:
     """Simple HTTP server for health checks"""
 
-    def __init__(self, port: int = 8080):
+    def __init__(self, port: int = None):
+        if port is None:
+            port = int(os.getenv("HEALTH_PORT", "8080"))
         from http.server import HTTPServer, BaseHTTPRequestHandler
 
         class HealthHandler(BaseHTTPRequestHandler):
@@ -89,9 +91,10 @@ class HealthCheckServer:
     def start(self):
         import threading
 
+        port = self.server.server_address[1]
         thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         thread.start()
-        logger.info("Health check server started on port 8080")
+        logger.info("Health check server started on port %d", port)
 
 
 class MeetingController:
@@ -126,6 +129,8 @@ class MeetingController:
         self.leader_doc_id = "controller_leader"
         self.leader_lease_seconds = 30
         self.is_leader = False
+        # Skip leader election for local development
+        self.skip_leader_election = os.getenv("SKIP_LEADER_ELECTION", "").lower() in ("true", "1", "yes")
 
         # Meeting discovery / creation behavior
         # The controller is the source of truth for creating bot_instances.
@@ -165,6 +170,9 @@ class MeetingController:
         self.k8s_namespace = os.getenv("KUBERNETES_NAMESPACE", "default")
         self.job_service_account = os.getenv("JOB_SERVICE_ACCOUNT", "meeting-bot-job")
 
+        # Dry-run mode - logs K8s operations but doesn't execute them
+        self.dry_run = os.getenv("DRY_RUN", "").lower() in ("true", "1", "yes")
+
         # Optional configuration
         self.node_env = os.getenv("NODE_ENV", "development")
         self.max_recording_duration = int(
@@ -196,18 +204,36 @@ class MeetingController:
         self.gcs_client = storage.Client(project=self.project_id)
         self.gcs_bucket_client = self.gcs_client.bucket(self.gcs_bucket)
 
-        # Initialize Kubernetes client
-        try:
-            # Try to load in-cluster config first
-            config.load_incluster_config()
-            logger.info("Loaded in-cluster Kubernetes configuration")
-        except config.ConfigException:
-            # Fall back to kubeconfig for local development
-            config.load_kube_config()
-            logger.info("Loaded kubeconfig configuration")
+        # Initialize Kubernetes client (skip in dry-run mode if unavailable)
+        self.batch_v1 = None
+        self.core_v1 = None
+        if self.dry_run:
+            logger.info("DRY_RUN mode enabled - K8s operations will be simulated")
+            try:
+                config.load_incluster_config()
+            except config.ConfigException:
+                try:
+                    config.load_kube_config()
+                except Exception:
+                    logger.warning("DRY_RUN: No K8s config available, skipping K8s init")
+            # Initialize APIs if config loaded, but they won't be used
+            try:
+                self.batch_v1 = client.BatchV1Api()
+                self.core_v1 = client.CoreV1Api()
+            except Exception:
+                pass
+        else:
+            try:
+                # Try to load in-cluster config first
+                config.load_incluster_config()
+                logger.info("Loaded in-cluster Kubernetes configuration")
+            except config.ConfigException:
+                # Fall back to kubeconfig for local development
+                config.load_kube_config()
+                logger.info("Loaded kubeconfig configuration")
 
-        self.batch_v1 = client.BatchV1Api()
-        self.core_v1 = client.CoreV1Api()
+            self.batch_v1 = client.BatchV1Api()
+            self.core_v1 = client.CoreV1Api()
 
         logger.info("Controller initialized:")
         logger.info(f"  Project: {self.project_id}")
@@ -215,6 +241,7 @@ class MeetingController:
         logger.info(f"  Namespace: {self.k8s_namespace}")
         logger.info(f"  Manager Image: {self.manager_image}")
         logger.info(f"  Meeting Bot Image: {self.meeting_bot_image}")
+        logger.info(f"  Dry Run: {self.dry_run}")
         logger.info(
             "  Meeting discovery: mode=%s path=%s",
             self.meetings_query_mode,
@@ -595,6 +622,18 @@ class MeetingController:
                 "meeting-url-hash": url_hash,
             }
 
+            # DRY_RUN mode - log what would be created but don't actually create K8s resources
+            if self.dry_run:
+                logger.info(
+                    "DRY_RUN: Would create job '%s' for meeting %s (org=%s, user=%s)",
+                    job_name, meeting_doc_id, org_id, user_doc_id
+                )
+                logger.info(
+                    "DRY_RUN: Job spec: session_id=%s, meeting_url=%s, gcs_path=%s",
+                    session_id, meeting_url[:80] if meeting_url else "none", gcs_path
+                )
+                return True
+
             scratch_pvc = client.V1PersistentVolumeClaim(
                 api_version="v1",
                 kind="PersistentVolumeClaim",
@@ -946,6 +985,11 @@ class MeetingController:
         Returns:
             (is_assigned, job_name): Whether a bot is active and its name if so
         """
+        # In dry-run mode, skip K8s queries and assume no bot is assigned
+        if self.dry_run:
+            logger.debug("DRY_RUN: Skipping K8s job check for org=%s", org_id)
+            return False, None
+
         url_hash = self._meeting_url_hash(meeting_url)
         sanitized_org = self._sanitize_label_value(org_id)
 
@@ -3146,6 +3190,13 @@ class MeetingController:
         Returns:
             True if this instance is the leader, False otherwise.
         """
+        # Skip leader election for local development
+        if self.skip_leader_election:
+            if not self.is_leader:
+                logger.info("👑 Skipping leader election (SKIP_LEADER_ELECTION=true)")
+                self.is_leader = True
+            return True
+
         leader_ref = self.db.collection(self.leader_collection_path).document(
             self.leader_doc_id
         )

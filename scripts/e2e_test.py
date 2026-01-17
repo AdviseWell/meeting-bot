@@ -51,7 +51,7 @@ def generate_session_id(org_id: str, meeting_url: str) -> str:
 def find_meetings_by_url(db, url: str):
     """Find all meetings matching a URL."""
     meetings_ref = db.collection(f"organizations/{ORG_ID}/meetings")
-    
+
     # Search by different URL fields
     results = []
     for field in ["join_url", "teams_url", "meeting_url"]:
@@ -66,33 +66,33 @@ def find_meetings_by_url(db, url: str):
                     results.append({"id": m.id, "data": m.to_dict()})
         except Exception:
             pass
-    
+
     return results
 
 
 def check_session(db, session_id: str):
     """Check session status and subscribers."""
-    session_ref = db.document(
-        f"organizations/{ORG_ID}/meeting_sessions/{session_id}"
-    )
+    session_ref = db.document(f"organizations/{ORG_ID}/meeting_sessions/{session_id}")
     session_doc = session_ref.get()
-    
+
     if not session_doc.exists:
         return None
-    
+
     session_data = session_doc.to_dict()
-    
+
     # Get subscribers
     subs_ref = session_ref.collection("subscribers")
     subscribers = []
     for sub in subs_ref.stream():
         sub_data = sub.to_dict()
-        subscribers.append({
-            "user_id": sub.id,
-            "fs_meeting_id": sub_data.get("fs_meeting_id"),
-            "status": sub_data.get("status"),
-        })
-    
+        subscribers.append(
+            {
+                "user_id": sub.id,
+                "fs_meeting_id": sub_data.get("fs_meeting_id"),
+                "status": sub_data.get("status"),
+            }
+        )
+
     return {
         "id": session_id,
         "status": session_data.get("status"),
@@ -105,14 +105,12 @@ def check_session(db, session_id: str):
 
 def verify_transcription(db, user_id: str, meeting_id: str):
     """Check if a meeting has transcription."""
-    meeting_ref = db.document(
-        f"organizations/{ORG_ID}/meetings/{meeting_id}"
-    )
+    meeting_ref = db.document(f"organizations/{ORG_ID}/meetings/{meeting_id}")
     meeting_doc = meeting_ref.get()
-    
+
     if not meeting_doc.exists:
         return {"exists": False}
-    
+
     data = meeting_doc.to_dict()
     return {
         "exists": True,
@@ -127,44 +125,44 @@ def monitor_session(db, session_id: str, timeout_minutes: int = 30):
     """Monitor a session until complete or timeout."""
     print(f"\n🔄 Monitoring session {session_id[:16]}...")
     print("   Press Ctrl+C to stop monitoring\n")
-    
+
     start_time = datetime.now(timezone.utc)
     last_status = None
-    
+
     try:
         while True:
             session = check_session(db, session_id)
-            
+
             if not session:
                 print("   ❌ Session not found!")
                 return False
-            
+
             status = session["status"]
             elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
-            
+
             if status != last_status:
                 print(f"   [{elapsed:.0f}s] Status: {status}")
                 print(f"         Subscribers: {len(session['subscribers'])}")
                 for sub in session["subscribers"]:
                     print(f"           - {sub['user_id'][:20]}...")
                 last_status = status
-            
+
             if status == "complete":
                 print(f"\n✅ Session completed!")
                 print(f"   Fanout status: {session['fanout_status']}")
                 print(f"   Artifacts: {list(session['artifacts'].keys())}")
                 return True
-            
+
             if status == "failed":
                 print(f"\n❌ Session failed!")
                 return False
-            
+
             if elapsed > timeout_minutes * 60:
                 print(f"\n⏰ Timeout after {timeout_minutes} minutes")
                 return False
-            
+
             time.sleep(10)
-    
+
     except KeyboardInterrupt:
         print("\n\n⚠️ Monitoring stopped by user")
         return None
@@ -173,60 +171,60 @@ def monitor_session(db, session_id: str, timeout_minutes: int = 30):
 def run_e2e_test(teams_url: str):
     """Run the end-to-end test."""
     db = get_db()
-    
+
     print("=" * 70)
     print("END-TO-END MEETING BOT TEST")
     print("=" * 70)
     print(f"\nTeams URL: {teams_url[:60]}...")
     print(f"Time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC")
-    
+
     # Step 1: Find meetings for this URL
     print("\n" + "=" * 70)
     print("STEP 1: Finding meetings with this URL")
     print("=" * 70)
-    
+
     meetings = find_meetings_by_url(db, teams_url)
     print(f"\nFound {len(meetings)} meeting(s)")
-    
+
     matt_meeting = None
     clinton_meeting = None
-    
+
     for m in meetings:
         user_id = m["data"].get("user_id")
         print(f"\n  Meeting: {m['id']}")
         print(f"    User: {user_id[:20]}...")
         print(f"    Title: {m['data'].get('title', 'Unknown')}")
         print(f"    Session ID: {m['data'].get('meeting_session_id', 'None')}")
-        
+
         if user_id == MATT_USER_ID:
             matt_meeting = m
         elif user_id == CLINTON_USER_ID:
             clinton_meeting = m
-    
+
     # Step 2: Check session
     print("\n" + "=" * 70)
     print("STEP 2: Checking session and subscribers")
     print("=" * 70)
-    
+
     session_id = generate_session_id(ORG_ID, teams_url)
     print(f"\nExpected session ID: {session_id[:20]}...")
-    
+
     session = check_session(db, session_id)
-    
+
     if session:
         print(f"\n✅ Session found!")
         print(f"   Status: {session['status']}")
         print(f"   Fanout: {session['fanout_status']}")
         print(f"   Subscribers: {len(session['subscribers'])}")
-        
+
         has_matt = any(s["user_id"] == MATT_USER_ID for s in session["subscribers"])
         has_clinton = any(
             s["user_id"] == CLINTON_USER_ID for s in session["subscribers"]
         )
-        
+
         print(f"\n   Matt subscribed: {'✅' if has_matt else '❌'}")
         print(f"   Clinton subscribed: {'✅' if has_clinton else '❌'}")
-        
+
         if not has_matt or not has_clinton:
             print("\n⚠️ Not all users are subscribed!")
             print("   This may indicate a consolidation issue.")
@@ -234,76 +232,82 @@ def run_e2e_test(teams_url: str):
         print("\n❌ Session not found!")
         print("   The meeting may not have been queued for recording yet.")
         return
-    
+
     # Step 3: Monitor if not complete
     if session["status"] not in ["complete", "failed"]:
         print("\n" + "=" * 70)
         print("STEP 3: Monitoring session")
         print("=" * 70)
-        
+
         result = monitor_session(db, session_id)
-        
+
         if result:
             session = check_session(db, session_id)
-    
+
     # Step 4: Verify transcriptions
     print("\n" + "=" * 70)
     print("STEP 4: Verifying transcriptions delivered to both users")
     print("=" * 70)
-    
+
     if matt_meeting:
-        matt_result = verify_transcription(
-            db, MATT_USER_ID, matt_meeting["id"]
-        )
+        matt_result = verify_transcription(db, MATT_USER_ID, matt_meeting["id"])
         print(f"\nMatt's meeting ({matt_meeting['id']}):")
-        print(f"   Has transcription: {'✅' if matt_result['has_transcription'] else '❌'}")
+        print(
+            f"   Has transcription: {'✅' if matt_result['has_transcription'] else '❌'}"
+        )
         if matt_result["has_transcription"]:
-            print(f"   Transcription length: {matt_result['transcription_length']} chars")
-    
+            print(
+                f"   Transcription length: {matt_result['transcription_length']} chars"
+            )
+
     if clinton_meeting:
         clinton_result = verify_transcription(
             db, CLINTON_USER_ID, clinton_meeting["id"]
         )
         print(f"\nClinton's meeting ({clinton_meeting['id']}):")
-        print(f"   Has transcription: {'✅' if clinton_result['has_transcription'] else '❌'}")
+        print(
+            f"   Has transcription: {'✅' if clinton_result['has_transcription'] else '❌'}"
+        )
         if clinton_result["has_transcription"]:
-            print(f"   Transcription length: {clinton_result['transcription_length']} chars")
-    
+            print(
+                f"   Transcription length: {clinton_result['transcription_length']} chars"
+            )
+
     # Summary
     print("\n" + "=" * 70)
     print("TEST SUMMARY")
     print("=" * 70)
-    
+
     all_good = True
-    
+
     if len(meetings) < 2:
         print("❌ Both users should have the meeting synced")
         all_good = False
     else:
         print("✅ Both users have the meeting synced")
-    
+
     if session and len(session["subscribers"]) >= 2:
         print("✅ Both users are session subscribers")
     else:
         print("❌ Not all users are session subscribers")
         all_good = False
-    
+
     if session and session["status"] == "complete":
         print("✅ Session completed successfully")
     else:
         print("❌ Session did not complete")
         all_good = False
-    
+
     if matt_meeting and clinton_meeting:
         matt_has = verify_transcription(db, MATT_USER_ID, matt_meeting["id"])
         clinton_has = verify_transcription(db, CLINTON_USER_ID, clinton_meeting["id"])
-        
+
         if matt_has["has_transcription"] and clinton_has["has_transcription"]:
             print("✅ Both users received transcriptions (fanout working)")
         else:
             print("❌ Transcription fanout failed")
             all_good = False
-    
+
     print()
     if all_good:
         print("🎉 ALL TESTS PASSED!")
@@ -323,7 +327,7 @@ if __name__ == "__main__":
         action="store_true",
         help="Only monitor, don't run full test",
     )
-    
+
     args = parser.parse_args()
-    
+
     run_e2e_test(args.teams_url)

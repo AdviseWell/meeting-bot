@@ -36,36 +36,38 @@ def get_recent_sessions(db, since_minutes: int = 5):
     """Get sessions created in the last N minutes."""
     sessions_ref = db.collection(f"organizations/{ORG_ID}/meeting_sessions")
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=since_minutes)
-    
+
     sessions = list(
         sessions_ref.where(filter=FieldFilter("created_at", ">=", cutoff))
         .order_by("created_at", direction=firestore.Query.DESCENDING)
         .limit(10)
         .stream()
     )
-    
+
     results = []
     for s in sessions:
         data = s.to_dict()
-        
+
         # Get subscribers
         subs = list(s.reference.collection("subscribers").stream())
         sub_list = [sub.id for sub in subs]
-        
+
         has_matt = MATT_USER_ID in sub_list
         has_clinton = CLINTON_USER_ID in sub_list
-        
-        results.append({
-            "id": s.id[:16] + "...",
-            "full_id": s.id,
-            "status": data.get("status"),
-            "title": data.get("meeting_title", "Unknown")[:30],
-            "created": format_time(data.get("created_at")),
-            "subs": len(sub_list),
-            "matt": has_matt,
-            "clinton": has_clinton,
-        })
-    
+
+        results.append(
+            {
+                "id": s.id[:16] + "...",
+                "full_id": s.id,
+                "status": data.get("status"),
+                "title": data.get("meeting_title", "Unknown")[:30],
+                "created": format_time(data.get("created_at")),
+                "subs": len(sub_list),
+                "matt": has_matt,
+                "clinton": has_clinton,
+            }
+        )
+
     return results
 
 
@@ -73,24 +75,24 @@ def watch_sessions():
     """Watch for new sessions."""
     db = get_db()
     seen = set()
-    
+
     print("=" * 80)
     print("WATCHING FOR NEW MEETING SESSIONS")
     print("=" * 80)
     print(f"\nStarted at: {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC")
     print("Looking for sessions from the last 5 minutes...")
     print("Press Ctrl+C to stop\n")
-    
+
     while True:
         sessions = get_recent_sessions(db, since_minutes=10)
-        
+
         for s in sessions:
             if s["full_id"] not in seen:
                 seen.add(s["full_id"])
-                
+
                 matt_icon = "✅" if s["matt"] else "❌"
                 clinton_icon = "✅" if s["clinton"] else "❌"
-                
+
                 print("-" * 80)
                 print(f"🆕 NEW SESSION: {s['id']}")
                 print(f"   Title: {s['title']}")
@@ -99,14 +101,14 @@ def watch_sessions():
                 print(f"   Subscribers: {s['subs']}")
                 print(f"   Matt: {matt_icon}  Clinton: {clinton_icon}")
                 print()
-        
+
         # Update status of seen sessions
         for s in sessions:
             if s["full_id"] in seen:
                 status = s["status"]
                 if status in ["complete", "failed"]:
                     print(f"📢 Session {s['id']} is now {status}")
-        
+
         time.sleep(5)
 
 
