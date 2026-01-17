@@ -46,10 +46,11 @@ metadata:
   name: controller-config
   namespace: meeting-bot
 data:
-  # Connect to real GCP services (with DRY_RUN)
-  GCP_PROJECT_ID: "aw-development-7226"
-  FIRESTORE_DATABASE: "(default)"
-  GCS_BUCKET: "advisewell-firebase-development"
+  # Use Firebase emulator instead of real GCP
+  FIRESTORE_EMULATOR_HOST: "172.17.0.1:8080"
+  GOOGLE_CLOUD_PROJECT: "demo-test"
+  GCP_PROJECT_ID: "demo-test"
+  GCS_BUCKET: "demo-bucket"
   
   # Controller settings
   K8S_NAMESPACE: "meeting-bot"
@@ -86,7 +87,7 @@ spec:
             secretName: gcp-credentials
       containers:
         - name: controller
-          image: meeting-bot-controller:latest
+          image: meeting-bot-controller:local
           imagePullPolicy: Never  # Use locally loaded image
           envFrom:
             - configMapRef:
@@ -97,12 +98,12 @@ spec:
               value: ""
             - name: PYTHONUNBUFFERED
               value: "1"
-            - name: GOOGLE_APPLICATION_CREDENTIALS
-              value: "/etc/gcp/credentials.json"
-          volumeMounts:
-            - name: gcp-credentials
-              mountPath: "/etc/gcp"
-              readOnly: true
+            # Use Firebase emulator instead of real GCP
+            - name: FIRESTORE_EMULATOR_HOST
+              value: "172.17.0.1:8080"
+            - name: GOOGLE_CLOUD_PROJECT
+              value: "demo-test"
+          volumeMounts: []
           resources:
             requests:
               cpu: "100m"
