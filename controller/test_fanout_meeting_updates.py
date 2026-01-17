@@ -100,6 +100,10 @@ class _FakeDocRef:
     def set(self, payload: dict, merge: bool = True):
         self._store.append((self.path, payload))
 
+    def get(self):
+        """Return a fake snapshot for document reads."""
+        return _FakeSnap(self.path.split("/")[-1], {}, exists=False)
+
 
 class _FakeMeetingsCollection:
     def __init__(self, org_id: str, store: list[tuple[str, dict]]):
@@ -134,8 +138,53 @@ class _FakeFirestore:
         self._store = store
 
     def collection(self, name: str):
-        assert name == "organizations"
+        if name == "organizations":
+            return _FakeOrgsCollection(self._store)
+        elif name == "users":
+            return _FakeUsersCollection()
+        # Handle path-style collection access like "organizations/org1/meetings"
+        if "/" in name:
+            return _FakePathCollection(name, self._store)
         return _FakeOrgsCollection(self._store)
+
+    def document(self, path: str):
+        """Handle document path lookups."""
+        return _FakeDocRef(path, self._store)
+
+
+class _FakeUsersCollection:
+    """Fake users collection for email lookups."""
+
+    def where(self, **kwargs):
+        return self
+
+    def limit(self, n):
+        return self
+
+    def stream(self):
+        return []  # No users found
+
+
+class _FakePathCollection:
+    """Fake collection for path-style access."""
+
+    def __init__(self, path: str, store: list[tuple[str, dict]]):
+        self._path = path
+        self._store = store
+
+    def where(self, **kwargs):
+        return self
+
+    def limit(self, n):
+        return self
+
+    def stream(self):
+        return []
+
+    def document(self, doc_id: str = None):
+        if doc_id:
+            return _FakeDocRef(f"{self._path}/{doc_id}", self._store)
+        return _FakeDocRef(f"{self._path}/new_doc", self._store)
 
 
 class _FakeSessionRef:
@@ -177,10 +226,11 @@ def test_fanout_writes_transcription_to_meeting_doc_id():
     # Patch minimal dependencies used by fanout.
     c.db = _FakeFirestore(writes)
     c.gcs_bucket = "bucket"
+    # The source path is derived from first subscriber: recordings/{user_id}/{meeting_id}
     c.gcs_bucket_client = _FakeBucket(
         {
-            "recordings/sessions/sess123/transcript.txt": _FakeBlob(
-                name="recordings/sessions/sess123/transcript.txt",
+            "recordings/u1/meetingDocA/transcript.txt": _FakeBlob(
+                name="recordings/u1/meetingDocA/transcript.txt",
                 exists=True,
                 text="hello world",
             )
@@ -188,18 +238,36 @@ def test_fanout_writes_transcription_to_meeting_doc_id():
     )
 
     c._list_gcs_prefix = lambda prefix: [
-        "recordings/sessions/sess123/recording.webm",
-        "recordings/sessions/sess123/transcript.txt",
+        "recordings/u1/meetingDocA/recording.webm",
+        "recordings/u1/meetingDocA/transcript.txt",
     ]
     c._gcs_blob_exists = lambda name: True
     c._copy_gcs_blob = lambda **kwargs: None
 
+    # Mock new attendee fanout methods - return empty to skip attendee logic
+    c._get_fresh_meeting_attendees = lambda org_id, meeting_id: []
+    c._get_org_user_ids_for_attendees = lambda org_id, emails: {}
+    c._validate_fanout_results = lambda **kwargs: {
+        "success": True,
+        "total_subscribers": 2,
+        "validated": 2,
+        "errors": [],
+    }
+
     # Fake session ref returned by helper.
     session_ref = _FakeSessionRef(
-        session_data={"canonical_gcs_path": "recordings/sessions/sess123"},
+        session_data={"canonical_gcs_path": "recordings/u1/meetingDocA"},
         subscribers=[
-            {"user_id": "u1", "fs_meeting_id": "meetingDocA"},
-            {"user_id": "u2", "fs_meeting_id": "meetingDocB"},
+            {
+                "user_id": "u1",
+                "fs_meeting_id": "meetingDocA",
+                "meeting_path": "organizations/org1/meetings/meetingDocA",
+            },
+            {
+                "user_id": "u2",
+                "fs_meeting_id": "meetingDocB",
+                "meeting_path": "organizations/org1/meetings/meetingDocB",
+            },
         ],
         store=writes,
     )

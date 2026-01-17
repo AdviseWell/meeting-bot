@@ -1038,6 +1038,13 @@ class MeetingManager:
                 "FANOUT: These artifacts will be copied to all session subscribers"
             )
 
+            # Update meeting document with bot_status and artifacts (for K8s dedup fanout)
+            try:
+                self._mark_meeting_complete(ok=True, artifacts=artifacts_manifest)
+            except Exception as meet_err:
+                logger.warning("Meeting completion update failed: %s", meet_err)
+
+            # Also update session document (for backwards compatibility)
             try:
                 self._mark_session_complete(ok=True, artifacts=artifacts_manifest)
             except Exception as sess_err:
@@ -1047,6 +1054,11 @@ class MeetingManager:
 
         except Exception as e:
             logger.exception(f"Error processing meeting: {e}")
+            # Mark both meeting and session as failed
+            try:
+                self._mark_meeting_complete(ok=False, artifacts=None)
+            except Exception:
+                pass
             try:
                 self._mark_session_complete(ok=False, artifacts=None)
             except Exception:
@@ -1107,6 +1119,69 @@ class MeetingManager:
         )
 
         ref.set(payload, merge=True)
+
+    def _mark_meeting_complete(self, *, ok: bool, artifacts: Optional[dict]) -> None:
+        """Update the meeting document with bot_status and artifacts for fanout.
+
+        This is required for the K8s-based deduplication approach where the
+        controller queries meetings by bot_status='complete' to trigger fanout.
+        """
+        # Need org_id and fs_meeting_id to locate the meeting document
+        org_id = self.team_id or ""
+        meeting_id = self.fs_meeting_id or ""
+
+        if not org_id or not meeting_id:
+            logger.debug(
+                "MEETING_COMPLETE_SKIPPED: reason=missing_org_or_meeting_id, "
+                "org_id=%s, meeting_id=%s",
+                org_id or "missing",
+                meeting_id or "missing",
+            )
+            return
+
+        from google.cloud import firestore
+
+        db = firestore.Client(database=self.firestore_database)
+        meeting_ref = (
+            db.collection("organizations")
+            .document(str(org_id))
+            .collection("meetings")
+            .document(str(meeting_id))
+        )
+
+        now = datetime.now(timezone.utc)
+        new_status = "complete" if ok else "failed"
+
+        payload: dict = {
+            "bot_status": new_status,
+            "bot_completed_at": now,
+            "updated_at": now,
+        }
+
+        # Add artifacts and recording_url for fanout
+        if artifacts is not None:
+            clean_artifacts = {k: v for k, v in artifacts.items() if v}
+            payload["artifacts"] = clean_artifacts
+
+            # Set recording_url from webm path if available
+            webm_path = clean_artifacts.get("recording_webm")
+            if webm_path:
+                payload["recording_url"] = f"gs://{self.gcs_bucket}/{webm_path}"
+
+        logger.info(
+            "MEETING_STATUS_CHANGE: meeting_id=%s, org_id=%s, "
+            "bot_status=%s, artifact_count=%d",
+            meeting_id,
+            org_id,
+            new_status,
+            len(payload.get("artifacts", {})),
+        )
+
+        try:
+            meeting_ref.set(payload, merge=True)
+            logger.debug("Meeting document updated with bot_status=%s", new_status)
+        except Exception as e:
+            logger.warning("Failed to update meeting document: %s", e)
 
     def run(self):
         """Main run - process the meeting job"""

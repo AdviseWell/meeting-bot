@@ -1697,6 +1697,429 @@ class MeetingController:
         except Exception as e:
             logger.debug("Session validation check failed: %s", e)
 
+    # --- Attendee-based fanout helpers ---
+
+    def _get_user_id_by_email(self, email: str) -> Optional[str]:
+        """Look up a user_id by email address from the users collection.
+
+        Returns the user_id if found, None otherwise.
+        """
+        if not email:
+            return None
+
+        email_lower = email.lower().strip()
+
+        try:
+            # Query users collection by email
+            users_ref = self.db.collection("users")
+            matches = list(
+                users_ref.where(field_path="email", op_string="==", value=email_lower)
+                .limit(1)
+                .stream()
+            )
+
+            if matches:
+                return matches[0].id
+
+            # Try case-insensitive match (email might be stored with different case)
+            # Check a few common variations
+            for email_variant in [email, email.lower(), email.upper()]:
+                matches = list(
+                    users_ref.where(
+                        field_path="email", op_string="==", value=email_variant
+                    )
+                    .limit(1)
+                    .stream()
+                )
+                if matches:
+                    return matches[0].id
+
+        except Exception as e:
+            logger.warning("Failed to look up user by email %s: %s", email, e)
+
+        return None
+
+    def _get_org_user_ids_for_attendees(
+        self, org_id: str, attendee_emails: List[str]
+    ) -> Dict[str, str]:
+        """Map attendee emails to user_ids for users in the organization.
+
+        Args:
+            org_id: Organization ID
+            attendee_emails: List of email addresses from meeting attendees
+
+        Returns:
+            Dict mapping email -> user_id for attendees who are org members
+        """
+        email_to_user_id: Dict[str, str] = {}
+
+        for email in attendee_emails:
+            if not email:
+                continue
+
+            email_lower = email.lower().strip()
+            user_id = self._get_user_id_by_email(email_lower)
+
+            if user_id:
+                # Verify user is part of this organization
+                # Check if user has any meetings in this org
+                org_meetings = list(
+                    self.db.collection(f"organizations/{org_id}/meetings")
+                    .where(field_path="user_id", op_string="==", value=user_id)
+                    .limit(1)
+                    .stream()
+                )
+
+                if org_meetings:
+                    email_to_user_id[email_lower] = user_id
+                    logger.debug(
+                        "ATTENDEE_LOOKUP: email=%s -> user_id=%s (org member)",
+                        email_lower,
+                        user_id,
+                    )
+                else:
+                    logger.debug(
+                        "ATTENDEE_LOOKUP: email=%s -> user_id=%s (not in org %s)",
+                        email_lower,
+                        user_id,
+                        org_id,
+                    )
+            else:
+                logger.debug(
+                    "ATTENDEE_LOOKUP: email=%s -> not found in users collection",
+                    email_lower,
+                )
+
+        return email_to_user_id
+
+    def _get_fresh_meeting_attendees(self, org_id: str, meeting_id: str) -> List[str]:
+        """Re-read meeting document to get the latest attendees list.
+
+        Args:
+            org_id: Organization ID
+            meeting_id: Meeting document ID
+
+        Returns:
+            List of attendee email addresses
+        """
+        try:
+            meeting_ref = self.db.document(
+                f"organizations/{org_id}/meetings/{meeting_id}"
+            )
+            meeting_snap = meeting_ref.get()
+
+            if not meeting_snap.exists:
+                logger.warning(
+                    "FRESH_ATTENDEES: Meeting %s not found in org %s",
+                    meeting_id,
+                    org_id,
+                )
+                return []
+
+            data = meeting_snap.to_dict() or {}
+            attendees = data.get("attendees", [])
+
+            # Normalize attendee format (could be strings or dicts)
+            emails = []
+            for attendee in attendees:
+                if isinstance(attendee, str):
+                    emails.append(attendee.lower().strip())
+                elif isinstance(attendee, dict):
+                    email = attendee.get("email", "")
+                    if email:
+                        emails.append(email.lower().strip())
+
+            logger.info(
+                "FRESH_ATTENDEES: meeting_id=%s, attendee_count=%d, emails=%s",
+                meeting_id,
+                len(emails),
+                emails,
+            )
+            return emails
+
+        except Exception as e:
+            logger.warning(
+                "FRESH_ATTENDEES: Failed to read meeting %s: %s", meeting_id, e
+            )
+            return []
+
+    def _ensure_subscriber_for_attendee(
+        self,
+        *,
+        org_id: str,
+        session_id: str,
+        session_ref: firestore.DocumentReference,
+        user_id: str,
+        email: str,
+        source_meeting_id: str,
+        source_meeting_data: Dict[str, Any],
+    ) -> Optional[str]:
+        """Ensure an attendee has a meeting doc and is subscribed to the session.
+
+        If the attendee doesn't have a meeting document for this session,
+        create one based on the source meeting.
+
+        Args:
+            org_id: Organization ID
+            session_id: Session ID
+            session_ref: Session document reference
+            user_id: User ID of the attendee
+            email: Email of the attendee
+            source_meeting_id: ID of the source meeting to copy from
+            source_meeting_data: Data from the source meeting
+
+        Returns:
+            The meeting ID for this attendee (existing or newly created)
+        """
+        # Check if already subscribed
+        subscriber_ref = session_ref.collection("subscribers").document(user_id)
+        sub_snap = subscriber_ref.get()
+
+        if sub_snap.exists:
+            sub_data = sub_snap.to_dict() or {}
+            existing_meeting_id = sub_data.get("fs_meeting_id")
+            logger.debug(
+                "ATTENDEE_SUBSCRIBER: user_id=%s already subscribed, meeting_id=%s",
+                user_id,
+                existing_meeting_id,
+            )
+            return existing_meeting_id
+
+        # Check if user has an existing meeting doc for this session
+        existing_meetings = list(
+            self.db.collection(f"organizations/{org_id}/meetings")
+            .where(field_path="user_id", op_string="==", value=user_id)
+            .where(field_path="meeting_session_id", op_string="==", value=session_id)
+            .limit(1)
+            .stream()
+        )
+
+        if existing_meetings:
+            meeting_id = existing_meetings[0].id
+            meeting_path = existing_meetings[0].reference.path
+        else:
+            # Create a new meeting document for this attendee
+            meeting_id = self._create_meeting_for_attendee(
+                org_id=org_id,
+                session_id=session_id,
+                user_id=user_id,
+                email=email,
+                source_meeting_data=source_meeting_data,
+            )
+            meeting_path = f"organizations/{org_id}/meetings/{meeting_id}"
+
+        if not meeting_id:
+            logger.warning(
+                "ATTENDEE_SUBSCRIBER: Failed to get/create meeting for user %s",
+                user_id,
+            )
+            return None
+
+        # Add as subscriber
+        now = datetime.now(timezone.utc)
+        subscriber_ref.set(
+            {
+                "user_id": user_id,
+                "fs_meeting_id": meeting_id,
+                "meeting_path": meeting_path,
+                "status": "requested",
+                "requested_at": now,
+                "updated_at": now,
+                "added_via": "attendee_fanout",
+                "email": email,
+            }
+        )
+
+        logger.info(
+            "ATTENDEE_SUBSCRIBER: Added user_id=%s as subscriber, meeting_id=%s",
+            user_id,
+            meeting_id,
+        )
+        return meeting_id
+
+    def _create_meeting_for_attendee(
+        self,
+        *,
+        org_id: str,
+        session_id: str,
+        user_id: str,
+        email: str,
+        source_meeting_data: Dict[str, Any],
+    ) -> Optional[str]:
+        """Create a meeting document for an attendee based on the source meeting.
+
+        Args:
+            org_id: Organization ID
+            session_id: Session ID
+            user_id: User ID for the new meeting
+            email: Email of the attendee
+            source_meeting_data: Data from the source meeting to copy
+
+        Returns:
+            The new meeting document ID, or None on failure
+        """
+        try:
+            now = datetime.now(timezone.utc)
+
+            # Copy relevant fields from source meeting
+            new_meeting_data = {
+                "title": source_meeting_data.get("title", "Shared Meeting"),
+                "start": source_meeting_data.get("start"),
+                "end": source_meeting_data.get("end"),
+                "platform": source_meeting_data.get("platform"),
+                "join_url": source_meeting_data.get("join_url"),
+                "teams_url": source_meeting_data.get("teams_url"),
+                "attendees": source_meeting_data.get("attendees", []),
+                # Set user-specific fields
+                "user_id": user_id,
+                "synced_by_user_id": user_id,
+                "organization_id": org_id,
+                # Mark as created via fanout
+                "source": "attendee_fanout",
+                "created_from_meeting": source_meeting_data.get("id"),
+                "meeting_session_id": session_id,
+                "session_status": "complete",
+                # Timestamps
+                "created_at": now,
+                "updated_at": now,
+                "status": "completed",
+            }
+
+            # Create the document
+            meetings_ref = self.db.collection(f"organizations/{org_id}/meetings")
+            new_doc_ref = meetings_ref.document()
+            new_doc_ref.set(new_meeting_data)
+
+            logger.info(
+                "ATTENDEE_MEETING_CREATED: meeting_id=%s, user_id=%s, email=%s",
+                new_doc_ref.id,
+                user_id,
+                email,
+            )
+            return new_doc_ref.id
+
+        except Exception as e:
+            logger.error(
+                "ATTENDEE_MEETING_CREATE_FAILED: user_id=%s, error=%s",
+                user_id,
+                e,
+            )
+            return None
+
+    def _validate_fanout_results(
+        self,
+        *,
+        org_id: str,
+        session_id: str,
+        expected_artifact_keys: List[str],
+    ) -> Dict[str, Any]:
+        """Validate that all subscribers received all expected files.
+
+        Args:
+            org_id: Organization ID
+            session_id: Session ID
+            expected_artifact_keys: List of artifact keys that should exist
+
+        Returns:
+            Validation result dict with success status and any errors
+        """
+        session_ref = self._meeting_session_ref(org_id=org_id, session_id=session_id)
+        subs = list(session_ref.collection("subscribers").stream())
+
+        validation_result = {
+            "success": True,
+            "total_subscribers": len(subs),
+            "validated": 0,
+            "errors": [],
+        }
+
+        for sub in subs:
+            sub_data = sub.to_dict() or {}
+            user_id = sub_data.get("user_id") or sub.id
+            meeting_id = sub_data.get("fs_meeting_id")
+            meeting_path = sub_data.get("meeting_path")
+
+            if not meeting_id:
+                validation_result["errors"].append(
+                    f"Subscriber {user_id} has no meeting_id"
+                )
+                validation_result["success"] = False
+                continue
+
+            # Check meeting document exists and has expected fields
+            try:
+                if meeting_path:
+                    meeting_ref = self.db.document(meeting_path)
+                else:
+                    meeting_ref = self.db.document(
+                        f"organizations/{org_id}/meetings/{meeting_id}"
+                    )
+
+                meeting_snap = meeting_ref.get()
+                if not meeting_snap.exists:
+                    validation_result["errors"].append(
+                        f"Meeting {meeting_id} for user {user_id} does not exist"
+                    )
+                    validation_result["success"] = False
+                    continue
+
+                meeting_data = meeting_snap.to_dict() or {}
+
+                # Check transcription
+                if not meeting_data.get("transcription"):
+                    validation_result["errors"].append(
+                        f"User {user_id} missing transcription"
+                    )
+                    validation_result["success"] = False
+
+                # Check artifacts
+                artifacts = meeting_data.get("artifacts", {})
+                for key in expected_artifact_keys:
+                    if key not in artifacts:
+                        validation_result["errors"].append(
+                            f"User {user_id} missing artifact: {key}"
+                        )
+                        validation_result["success"] = False
+
+                # Verify GCS files exist for this subscriber
+                dst_prefix = f"recordings/{user_id}/{meeting_id}"
+                gcs_objects = self._list_gcs_prefix(dst_prefix + "/")
+                if len(gcs_objects) < len(expected_artifact_keys):
+                    validation_result["errors"].append(
+                        f"User {user_id} has {len(gcs_objects)} GCS files, "
+                        f"expected at least {len(expected_artifact_keys)}"
+                    )
+                    validation_result["success"] = False
+
+                validation_result["validated"] += 1
+
+            except Exception as e:
+                validation_result["errors"].append(
+                    f"Validation error for user {user_id}: {e}"
+                )
+                validation_result["success"] = False
+
+        # Log validation result
+        if validation_result["success"]:
+            logger.info(
+                "FANOUT_VALIDATION: session_id=%s, status=SUCCESS, "
+                "validated=%d/%d subscribers",
+                session_id[:16],
+                validation_result["validated"],
+                validation_result["total_subscribers"],
+            )
+        else:
+            logger.warning(
+                "FANOUT_VALIDATION: session_id=%s, status=FAILED, "
+                "validated=%d/%d, errors=%s",
+                session_id[:16],
+                validation_result["validated"],
+                validation_result["total_subscribers"],
+                validation_result["errors"],
+            )
+
+        return validation_result
+
     def _query_completed_sessions_needing_fanout(
         self,
     ) -> List[firestore.DocumentSnapshot]:
@@ -1939,9 +2362,77 @@ class MeetingController:
                 "Session artifacts to distribute: %s", list(session_artifacts.keys())
             )
 
+            # === ATTENDEE-BASED FANOUT ===
+            # Re-read the source meeting to get the latest attendees list
+            # and add any org members as subscribers
+            logger.debug("=" * 80)
+            logger.debug("ATTENDEE-BASED FANOUT - Checking for additional org members")
+            logger.debug("=" * 80)
+
+            source_meeting_data = {}
+            first_meeting_path = first_sub_data.get("meeting_path")
+            if first_meeting_path:
+                try:
+                    source_meeting_ref = self.db.document(first_meeting_path)
+                    source_meeting_snap = source_meeting_ref.get()
+                    if source_meeting_snap.exists:
+                        source_meeting_data = source_meeting_snap.to_dict() or {}
+                        source_meeting_data["id"] = source_meeting_snap.id
+                except Exception as e:
+                    logger.warning(
+                        "Failed to read source meeting %s: %s", first_meeting_path, e
+                    )
+
+            # Get fresh attendees list from the source meeting
+            attendee_emails = self._get_fresh_meeting_attendees(
+                org_id, source_meeting_id
+            )
+
+            if attendee_emails:
+                # Map attendee emails to org user_ids
+                email_to_user_id = self._get_org_user_ids_for_attendees(
+                    org_id, attendee_emails
+                )
+
+                logger.info(
+                    "ATTENDEE_FANOUT: Found %d attendees, %d are org members",
+                    len(attendee_emails),
+                    len(email_to_user_id),
+                )
+
+                # Add each org member as a subscriber if not already
+                for email, user_id in email_to_user_id.items():
+                    # Skip if this is the source user
+                    if user_id == source_user_id:
+                        logger.debug(
+                            "ATTENDEE_FANOUT: Skipping source user %s", user_id
+                        )
+                        continue
+
+                    # Ensure subscriber exists (creates meeting doc if needed)
+                    self._ensure_subscriber_for_attendee(
+                        org_id=org_id,
+                        session_id=session_id,
+                        session_ref=session_ref,
+                        user_id=user_id,
+                        email=email,
+                        source_meeting_id=source_meeting_id,
+                        source_meeting_data=source_meeting_data,
+                    )
+
+                # Refresh subscriber list after adding attendees
+                subs = list(session_ref.collection("subscribers").stream())
+                logger.info(
+                    "ATTENDEE_FANOUT: Subscriber count after attendee check: %d",
+                    len(subs),
+                )
+            else:
+                logger.debug("ATTENDEE_FANOUT: No attendees found in source meeting")
+
+            # === END ATTENDEE-BASED FANOUT ===
+
             # Update the first subscriber's meeting with transcription and artifacts
             logger.debug("Updating first subscriber's meeting document...")
-            first_meeting_path = first_sub_data.get("meeting_path")
             logger.debug("First subscriber meeting path: %s", first_meeting_path)
 
             if first_meeting_path:
@@ -2136,12 +2627,29 @@ class MeetingController:
                         "  No meeting path for subscriber, skipping meeting update"
                     )
 
+            # === VALIDATION STEP ===
+            # Verify all subscribers received their files
             logger.debug("=" * 80)
-            logger.debug("Marking session fanout as complete")
+            logger.debug("VALIDATING FANOUT RESULTS")
+            logger.debug("=" * 80)
+
+            expected_artifact_keys = list(session_artifacts.keys())
+            validation_result = self._validate_fanout_results(
+                org_id=org_id,
+                session_id=session_id,
+                expected_artifact_keys=expected_artifact_keys,
+            )
+
+            # Store validation result on session
+            fanout_status = "complete" if validation_result["success"] else "partial"
+
+            logger.debug("=" * 80)
+            logger.debug("Marking session fanout as %s", fanout_status)
             session_ref.set(
                 {
-                    "fanout_status": "complete",
+                    "fanout_status": fanout_status,
                     "fanout_completed_at": datetime.now(timezone.utc),
+                    "fanout_validation": validation_result,
                     "updated_at": datetime.now(timezone.utc),
                 },
                 merge=True,
