@@ -2,7 +2,7 @@
 Test: Merged Meetings Add Subscribers for Fanout
 
 This test verifies that when a duplicate meeting is consolidated/merged
-into a canonical meeting, the duplicate meeting's user is added as a 
+into a canonical meeting, the duplicate meeting's user is added as a
 subscriber to the session so they receive fanout copies of transcriptions.
 
 Bug fixed: Previously, when meetings were merged, only the canonical meeting's
@@ -99,7 +99,7 @@ class TestMergeSubscriberFix:
         self, canonical_meeting, duplicate_meeting, org_id, session_id
     ):
         """When a meeting is merged, its user should be added as a subscriber"""
-        
+
         # Track if subscriber was added
         subscriber_added = False
         subscriber_data = None
@@ -112,10 +112,12 @@ class TestMergeSubscriberFix:
             duplicate_data = duplicate.to_dict() or {}
 
             # Mark as merged (original behavior)
-            duplicate.reference.update({
-                "status": "merged",
-                "merged_into": canonical.id,
-            })
+            duplicate.reference.update(
+                {
+                    "status": "merged",
+                    "merged_into": canonical.id,
+                }
+            )
 
             # NEW: Add subscriber for fanout
             session_id = canonical_data.get("meeting_session_id")
@@ -150,7 +152,7 @@ class TestMergeSubscriberFix:
         self, canonical_meeting, duplicate_meeting, org_id, session_id
     ):
         """If user is already a subscriber, don't add again"""
-        
+
         existing_subscriber = True  # User B already subscribed somehow
 
         def mock_consolidate_with_existing(canonical, duplicate):
@@ -172,11 +174,9 @@ class TestMergeSubscriberFix:
         assert result is True
         print("✅ Existing subscriber not duplicated")
 
-    def test_no_subscriber_without_session_id(
-        self, duplicate_meeting, org_id
-    ):
+    def test_no_subscriber_without_session_id(self, duplicate_meeting, org_id):
         """If canonical meeting has no session_id, can't add subscriber"""
-        
+
         canonical_without_session = MockFirestoreDocument(
             doc_id="meeting-user-a",
             data={
@@ -241,7 +241,7 @@ class TestFanoutToMergedUsers:
 
     def test_fanout_copies_to_all_subscribers(self, session_with_two_subscribers):
         """Fanout should copy artifacts to all subscribers including merged users"""
-        
+
         session = session_with_two_subscribers
         subscribers = session["subscribers"]
         artifacts = session["artifacts"]
@@ -251,28 +251,38 @@ class TestFanoutToMergedUsers:
         for sub in subscribers:
             target_user_id = sub["user_id"]
             target_meeting_id = sub["fs_meeting_id"]
-            
+
             # Calculate target paths (what fanout would do)
             target_artifacts = {}
             for key, source_path in artifacts.items():
                 filename = source_path.split("/")[-1]
-                target_path = f"recordings/{target_user_id}/{target_meeting_id}/{filename}"
+                target_path = (
+                    f"recordings/{target_user_id}/{target_meeting_id}/{filename}"
+                )
                 target_artifacts[key] = target_path
 
-            fanout_targets.append({
-                "user_id": target_user_id,
-                "meeting_id": target_meeting_id,
-                "artifacts": target_artifacts,
-            })
+            fanout_targets.append(
+                {
+                    "user_id": target_user_id,
+                    "meeting_id": target_meeting_id,
+                    "artifacts": target_artifacts,
+                }
+            )
 
         # Verify both users get copies
         assert len(fanout_targets) == 2
-        
+
         user_a_target = next(t for t in fanout_targets if t["user_id"] == "user-a")
         user_b_target = next(t for t in fanout_targets if t["user_id"] == "user-b")
 
-        assert "recordings/user-a/meeting-user-a/transcript.txt" in user_a_target["artifacts"]["transcript_txt"]
-        assert "recordings/user-b/meeting-user-b/transcript.txt" in user_b_target["artifacts"]["transcript_txt"]
+        assert (
+            "recordings/user-a/meeting-user-a/transcript.txt"
+            in user_a_target["artifacts"]["transcript_txt"]
+        )
+        assert (
+            "recordings/user-b/meeting-user-b/transcript.txt"
+            in user_b_target["artifacts"]["transcript_txt"]
+        )
 
         print("✅ Fanout targets both subscribers correctly")
         print(f"   User A artifacts: {user_a_target['artifacts']}")
@@ -287,7 +297,7 @@ def test_end_to_end_scenario():
     3. Clinton should be added as subscriber
     4. After recording, both get transcription
     """
-    
+
     # Step 1: Matt's meeting creates session
     matt_meeting = {
         "id": "matt-meeting-123",
@@ -296,7 +306,7 @@ def test_end_to_end_scenario():
         "meeting_url": "https://teams.microsoft.com/l/meetup-join/test123",
         "meeting_session_id": "session-abc",
     }
-    
+
     session = {
         "id": "session-abc",
         "status": "queued",
@@ -305,10 +315,10 @@ def test_end_to_end_scenario():
             {"user_id": "matt-user-id", "fs_meeting_id": "matt-meeting-123"}
         ],
     }
-    
+
     print("Step 1: Matt's meeting created session with 1 subscriber")
     assert len(session["subscribers"]) == 1
-    
+
     # Step 2: Clinton's meeting is synced (same URL)
     clinton_meeting = {
         "id": "clinton-meeting-456",
@@ -317,30 +327,32 @@ def test_end_to_end_scenario():
         "meeting_url": "https://teams.microsoft.com/l/meetup-join/test123",
         "meeting_session_id": None,  # Not linked yet
     }
-    
+
     # Simulate merge + subscriber add (the fix)
     clinton_meeting["status"] = "merged"
     clinton_meeting["merged_into"] = matt_meeting["id"]
     clinton_meeting["meeting_session_id"] = session["id"]
-    
+
     # Add Clinton as subscriber
-    session["subscribers"].append({
-        "user_id": "clinton-user-id",
-        "fs_meeting_id": "clinton-meeting-456",
-        "added_via": "merge_consolidation",
-    })
-    
+    session["subscribers"].append(
+        {
+            "user_id": "clinton-user-id",
+            "fs_meeting_id": "clinton-meeting-456",
+            "added_via": "merge_consolidation",
+        }
+    )
+
     print("Step 2: Clinton's meeting merged, added as subscriber")
     assert len(session["subscribers"]) == 2
-    
+
     # Step 3: Meeting completes, fanout happens
     session["status"] = "complete"
-    
+
     # Verify both can receive fanout
     fanout_recipients = [s["user_id"] for s in session["subscribers"]]
     assert "matt-user-id" in fanout_recipients
     assert "clinton-user-id" in fanout_recipients
-    
+
     print("Step 3: Both users are fanout recipients")
     print(f"   Recipients: {fanout_recipients}")
     print("✅ End-to-end scenario passed!")
@@ -349,6 +361,6 @@ def test_end_to_end_scenario():
 if __name__ == "__main__":
     # Run the end-to-end test
     test_end_to_end_scenario()
-    
+
     # Run unit tests
     pytest.main([__file__, "-v"])
