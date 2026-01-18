@@ -403,51 +403,8 @@ class MeetingManager:
                     audio_err,
                 )
 
-            # Step 3: Upload original WEBM file to GCS (required)
-            logger.info("Step 3: Uploading original WEBM file to GCS...")
-            logger.debug("POST-MEETING: Verifying recording file exists")
-            if not os.path.exists(recording_path):
-                logger.error(f"Recording file not found: {recording_path}")
-                logger.debug(
-                    "POST-MEETING DECISION: Recording file missing - cannot proceed"
-                )
-                return False
-
-            webm_size = os.path.getsize(recording_path)
-            logger.info(
-                "WEBM file size: %s bytes (%.2f MB)",
-                webm_size,
-                webm_size / (1024 * 1024),
-            )
-            logger.debug("POST-MEETING: Validating file size")
-            if webm_size < 1000:
-                logger.error(
-                    "❌ WEBM file too small (%s bytes) - file is " "empty or corrupted",
-                    webm_size,
-                )
-                logger.debug("POST-MEETING DECISION: File too small, likely corrupted")
-                return False
-
-            logger.debug("POST-MEETING: Uploading to GCS path: %s", self.gcs_path)
-            webm_gcs_path = f"{self.gcs_path}/recording.webm"
-            webm_uploaded = self.storage_client.upload_file(
-                recording_path, webm_gcs_path
-            )
-            if not webm_uploaded:
-                logger.error("Failed to upload original WEBM file")
-                logger.debug(
-                    "POST-MEETING DECISION: Upload failed - storage issue or permissions"
-                )
-                return False
-
-            logger.info(
-                "✅ Original WEBM uploaded to gs://%s/%s",
-                self.gcs_bucket,
-                webm_gcs_path,
-            )
-            logger.debug("POST-MEETING: WEBM upload successful")
-
-            # Step 3.1: Check for ad-hoc meeting and create/update if needed
+            # Step 2.9: Check for ad-hoc meeting and create/update if needed
+            # IMPORTANT: This must happen BEFORE uploads so gcs_path can be updated
             # Ad-hoc meetings occur when a user joins via Pub/Sub without
             # a pre-scheduled meeting document in Firestore.
             # Even if the meeting exists (created by frontend), it may be
@@ -518,9 +475,17 @@ class MeetingManager:
                             # Update fs_meeting_id to use the new meeting
                             old_meeting_id = self.fs_meeting_id
                             self.fs_meeting_id = new_meeting_id
+
+                            # CRITICAL: Update gcs_path to use the new meeting ID
+                            # so all subsequent uploads go to the correct location
+                            old_gcs_path = self.gcs_path
+                            self.gcs_path = f"recordings/{self.user_id}/{new_meeting_id}"
                             logger.info(
                                 f"✅ Created ad-hoc meeting {new_meeting_id}"
                                 f" (was {old_meeting_id})"
+                            )
+                            logger.info(
+                                f"📁 Updated GCS path: {old_gcs_path} -> {self.gcs_path}"
                             )
 
                             # Immediately update with end time and duration to meet schema requirements
@@ -585,6 +550,50 @@ class MeetingManager:
                         f"source={meeting_data.get('source')}, "
                         f"start={meeting_data.get('start')}"
                     )
+
+            # Step 3: Upload original WEBM file to GCS (required)
+            logger.info("Step 3: Uploading original WEBM file to GCS...")
+            logger.debug("POST-MEETING: Verifying recording file exists")
+            if not os.path.exists(recording_path):
+                logger.error(f"Recording file not found: {recording_path}")
+                logger.debug(
+                    "POST-MEETING DECISION: Recording file missing - cannot proceed"
+                )
+                return False
+
+            webm_size = os.path.getsize(recording_path)
+            logger.info(
+                "WEBM file size: %s bytes (%.2f MB)",
+                webm_size,
+                webm_size / (1024 * 1024),
+            )
+            logger.debug("POST-MEETING: Validating file size")
+            if webm_size < 1000:
+                logger.error(
+                    "❌ WEBM file too small (%s bytes) - file is " "empty or corrupted",
+                    webm_size,
+                )
+                logger.debug("POST-MEETING DECISION: File too small, likely corrupted")
+                return False
+
+            logger.debug("POST-MEETING: Uploading to GCS path: %s", self.gcs_path)
+            webm_gcs_path = f"{self.gcs_path}/recording.webm"
+            webm_uploaded = self.storage_client.upload_file(
+                recording_path, webm_gcs_path
+            )
+            if not webm_uploaded:
+                logger.error("Failed to upload original WEBM file")
+                logger.debug(
+                    "POST-MEETING DECISION: Upload failed - storage issue or permissions"
+                )
+                return False
+
+            logger.info(
+                "✅ Original WEBM uploaded to gs://%s/%s",
+                self.gcs_bucket,
+                webm_gcs_path,
+            )
+            logger.debug("POST-MEETING: WEBM upload successful")
 
             # Step 3.25: Upload MP4 (optional) for browser fallback.
             if mp4_path and os.path.exists(mp4_path):
