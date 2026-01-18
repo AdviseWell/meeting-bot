@@ -322,7 +322,12 @@ class MeetingController:
         """
         # Extract key identifiers early for logging
         meeting_url = message_data.get("meeting_url", "")
-        org_id = message_data.get("team_id") or message_data.get("teamId") or message_data.get("org_id") or ""
+        org_id = (
+            message_data.get("team_id")
+            or message_data.get("teamId")
+            or message_data.get("org_id")
+            or ""
+        )
         session_id = (
             message_data.get("session_id", "")[:16]
             if message_data.get("session_id")
@@ -417,10 +422,18 @@ class MeetingController:
             org_hash = self._org_id_hash(org_id)
 
             logger.info(
-                "JOB_NAME_GENERATED: org_id=%s, job_guid=%s, job_name=%s",
+                "JOB_NAME_GENERATED: org_id='%s', job_guid=%s, job_name=%s",
                 org_id,
                 job_guid,
                 job_name,
+            )
+
+            logger.info(
+                "HASH_GENERATED: org_id='%s' -> org_hash='%s', meeting_url='%s' -> url_hash='%s'",
+                org_id,
+                org_hash,
+                meeting_url,
+                url_hash,
             )
 
             logger.info(f"Creating Kubernetes Job: {job_name}")
@@ -1055,6 +1068,14 @@ class MeetingController:
         url_hash = self._meeting_url_hash(meeting_url)
         org_hash = self._org_id_hash(org_id)
 
+        logger.debug(
+            "DEDUP_HASH_CHECK: org_id='%s' -> org_hash='%s', meeting_url='%s' -> url_hash='%s'",
+            org_id,
+            org_hash,
+            meeting_url,
+            url_hash,
+        )
+
         if not org_hash or not url_hash:
             logger.warning(
                 "Cannot check bot assignment: org_id=%s, org_hash=%s, url_hash=%s",
@@ -1080,6 +1101,24 @@ class MeetingController:
                 namespace=self.k8s_namespace,
                 label_selector=label_selector,
             )
+
+            # If no jobs found with specific org_hash and org_id is not empty,
+            # also check for jobs with "no-org" as a fallback for legacy compatibility
+            if not jobs.items and org_id and org_hash != "no-org":
+                fallback_label_selector = (
+                    f"app=meeting-bot,"
+                    f"org_id_hash=no-org,"
+                    f"meeting_url_hash={url_hash}"
+                )
+                logger.debug(
+                    "DEDUP_FALLBACK: No jobs found, checking fallback label_selector=%s",
+                    fallback_label_selector,
+                )
+                jobs = self.batch_v1.list_namespaced_job(
+                    namespace=self.k8s_namespace,
+                    label_selector=fallback_label_selector,
+                )
+
         except ApiException as e:
             logger.warning("Failed to query K8s jobs for dedup: %s", e)
             return False, None
@@ -3541,7 +3580,10 @@ class MeetingController:
         try:
             data = json.loads(message.data.decode("utf-8"))
             meeting_id = data.get("meeting_id")
-            org_id = data.get("teamId")
+            # Use same comprehensive org_id extraction as create_manager_job
+            org_id = (
+                data.get("team_id") or data.get("teamId") or data.get("org_id") or ""
+            )
 
             logger.debug("=" * 80)
             logger.debug("PUB/SUB MESSAGE RECEIVED")
