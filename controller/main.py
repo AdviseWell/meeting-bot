@@ -428,7 +428,9 @@ class MeetingController:
             env_vars = [
                 client.V1EnvVar(name="MEETING_URL", value=meeting_url),
                 client.V1EnvVar(name="MEETING_ID", value=meeting_id),
-                client.V1EnvVar(name="ORG_ID", value=org_id),  # Explicit org_id for consistency
+                client.V1EnvVar(
+                    name="ORG_ID", value=org_id
+                ),  # Explicit org_id for consistency
                 client.V1EnvVar(name="FS_MEETING_ID", value=str(meeting_doc_id)),
                 client.V1EnvVar(name="USER_ID", value=str(user_doc_id)),
                 client.V1EnvVar(name="GCS_PATH", value=gcs_path),
@@ -455,7 +457,13 @@ class MeetingController:
             for key, value in message_data.items():
                 if value is not None and isinstance(value, (str, int, float, bool)):
                     # Skip keys we've already added explicitly above
-                    if key.lower() not in ["meeting_url", "meeting_id", "org_id", "team_id", "gcs_path"]:
+                    if key.lower() not in [
+                        "meeting_url",
+                        "meeting_id",
+                        "org_id",
+                        "team_id",
+                        "gcs_path",
+                    ]:
                         # Add original case (e.g., bearerToken, teamId, userId)
                         env_vars.append(client.V1EnvVar(name=key, value=str(value)))
 
@@ -493,10 +501,10 @@ class MeetingController:
                 "ORG_ID": org_id,
             }
             logger.info(
-                "KEY_ENV_VARS_SET: %s", 
-                ", ".join([f"{k}={v}" for k, v in key_env_vars.items()])
+                "KEY_ENV_VARS_SET: %s",
+                ", ".join([f"{k}={v}" for k, v in key_env_vars.items()]),
             )
-            
+
             # Log all environment variable names for debugging
             all_env_names = [env_var.name for env_var in env_vars]
             logger.debug("ALL_ENV_VARS: %s", ", ".join(sorted(all_env_names)))
