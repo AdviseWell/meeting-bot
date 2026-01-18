@@ -130,7 +130,11 @@ class MeetingController:
         self.leader_lease_seconds = 30
         self.is_leader = False
         # Skip leader election for local development
-        self.skip_leader_election = os.getenv("SKIP_LEADER_ELECTION", "").lower() in ("true", "1", "yes")
+        self.skip_leader_election = os.getenv("SKIP_LEADER_ELECTION", "").lower() in (
+            "true",
+            "1",
+            "yes",
+        )
 
         # Meeting discovery / creation behavior
         # The controller is the source of truth for creating bot_instances.
@@ -201,8 +205,14 @@ class MeetingController:
         )
 
         # Initialize GCS client (used for post-processing fan-out copies).
-        self.gcs_client = storage.Client(project=self.project_id)
-        self.gcs_bucket_client = self.gcs_client.bucket(self.gcs_bucket)
+        # Skip in DRY_RUN mode to avoid authentication issues in local development
+        if self.dry_run:
+            logger.info("DRY_RUN mode - skipping GCS client initialization")
+            self.gcs_client = None
+            self.gcs_bucket_client = None
+        else:
+            self.gcs_client = storage.Client(project=self.project_id)
+            self.gcs_bucket_client = self.gcs_client.bucket(self.gcs_bucket)
 
         # Initialize Kubernetes client (skip in dry-run mode if unavailable)
         self.batch_v1 = None
@@ -215,7 +225,9 @@ class MeetingController:
                 try:
                     config.load_kube_config()
                 except Exception:
-                    logger.warning("DRY_RUN: No K8s config available, skipping K8s init")
+                    logger.warning(
+                        "DRY_RUN: No K8s config available, skipping K8s init"
+                    )
             # Initialize APIs if config loaded, but they won't be used
             try:
                 self.batch_v1 = client.BatchV1Api()
@@ -308,7 +320,6 @@ class MeetingController:
             True if job created successfully, False otherwise
         """
         # Extract key identifiers early for logging
-        meeting_id = message_data.get("meeting_id", message_id)
         meeting_url = message_data.get("meeting_url", "")
         org_id = message_data.get("team_id") or message_data.get("org_id") or ""
         session_id = (
@@ -316,6 +327,16 @@ class MeetingController:
             if message_data.get("session_id")
             else ""
         )
+
+        # Generate consistent meeting_id based on org_id + meeting_url
+        # This ensures job names are consistent for deduplication
+        if meeting_url and org_id:
+            meeting_id = self._meeting_session_id(
+                org_id=org_id, meeting_url=meeting_url
+            )
+        else:
+            # Fallback for legacy payloads or incomplete data
+            meeting_id = message_data.get("meeting_id", message_id)
 
         try:
 
@@ -385,11 +406,21 @@ class MeetingController:
                 )
                 return False
 
-            # Generate unique job name (must be DNS-1123 compliant)
+            # Generate consistent job name for deduplication
+            # Use org_id prefix + meeting_id hash for uniqueness and deduplication
             # K8s names must be lowercase alphanumeric + hyphens
-            timestamp = int(time.time())
-            job_name = f"meeting-{meeting_id.lower()[:50]}-{timestamp}"
-            job_name = job_name.replace("_", "-")[:63]  # K8s name length limit
+            org_prefix = self._sanitize_label_value(org_id)[:20] if org_id else "no-org"
+            meeting_hash = meeting_id[:16] if meeting_id else "no-meeting"
+            job_name = f"meeting-{org_prefix}-{meeting_hash}"
+            job_name = job_name.replace("_", "-").lower()[:63]  # K8s name length limit
+
+            logger.info(
+                "JOB_NAME_GENERATED: org_id=%s, org_prefix=%s, meeting_hash=%s, job_name=%s",
+                org_id,
+                org_prefix,
+                meeting_hash,
+                job_name,
+            )
 
             logger.info(f"Creating Kubernetes Job: {job_name}")
 
@@ -618,7 +649,9 @@ class MeetingController:
                 "app": "meeting-bot-manager",
                 "managed-by": "meeting-bot-controller",
                 "meeting-id": meeting_id[:63],
-                "org-id": self._sanitize_label_value(org_id),
+                "org-id": self._sanitize_label_value(org_id)[
+                    :20
+                ],  # Match job name org prefix length
                 "meeting-url-hash": url_hash,
             }
 
@@ -626,11 +659,16 @@ class MeetingController:
             if self.dry_run:
                 logger.info(
                     "DRY_RUN: Would create job '%s' for meeting %s (org=%s, user=%s)",
-                    job_name, meeting_doc_id, org_id, user_doc_id
+                    job_name,
+                    meeting_doc_id,
+                    org_id,
+                    user_doc_id,
                 )
                 logger.info(
                     "DRY_RUN: Job spec: session_id=%s, meeting_url=%s, gcs_path=%s",
-                    session_id, meeting_url[:80] if meeting_url else "none", gcs_path
+                    session_id,
+                    meeting_url[:80] if meeting_url else "none",
+                    gcs_path,
                 )
                 return True
 
@@ -698,7 +736,9 @@ class MeetingController:
                 "managed-by": "meeting-bot-controller",
                 "meeting-id": meeting_id[:63],
                 # NEW: Labels for K8s-based deduplication
-                "org-id": self._sanitize_label_value(org_id),
+                "org-id": self._sanitize_label_value(org_id)[
+                    :20
+                ],  # Match job name org prefix length
                 "meeting-url-hash": url_hash,
                 # NEW: Debug labels
                 "user-id": self._sanitize_label_value(user_doc_id),
@@ -982,6 +1022,9 @@ class MeetingController:
         Uses K8s job labels to determine if a bot is already assigned to a meeting.
         This replaces the Firestore session-based deduplication.
 
+        The job naming convention is: meeting-{org_prefix}-{meeting_hash}
+        Where meeting_hash is the first 16 chars of the sha256 hash of org_id:normalized_meeting_url
+
         Returns:
             (is_assigned, job_name): Whether a bot is active and its name if so
         """
@@ -991,7 +1034,9 @@ class MeetingController:
             return False, None
 
         url_hash = self._meeting_url_hash(meeting_url)
-        sanitized_org = self._sanitize_label_value(org_id)
+        sanitized_org = self._sanitize_label_value(org_id)[
+            :20
+        ]  # Match job name org prefix length
 
         if not sanitized_org or not url_hash:
             logger.warning(
@@ -1510,14 +1555,28 @@ class MeetingController:
                 session_data = session.to_dict() or {}
                 session_id = session.id
                 org_id = session_data.get("org_id", "unknown")
+                meeting_url = session_data.get("meeting_url", "")
                 status = session_data.get("status", "unknown")
                 claimed_at = session_data.get("claimed_at")
 
                 # Check if there's a job for this session
-                # Job names are based on meeting_id, not session_id, so we check by pattern
-                has_job = any(
-                    session_id[:8] in job_name for job_name in running_job_names
-                )
+                # Generate the expected job name based on org_id + meeting_url
+                has_job = False
+                if org_id != "unknown" and meeting_url:
+                    meeting_hash = self._meeting_session_id(
+                        org_id=org_id, meeting_url=meeting_url
+                    )
+                    org_prefix = self._sanitize_label_value(org_id)[:20]
+                    expected_job_pattern = f"meeting-{org_prefix}-{meeting_hash[:16]}"
+                    has_job = any(
+                        expected_job_pattern in job_name
+                        for job_name in running_job_names
+                    )
+                else:
+                    # Fallback: check by session_id for legacy sessions
+                    has_job = any(
+                        session_id[:8] in job_name for job_name in running_job_names
+                    )
 
                 if not has_job:
                     orphaned_count += 1
@@ -2823,18 +2882,20 @@ class MeetingController:
 
         payload: Dict[str, Any] = {
             "meeting_url": meeting_url,
-            # meeting_id is a best-effort identifier for logs/meeting-bot API.
-            "meeting_id": session_doc.id,
+            # meeting_id should be consistent hash for deduplication
+            "meeting_id": self._meeting_session_id(
+                org_id=org_id, meeting_url=meeting_url
+            ),
             "gcs_path": gcs_path,
             "fs_meeting_id": fs_meeting_id,
             "user_id": user_id,
             "teamId": org_id or session_doc.id,
+            "org_id": org_id,  # Ensure org_id is always present for job naming
             "timezone": data.get("timezone") or "UTC",
             "initiated_at": data.get("initiated_at")
             or (now.isoformat().replace("+00:00", "Z")),
             "auto_joined": True,
             "meeting_session_id": session_doc.id,
-            "org_id": org_id,
         }
 
         # Determine bot display name from org doc (same behavior as bot_instances path).
