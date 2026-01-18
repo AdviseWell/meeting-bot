@@ -436,6 +436,22 @@ class MeetingController:
                 url_hash,
             )
 
+            # K8s-based deduplication: Check if a bot is already assigned
+            # to this org+URL combination BEFORE creating a new job.
+            # This is the final safety check to prevent duplicate bots.
+            is_assigned, existing_job = self._is_bot_already_assigned(
+                org_id, meeting_url
+            )
+            if is_assigned:
+                logger.warning(
+                    "DUPLICATE_PREVENTED: Bot already assigned for org_id='%s', "
+                    "meeting_url='%s', existing_job='%s'. Skipping job creation.",
+                    org_id,
+                    meeting_url,
+                    existing_job,
+                )
+                return False
+
             logger.info(f"Creating Kubernetes Job: {job_name}")
 
             # Build environment variables for the manager
