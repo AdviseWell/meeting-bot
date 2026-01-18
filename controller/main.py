@@ -2784,12 +2784,14 @@ class MeetingController:
     def _fanout_completed_meeting_by_url(
         self, source_meeting_doc: firestore.DocumentSnapshot
     ) -> None:
-        """Copy artifacts from source meeting to all meetings with same URL in org.
+        """Copy artifacts from source meeting to all meetings with same URL and time.
 
-        This is the new fanout approach for K8s-based deduplication:
-        - Finds all meetings with the same join_url in the same org
-        - Copies artifacts from source to each matching meeting
-        - Updates each meeting document with artifact references
+        This fanout approach finds meetings by matching:
+        - Same join_url in the same organization
+        - Same start and end times (within 5-minute tolerance)
+
+        This handles cases where multiple users have the same calendar meeting
+        (same URL, same scheduled time) and ensures all users get the recording.
         """
         data = source_meeting_doc.to_dict() or {}
         org_id = (
@@ -2799,6 +2801,8 @@ class MeetingController:
             or data.get("team_id")
         )
         meeting_url = data.get("join_url") or data.get("meeting_url")
+        source_start = data.get("start")
+        source_end = data.get("end")
 
         if not org_id or not meeting_url:
             logger.warning(
@@ -2814,7 +2818,7 @@ class MeetingController:
             )
             return
 
-        source_user_id = data.get("user_id")
+        source_user_id = data.get("user_id") or data.get("synced_by_user_id")
         source_meeting_id = source_meeting_doc.id
         source_artifacts = data.get("artifacts", {})
         source_transcription = data.get("transcription")
@@ -2833,10 +2837,14 @@ class MeetingController:
             return
 
         logger.info(
-            "FANOUT_BY_URL_START: source_meeting=%s, org=%s, url=%s",
+            "FANOUT_BY_URL_START: source_meeting=%s, org=%s, url=%s, "
+            "start=%s, end=%s, user=%s",
             source_meeting_id,
             org_id,
-            meeting_url[:50],
+            meeting_url[:50] if meeting_url else "N/A",
+            source_start,
+            source_end,
+            source_user_id,
         )
 
         # Find all meetings with same URL in this org
@@ -2845,7 +2853,7 @@ class MeetingController:
         )
 
         try:
-            matching_meetings = list(
+            url_matching_meetings = list(
                 meetings_ref.where(
                     filter=firestore.FieldFilter("join_url", "==", meeting_url)
                 ).stream()
@@ -2859,8 +2867,102 @@ class MeetingController:
             return
 
         logger.info(
-            "FANOUT_BY_URL_MATCHES: source=%s, matching_count=%d",
+            "FANOUT_URL_MATCHES: source=%s, url_match_count=%d",
             source_meeting_id,
+            len(url_matching_meetings),
+        )
+
+        # Filter to meetings with matching start/end times (within tolerance)
+        TIME_TOLERANCE_SECONDS = 300  # 5 minutes tolerance
+        matching_meetings = []
+
+        for meeting_doc in url_matching_meetings:
+            meeting_data = meeting_doc.to_dict() or {}
+            meeting_start = meeting_data.get("start")
+            meeting_end = meeting_data.get("end")
+            meeting_user_id = meeting_data.get("user_id") or meeting_data.get(
+                "synced_by_user_id"
+            )
+
+            # Log each URL match for visibility
+            logger.debug(
+                "FANOUT_URL_MATCH: meeting=%s, user=%s, start=%s, end=%s",
+                meeting_doc.id,
+                meeting_user_id,
+                meeting_start,
+                meeting_end,
+            )
+
+            # If source has start/end, filter by time match
+            if source_start and source_end and meeting_start and meeting_end:
+                try:
+                    # Convert to datetime if needed
+                    src_start_dt = (
+                        source_start
+                        if isinstance(source_start, datetime)
+                        else source_start
+                    )
+                    src_end_dt = (
+                        source_end if isinstance(source_end, datetime) else source_end
+                    )
+                    mtg_start_dt = (
+                        meeting_start
+                        if isinstance(meeting_start, datetime)
+                        else meeting_start
+                    )
+                    mtg_end_dt = (
+                        meeting_end
+                        if isinstance(meeting_end, datetime)
+                        else meeting_end
+                    )
+
+                    # Check if times match within tolerance
+                    start_diff = abs((src_start_dt - mtg_start_dt).total_seconds())
+                    end_diff = abs((src_end_dt - mtg_end_dt).total_seconds())
+
+                    if (
+                        start_diff <= TIME_TOLERANCE_SECONDS
+                        and end_diff <= TIME_TOLERANCE_SECONDS
+                    ):
+                        matching_meetings.append(meeting_doc)
+                        logger.info(
+                            "FANOUT_TIME_MATCH: meeting=%s, user=%s, "
+                            "start_diff=%ds, end_diff=%ds",
+                            meeting_doc.id,
+                            meeting_user_id,
+                            int(start_diff),
+                            int(end_diff),
+                        )
+                    else:
+                        logger.debug(
+                            "FANOUT_TIME_MISMATCH: meeting=%s, user=%s, "
+                            "start_diff=%ds, end_diff=%ds (tolerance=%ds)",
+                            meeting_doc.id,
+                            meeting_user_id,
+                            int(start_diff),
+                            int(end_diff),
+                            TIME_TOLERANCE_SECONDS,
+                        )
+                except Exception as e:
+                    # If time comparison fails, include meeting anyway
+                    logger.debug(
+                        "FANOUT_TIME_CHECK_ERROR: meeting=%s, error=%s, including anyway",
+                        meeting_doc.id,
+                        e,
+                    )
+                    matching_meetings.append(meeting_doc)
+            else:
+                # No time info available - include all URL matches
+                matching_meetings.append(meeting_doc)
+                logger.debug(
+                    "FANOUT_NO_TIME_INFO: meeting=%s, including by URL only",
+                    meeting_doc.id,
+                )
+
+        logger.info(
+            "FANOUT_FINAL_MATCHES: source=%s, url_matches=%d, time_matches=%d",
+            source_meeting_id,
+            len(url_matching_meetings),
             len(matching_meetings),
         )
 
@@ -2868,43 +2970,101 @@ class MeetingController:
         copied_count = 0
         skipped_count = 0
 
+        # List source files once for all copies
+        try:
+            src_objects = self._list_gcs_prefix(source_prefix + "/")
+            logger.info(
+                "FANOUT_SOURCE_FILES: source=%s, file_count=%d, prefix=%s",
+                source_meeting_id,
+                len(src_objects),
+                source_prefix,
+            )
+            for obj in src_objects:
+                logger.debug("  - %s", obj)
+        except Exception as e:
+            logger.error(
+                "FANOUT_FAILED: meeting=%s, error=list_source_files: %s",
+                source_meeting_id,
+                e,
+            )
+            return
+
         for meeting_doc in matching_meetings:
             if meeting_doc.id == source_meeting_id:
                 continue  # Skip source meeting
 
             meeting_data = meeting_doc.to_dict() or {}
-            dst_user_id = meeting_data.get("user_id")
+            dst_user_id = meeting_data.get("user_id") or meeting_data.get(
+                "synced_by_user_id"
+            )
             dst_meeting_id = meeting_doc.id
 
             if not dst_user_id:
-                logger.debug(
-                    "Skipping fanout to meeting %s: no user_id", dst_meeting_id
+                logger.info(
+                    "FANOUT_SKIP: meeting=%s, reason=no_user_id", dst_meeting_id
                 )
                 skipped_count += 1
                 continue
 
             # Skip if already copied
             if meeting_data.get("fanout_status") == "copied":
-                logger.debug("Skipping meeting %s: already copied", dst_meeting_id)
+                logger.info(
+                    "FANOUT_SKIP: meeting=%s, user=%s, reason=already_copied",
+                    dst_meeting_id,
+                    dst_user_id,
+                )
                 skipped_count += 1
                 continue
 
             dst_prefix = f"recordings/{dst_user_id}/{dst_meeting_id}".rstrip("/")
 
+            logger.info(
+                "FANOUT_COPY_START: user=%s, meeting=%s, "
+                "src=gs://%s/%s/, dst=gs://%s/%s/",
+                dst_user_id,
+                dst_meeting_id,
+                self.gcs_bucket,
+                source_prefix,
+                self.gcs_bucket,
+                dst_prefix,
+            )
+
             # Copy artifacts
             try:
-                src_objects = self._list_gcs_prefix(source_prefix + "/")
                 files_copied = 0
 
                 for src in src_objects:
+                    if not src.startswith(source_prefix + "/"):
+                        continue
                     rel = src[len(source_prefix) + 1 :]
                     dst = f"{dst_prefix}/{rel}"
 
+                    # Check if destination already exists
+                    if self._gcs_blob_exists(dst):
+                        logger.info(
+                            "FANOUT_FILE_SKIP: user=%s, file=%s, reason=exists",
+                            dst_user_id,
+                            rel,
+                        )
+                        continue
+
                     try:
+                        logger.info(
+                            "FANOUT_FILE_COPY: user=%s, file=%s, src=%s, dst=%s",
+                            dst_user_id,
+                            rel,
+                            src,
+                            dst,
+                        )
                         self._copy_gcs_blob(src=src, dst=dst)
                         files_copied += 1
                     except Exception as e:
-                        logger.debug("Failed to copy %s to %s: %s", src, dst, e)
+                        logger.warning(
+                            "FANOUT_FILE_ERROR: user=%s, file=%s, error=%s",
+                            dst_user_id,
+                            rel,
+                            e,
+                        )
 
                 # Rewrite artifact paths for destination
                 dst_artifacts = {}
@@ -2916,31 +3076,38 @@ class MeetingController:
                     else:
                         dst_artifacts[key] = path
 
-                # Update destination meeting with artifacts
-                meeting_doc.reference.update(
-                    {
-                        "transcription": source_transcription,
-                        "artifacts": dst_artifacts,
-                        "recording_url": f"gs://{self.gcs_bucket}/{dst_prefix}/recording.webm",
-                        "fanout_status": "copied",
-                        "fanout_source": source_meeting_id,
-                        "fanout_at": datetime.now(timezone.utc),
-                        "updated_at": datetime.now(timezone.utc),
-                    }
-                )
+                # Update destination meeting with artifacts and transcription
+                update_data = {
+                    "recording_url": f"gs://{self.gcs_bucket}/{dst_prefix}/recording.webm",
+                    "fanout_status": "copied",
+                    "fanout_source": source_meeting_id,
+                    "fanout_at": datetime.now(timezone.utc),
+                    "updated_at": datetime.now(timezone.utc),
+                }
+
+                if source_transcription:
+                    update_data["transcription"] = source_transcription
+
+                if dst_artifacts:
+                    update_data["artifacts"] = dst_artifacts
+
+                meeting_doc.reference.update(update_data)
 
                 logger.info(
-                    "FANOUT_COPIED: src=%s, dst=%s, files=%d",
-                    source_meeting_id,
+                    "FANOUT_COPY_COMPLETE: user=%s, meeting=%s, files_copied=%d, "
+                    "has_transcription=%s, artifact_count=%d",
+                    dst_user_id,
                     dst_meeting_id,
                     files_copied,
+                    bool(source_transcription),
+                    len(dst_artifacts),
                 )
                 copied_count += 1
 
             except Exception as e:
                 logger.error(
-                    "FANOUT_COPY_FAILED: src=%s, dst=%s, error=%s",
-                    source_meeting_id,
+                    "FANOUT_COPY_FAILED: user=%s, meeting=%s, error=%s",
+                    dst_user_id,
                     dst_meeting_id,
                     e,
                 )
@@ -2958,8 +3125,9 @@ class MeetingController:
         )
 
         logger.info(
-            "FANOUT_BY_URL_COMPLETE: source=%s, copied=%d, skipped=%d",
+            "FANOUT_BY_URL_COMPLETE: source=%s, user=%s, copied=%d, skipped=%d",
             source_meeting_id,
+            source_user_id,
             copied_count,
             skipped_count,
         )
