@@ -322,7 +322,7 @@ class MeetingController:
         """
         # Extract key identifiers early for logging
         meeting_url = message_data.get("meeting_url", "")
-        org_id = message_data.get("team_id") or message_data.get("org_id") or ""
+        org_id = message_data.get("team_id") or message_data.get("teamId") or message_data.get("org_id") or ""
         session_id = (
             message_data.get("session_id", "")[:16]
             if message_data.get("session_id")
