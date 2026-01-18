@@ -267,17 +267,22 @@ class StorageClient:
 class FirestoreClient:
     """Client for storing data in Google Cloud Firestore"""
 
-    def __init__(self, database: str = "(default)"):
+    def __init__(self, database: str = "(default)", org_id: str = None):
         """
         Initialize Firestore client
 
         Args:
             database: Firestore database ID (default: "(default)")
+            org_id: Organization ID for Firestore paths (uses TEAM_ID env if not set)
         """
         self.database = database
         self.client = firestore.Client(database=database)
+        # Use provided org_id, fallback to TEAM_ID env var, then "advisewell"
+        self.org_id = org_id or os.environ.get("TEAM_ID") or "advisewell"
 
-        logger.info(f"Initialized Firestore client for database: {database}")
+        logger.info(
+            f"Initialized Firestore client for database: {database}, org: {self.org_id}"
+        )
 
     def store_transcription(self, meeting_id: str, transcription_text: str) -> bool:
         """
@@ -291,9 +296,9 @@ class FirestoreClient:
             True if successful, False otherwise
         """
         try:
-            # Create document reference: organizations/advisewell/meetings/{meeting_id}
+            # Create document reference using org_id
             doc_ref = self.client.document(
-                f"organizations/advisewell/meetings/{meeting_id}"
+                f"organizations/{self.org_id}/meetings/{meeting_id}"
             )
 
             # Update the transcription field
@@ -318,9 +323,9 @@ class FirestoreClient:
             True if successful, False otherwise
         """
         try:
-            # Create document reference: organizations/advisewell/meetings/{meeting_id}
+            # Create document reference using org_id
             doc_ref = self.client.document(
-                f"organizations/advisewell/meetings/{meeting_id}"
+                f"organizations/{self.org_id}/meetings/{meeting_id}"
             )
 
             # Set the transcription field (creates document if it doesn't exist)

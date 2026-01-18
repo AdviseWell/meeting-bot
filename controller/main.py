@@ -1265,6 +1265,8 @@ class MeetingController:
             "user_id": user_id,
             "fs_meeting_id": meeting_doc.id,
             "gcs_path": f"recordings/{user_id}/{meeting_doc.id}",
+            # Include meeting_session_id for fanout marking
+            "meeting_session_id": meeting_id,
             # Include other fields from meeting doc
             "meeting_title": data.get("title") or data.get("subject"),
             "timezone": data.get("timezone", "UTC"),
@@ -3640,6 +3642,13 @@ class MeetingController:
             org_id = (
                 data.get("team_id") or data.get("teamId") or data.get("org_id") or ""
             )
+
+            # Compute meeting_session_id for fanout marking if not already present
+            meeting_url = data.get("meeting_url") or data.get("meetingUrl") or ""
+            if not data.get("meeting_session_id") and org_id and meeting_url:
+                data["meeting_session_id"] = self._meeting_session_id(
+                    org_id=org_id, meeting_url=meeting_url
+                )
 
             logger.debug("=" * 80)
             logger.debug("PUB/SUB MESSAGE RECEIVED")

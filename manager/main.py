@@ -218,7 +218,9 @@ class MeetingManager:
         from storage_client import StorageClient, FirestoreClient
 
         self.storage_client = StorageClient(self.gcs_bucket)
-        self.firestore_client = FirestoreClient(self.firestore_database)
+        self.firestore_client = FirestoreClient(
+            database=self.firestore_database, org_id=self.team_id
+        )
 
         if self.transcription_mode == "gemini" and self.transcription_client is None:
             from transcription_client import TranscriptionClient
@@ -1084,8 +1086,7 @@ class MeetingManager:
             )
             return
 
-        # Use a lightweight Firestore client directly; the existing
-        # FirestoreClient in storage_client.py is hard-coded to a specific org.
+        # Use a lightweight Firestore client directly for session updates
         from google.cloud import firestore
 
         db = firestore.Client(database=self.firestore_database)
