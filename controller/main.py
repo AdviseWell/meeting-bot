@@ -407,17 +407,17 @@ class MeetingController:
                 return False
 
             # Generate consistent job name for deduplication
-            # Use org_id prefix + meeting_url hash for uniqueness and deduplication
+            # Use hashed org_id + meeting_url hash for uniqueness and deduplication
             # K8s names must be lowercase alphanumeric + hyphens
-            org_prefix = self._sanitize_label_value(org_id)[:20] if org_id else "no-org"
+            org_hash = self._org_id_hash(org_id)
             meeting_hash = self._meeting_url_hash(meeting_url)
-            job_name = f"meeting-{org_prefix}-{meeting_hash}"
+            job_name = f"meeting-{org_hash}-{meeting_hash}"
             job_name = job_name.replace("_", "-").lower()[:63]  # K8s name length limit
 
             logger.info(
-                "JOB_NAME_GENERATED: org_id=%s, org_prefix=%s, meeting_url_hash=%s, job_name=%s",
+                "JOB_NAME_GENERATED: org_id=%s, org_hash=%s, meeting_url_hash=%s, job_name=%s",
                 org_id,
-                org_prefix,
+                org_hash,
                 meeting_hash,
                 job_name,
             )
@@ -675,7 +675,7 @@ class MeetingController:
                 "meeting-id": meeting_id[:63],
                 "org-id": self._sanitize_label_value(org_id)[
                     :20
-                ],  # Match job name org prefix length
+                ],  # Keep original org-id for debugging
                 "meeting-url-hash": url_hash,
             }
 
@@ -762,7 +762,7 @@ class MeetingController:
                 # NEW: Labels for K8s-based deduplication
                 "org-id": self._sanitize_label_value(org_id)[
                     :20
-                ],  # Match job name org prefix length
+                ],  # Keep original org-id for debugging
                 "meeting-url-hash": url_hash,
                 # NEW: Debug labels
                 "user-id": self._sanitize_label_value(user_doc_id),
@@ -1022,6 +1022,12 @@ class MeetingController:
         normalized = self._normalize_meeting_url(meeting_url)
         return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
 
+    def _org_id_hash(self, org_id: str) -> str:
+        """Compute a 12-char hash of the org_id for K8s job names."""
+        if not org_id:
+            return "no-org"
+        return hashlib.sha256(org_id.encode("utf-8")).hexdigest()[:12]
+
     def _sanitize_label_value(self, value: str) -> str:
         """Sanitize a value for use as a K8s label.
 
@@ -1046,8 +1052,8 @@ class MeetingController:
         Uses K8s job labels to determine if a bot is already assigned to a meeting.
         This replaces the Firestore session-based deduplication.
 
-        The job naming convention is: meeting-{org_prefix}-{meeting_hash}
-        Where meeting_hash is the first 16 chars of the sha256 hash of org_id:normalized_meeting_url
+        The job naming convention is: meeting-{org_hash}-{meeting_url_hash}
+        Where org_hash is a 12-char hash of org_id and meeting_url_hash is a 16-char hash of the normalized meeting URL
 
         Returns:
             (is_assigned, job_name): Whether a bot is active and its name if so
@@ -1058,13 +1064,12 @@ class MeetingController:
             return False, None
 
         url_hash = self._meeting_url_hash(meeting_url)
-        sanitized_org = self._sanitize_label_value(org_id)[
-            :20
-        ]  # Match job name org prefix length
+        org_hash = self._org_id_hash(org_id)
+        sanitized_org = self._sanitize_label_value(org_id)[:20]  # For label selector
 
-        if not sanitized_org or not url_hash:
+        if not org_hash or not url_hash:
             logger.warning(
-                "Cannot check bot assignment: org_id=%s, url_hash=%s", org_id, url_hash
+                "Cannot check bot assignment: org_id=%s, org_hash=%s, url_hash=%s", org_id, org_hash, url_hash
             )
             return False, None
 
@@ -1587,11 +1592,9 @@ class MeetingController:
                 # Generate the expected job name based on org_id + meeting_url
                 has_job = False
                 if org_id != "unknown" and meeting_url:
-                    meeting_hash = self._meeting_session_id(
-                        org_id=org_id, meeting_url=meeting_url
-                    )
-                    org_prefix = self._sanitize_label_value(org_id)[:20]
-                    expected_job_pattern = f"meeting-{org_prefix}-{meeting_hash[:16]}"
+                    org_hash = self._org_id_hash(org_id)
+                    meeting_hash = self._meeting_url_hash(meeting_url)
+                    expected_job_pattern = f"meeting-{org_hash}-{meeting_hash}"
                     has_job = any(
                         expected_job_pattern in job_name
                         for job_name in running_job_names
