@@ -407,15 +407,15 @@ class MeetingController:
                 return False
 
             # Generate consistent job name for deduplication
-            # Use org_id prefix + meeting_id hash for uniqueness and deduplication
+            # Use org_id prefix + meeting_url hash for uniqueness and deduplication
             # K8s names must be lowercase alphanumeric + hyphens
             org_prefix = self._sanitize_label_value(org_id)[:20] if org_id else "no-org"
-            meeting_hash = meeting_id[:16] if meeting_id else "no-meeting"
+            meeting_hash = self._meeting_url_hash(meeting_url)
             job_name = f"meeting-{org_prefix}-{meeting_hash}"
             job_name = job_name.replace("_", "-").lower()[:63]  # K8s name length limit
 
             logger.info(
-                "JOB_NAME_GENERATED: org_id=%s, org_prefix=%s, meeting_hash=%s, job_name=%s",
+                "JOB_NAME_GENERATED: org_id=%s, org_prefix=%s, meeting_url_hash=%s, job_name=%s",
                 org_id,
                 org_prefix,
                 meeting_hash,
