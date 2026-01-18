@@ -1262,16 +1262,19 @@ class MeetingController:
             "initiated_at": datetime.now(timezone.utc).isoformat(),
         }
 
-        # Get org-specific bot name
+        # Get org-specific bot name (same field as other code paths)
+        bot_display_name = "AdviseWell"
         try:
             org_ref = self.db.collection("organizations").document(org_id)
             org_doc = org_ref.get()
             if org_doc.exists:
                 org_data = org_doc.to_dict() or {}
-                payload["name"] = org_data.get("bot_display_name", "Meeting Bot")
+                candidate = org_data.get("meeting_bot_name")
+                if isinstance(candidate, str) and candidate.strip():
+                    bot_display_name = candidate.strip()
         except Exception as e:
             logger.warning("Failed to get org bot name: %s", e)
-            payload["name"] = "Meeting Bot"
+        payload["name"] = bot_display_name
 
         # Create the job
         success = self.create_manager_job(payload, meeting_id[:16])
