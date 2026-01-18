@@ -27,6 +27,7 @@ import time
 import socket
 import logging
 import hashlib
+import uuid
 from urllib.parse import urlsplit, urlunsplit
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, List, Optional, Tuple
@@ -406,19 +407,15 @@ class MeetingController:
                 )
                 return False
 
-            # Generate consistent job name for deduplication
-            # Use hashed org_id + meeting_url hash for uniqueness and deduplication
-            # K8s names must be lowercase alphanumeric + hyphens
-            org_hash = self._org_id_hash(org_id)
-            meeting_hash = self._meeting_url_hash(meeting_url)
-            job_name = f"meeting-{org_hash}-{meeting_hash}"
-            job_name = job_name.replace("_", "-").lower()[:63]  # K8s name length limit
+            # Generate unique job name with GUID to avoid conflicts
+            # Simple and clean naming that's guaranteed to be unique
+            job_guid = str(uuid.uuid4())
+            job_name = f"meeting-{job_guid}"
 
             logger.info(
-                "JOB_NAME_GENERATED: org_id=%s, org_hash=%s, meeting_url_hash=%s, job_name=%s",
+                "JOB_NAME_GENERATED: org_id=%s, job_guid=%s, job_name=%s",
                 org_id,
-                org_hash,
-                meeting_hash,
+                job_guid,
                 job_name,
             )
 
@@ -755,15 +752,16 @@ class MeetingController:
 
             # Build job labels (used for deduplication and debugging)
             # Note: url_hash computed earlier for PVC labels
+            org_hash = self._org_id_hash(org_id)
             job_labels = {
                 "app": "meeting-bot-manager",
                 "managed-by": "meeting-bot-controller",
                 "meeting-id": meeting_id[:63],
-                # NEW: Labels for K8s-based deduplication
-                "org-id": self._sanitize_label_value(org_id)[
-                    :20
-                ],  # Keep original org-id for debugging
-                "meeting-url-hash": url_hash,
+                # NEW: Labels for K8s-based deduplication using hashes
+                "org-id-hash": org_hash,  # Hash for deduplication
+                "meeting-url-hash": url_hash,  # Hash for deduplication
+                # Keep original org-id for debugging (may be truncated/sanitized)
+                "org-id": self._sanitize_label_value(org_id)[:20],
                 # NEW: Debug labels
                 "user-id": self._sanitize_label_value(user_doc_id),
                 "fs-meeting-id": self._sanitize_label_value(meeting_doc_id),
@@ -1052,8 +1050,8 @@ class MeetingController:
         Uses K8s job labels to determine if a bot is already assigned to a meeting.
         This replaces the Firestore session-based deduplication.
 
-        The job naming convention is: meeting-{org_hash}-{meeting_url_hash}
-        Where org_hash is a 12-char hash of org_id and meeting_url_hash is a 16-char hash of the normalized meeting URL
+        Uses labels 'org-id-hash' and 'meeting-url-hash' for precise matching.
+        Job names include timestamps for uniqueness to avoid Kubernetes conflicts.
 
         Returns:
             (is_assigned, job_name): Whether a bot is active and its name if so
@@ -1065,7 +1063,6 @@ class MeetingController:
 
         url_hash = self._meeting_url_hash(meeting_url)
         org_hash = self._org_id_hash(org_id)
-        sanitized_org = self._sanitize_label_value(org_id)[:20]  # For label selector
 
         if not org_hash or not url_hash:
             logger.warning(
@@ -1073,10 +1070,15 @@ class MeetingController:
             )
             return False, None
 
+        # Use hash labels for precise deduplication matching
         label_selector = (
             f"app=meeting-bot-manager,"
-            f"org-id={sanitized_org},"
+            f"org-id-hash={org_hash},"
             f"meeting-url-hash={url_hash}"
+        )
+
+        logger.debug(
+            "DEDUP_CHECK: Querying K8s jobs with label_selector=%s", label_selector
         )
 
         try:
@@ -1096,8 +1098,9 @@ class MeetingController:
             )
             if not is_terminal:
                 logger.info(
-                    "BOT_ALREADY_ASSIGNED: org_id=%s, url_hash=%s, job=%s",
+                    "BOT_ALREADY_ASSIGNED: org_id=%s, org_hash=%s, url_hash=%s, job=%s",
                     org_id,
+                    org_hash,
                     url_hash,
                     job.metadata.name,
                 )
@@ -1588,17 +1591,12 @@ class MeetingController:
                 status = session_data.get("status", "unknown")
                 claimed_at = session_data.get("claimed_at")
 
-                # Check if there's a job for this session
-                # Generate the expected job name based on org_id + meeting_url
+                # Check if there's a job for this session using label-based lookup
                 has_job = False
                 if org_id != "unknown" and meeting_url:
-                    org_hash = self._org_id_hash(org_id)
-                    meeting_hash = self._meeting_url_hash(meeting_url)
-                    expected_job_pattern = f"meeting-{org_hash}-{meeting_hash}"
-                    has_job = any(
-                        expected_job_pattern in job_name
-                        for job_name in running_job_names
-                    )
+                    # Use the same deduplication logic as the main bot assignment check
+                    is_assigned, _ = self._is_bot_already_assigned(org_id, meeting_url)
+                    has_job = is_assigned
                 else:
                     # Fallback: check by session_id for legacy sessions
                     has_job = any(
