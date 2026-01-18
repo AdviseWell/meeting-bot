@@ -454,6 +454,9 @@ class MeetingController:
 
             logger.info(f"Creating Kubernetes Job: {job_name}")
 
+            # Extract meeting_session_id from payload for session-based jobs
+            meeting_session_id = message_data.get("meeting_session_id") or ""
+
             # Build environment variables for the manager
             env_vars = [
                 client.V1EnvVar(name="MEETING_URL", value=meeting_url),
@@ -461,6 +464,12 @@ class MeetingController:
                 client.V1EnvVar(
                     name="ORG_ID", value=org_id
                 ),  # Explicit org_id for consistency
+                client.V1EnvVar(
+                    name="TEAM_ID", value=org_id
+                ),  # Explicit team_id (same as org_id) for manager compatibility
+                client.V1EnvVar(
+                    name="MEETING_SESSION_ID", value=meeting_session_id
+                ),  # Explicit session_id for fanout marking
                 client.V1EnvVar(name="FS_MEETING_ID", value=str(meeting_doc_id)),
                 client.V1EnvVar(name="USER_ID", value=str(user_doc_id)),
                 client.V1EnvVar(name="GCS_PATH", value=gcs_path),
@@ -493,6 +502,7 @@ class MeetingController:
                         "org_id",
                         "team_id",
                         "gcs_path",
+                        "meeting_session_id",
                     ]:
                         # Add original case (e.g., bearerToken, teamId, userId)
                         env_vars.append(client.V1EnvVar(name=key, value=str(value)))
@@ -2266,23 +2276,35 @@ class MeetingController:
             subs = list(session_ref.collection("subscribers").stream())
             logger.debug("Total subscribers found: %d", len(subs))
 
-            # Enhanced logging for fanout start
-            subscriber_ids = [sub.id for sub in subs]
+            # Enhanced logging for fanout start - list each subscriber with details
             logger.info(
-                "FANOUT_STARTING: session_id=%s, org_id=%s, "
-                "subscriber_count=%d, subscribers=%s",
+                "FANOUT_STARTING: session_id=%s, org_id=%s, subscriber_count=%d",
                 session_id[:16],
                 org_id,
                 len(subs),
-                subscriber_ids,
             )
 
             for idx, sub in enumerate(subs):
                 sub_data = sub.to_dict() or {}
-                logger.debug(
-                    "Subscriber %d: user_id=%s, data=%s",
+                user_id = sub_data.get("user_id") or sub.id
+                fs_meeting_id = sub_data.get("fs_meeting_id", "N/A")
+                email = sub_data.get("email", "N/A")
+                status = sub_data.get("status", "unknown")
+                target_path = f"recordings/{user_id}/{fs_meeting_id}/"
+                logger.info(
+                    "FANOUT_SUBSCRIBER_LIST: [%d/%d] user_id=%s, email=%s, "
+                    "fs_meeting_id=%s, status=%s, target_path=%s",
                     idx + 1,
-                    sub.id,
+                    len(subs),
+                    user_id,
+                    email,
+                    fs_meeting_id,
+                    status,
+                    target_path,
+                )
+                logger.debug(
+                    "Subscriber %d full data: %s",
+                    idx + 1,
                     json.dumps(sub_data, indent=2, default=str),
                 )
 
@@ -2517,19 +2539,23 @@ class MeetingController:
                     continue
 
                 dst_prefix = f"recordings/{user_id}/{fs_meeting_id}".rstrip("/")
-                logger.debug(
-                    "  Destination GCS prefix: gs://%s/%s", self.gcs_bucket, dst_prefix
+                logger.info(
+                    "FANOUT_COPY_START: user_id=%s, source=%s, destination=%s",
+                    user_id,
+                    f"gs://{self.gcs_bucket}/{source_prefix}/",
+                    f"gs://{self.gcs_bucket}/{dst_prefix}/",
                 )
 
                 # Skip if source and dest are the same
                 if dst_prefix == source_prefix:
-                    logger.debug("  Destination same as source, skipping")
+                    logger.info(
+                        "FANOUT_COPY_SKIP: user_id=%s, reason=same_as_source", user_id
+                    )
                     continue
 
                 copied = 0
                 skipped = 0
 
-                logger.debug("  Copying artifacts...")
                 for src in src_objects:
                     if not src.startswith(source_prefix + "/"):
                         continue
@@ -2537,14 +2563,25 @@ class MeetingController:
                     dst = f"{dst_prefix}/{rel}"
                     if self._gcs_blob_exists(dst):
                         skipped += 1
-                        logger.debug("    SKIP (exists): %s", rel)
+                        logger.info(
+                            "FANOUT_FILE_SKIP: user_id=%s, file=%s, reason=already_exists",
+                            user_id,
+                            rel,
+                        )
                         continue
-                    logger.debug("    COPY: %s -> %s", src, dst)
+                    logger.info(
+                        "FANOUT_FILE_COPY: user_id=%s, file=%s, src=%s, dst=%s",
+                        user_id,
+                        rel,
+                        src,
+                        dst,
+                    )
                     self._copy_gcs_blob(src=src, dst=dst)
                     copied += 1
 
-                logger.debug(
-                    "  Copy complete: %d copied, %d skipped, %d total",
+                logger.info(
+                    "FANOUT_COPY_COMPLETE: user_id=%s, files_copied=%d, files_skipped=%d, total=%d",
+                    user_id,
                     copied,
                     skipped,
                     len(src_objects),
