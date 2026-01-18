@@ -410,7 +410,11 @@ class MeetingController:
             # Generate unique job name with GUID to avoid conflicts
             # Simple and clean naming that's guaranteed to be unique
             job_guid = str(uuid.uuid4())
-            job_name = f"meeting-{job_guid}"
+            job_name = f"meeting-bot-{job_guid}"
+
+            # Compute hashes for K8s labels (used for deduplication)
+            url_hash = self._meeting_url_hash(meeting_url)
+            org_hash = self._org_id_hash(org_id)
 
             logger.info(
                 "JOB_NAME_GENERATED: org_id=%s, job_guid=%s, job_name=%s",
@@ -603,8 +607,9 @@ class MeetingController:
             template = client.V1PodTemplateSpec(
                 metadata=client.V1ObjectMeta(
                     labels={
-                        "app": "meeting-bot-manager",
-                        "meeting-id": meeting_id[:63],  # K8s label value max length
+                        "app": "meeting-bot",
+                        "org_id_hash": org_hash,
+                        "meeting_url_hash": url_hash,
                     },
                     annotations={
                         "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
@@ -667,13 +672,9 @@ class MeetingController:
 
             # PVC labels (subset of job labels for easy identification)
             pvc_labels = {
-                "app": "meeting-bot-manager",
-                "managed-by": "meeting-bot-controller",
-                "meeting-id": meeting_id[:63],
-                "org-id": self._sanitize_label_value(org_id)[
-                    :20
-                ],  # Keep original org-id for debugging
-                "meeting-url-hash": url_hash,
+                "app": "meeting-bot",
+                "org_id_hash": org_hash,
+                "meeting_url_hash": url_hash,
             }
 
             # DRY_RUN mode - log what would be created but don't actually create K8s resources
@@ -750,21 +751,11 @@ class MeetingController:
                 ),
             )
 
-            # Build job labels (used for deduplication and debugging)
-            # Note: url_hash computed earlier for PVC labels
-            org_hash = self._org_id_hash(org_id)
+            # Build job labels (used for deduplication)
             job_labels = {
-                "app": "meeting-bot-manager",
-                "managed-by": "meeting-bot-controller",
-                "meeting-id": meeting_id[:63],
-                # NEW: Labels for K8s-based deduplication using hashes
-                "org-id-hash": org_hash,  # Hash for deduplication
-                "meeting-url-hash": url_hash,  # Hash for deduplication
-                # Keep original org-id for debugging (may be truncated/sanitized)
-                "org-id": self._sanitize_label_value(org_id)[:20],
-                # NEW: Debug labels
-                "user-id": self._sanitize_label_value(user_doc_id),
-                "fs-meeting-id": self._sanitize_label_value(meeting_doc_id),
+                "app": "meeting-bot",
+                "org_id_hash": org_hash,
+                "meeting_url_hash": url_hash,
             }
 
             # Define and create the job.
@@ -1050,7 +1041,7 @@ class MeetingController:
         Uses K8s job labels to determine if a bot is already assigned to a meeting.
         This replaces the Firestore session-based deduplication.
 
-        Uses labels 'org-id-hash' and 'meeting-url-hash' for precise matching.
+        Uses labels 'org_id_hash' and 'meeting_url_hash' for precise matching.
         Job names include timestamps for uniqueness to avoid Kubernetes conflicts.
 
         Returns:
@@ -1066,15 +1057,18 @@ class MeetingController:
 
         if not org_hash or not url_hash:
             logger.warning(
-                "Cannot check bot assignment: org_id=%s, org_hash=%s, url_hash=%s", org_id, org_hash, url_hash
+                "Cannot check bot assignment: org_id=%s, org_hash=%s, url_hash=%s",
+                org_id,
+                org_hash,
+                url_hash,
             )
             return False, None
 
         # Use hash labels for precise deduplication matching
         label_selector = (
-            f"app=meeting-bot-manager,"
-            f"org-id-hash={org_hash},"
-            f"meeting-url-hash={url_hash}"
+            f"app=meeting-bot,"
+            f"org_id_hash={org_hash},"
+            f"meeting_url_hash={url_hash}"
         )
 
         logger.debug(
@@ -1575,7 +1569,7 @@ class MeetingController:
             try:
                 jobs = self.batch_v1.list_namespaced_job(
                     namespace=self.k8s_namespace,
-                    label_selector="app=meeting-bot-manager",
+                    label_selector="app=meeting-bot",
                 )
                 running_job_names = {job.metadata.name for job in jobs.items}
             except Exception as e:
