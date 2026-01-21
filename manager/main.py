@@ -1249,15 +1249,15 @@ class MeetingManager:
                         # Set recording_url from webm path if available
                         webm_path = attendee_artifacts.get("recording_webm")
                         if webm_path:
-                            attendee_payload[
-                                "recording_url"
-                            ] = f"gs://{self.gcs_bucket}/{webm_path}"
+                            attendee_payload["recording_url"] = (
+                                f"gs://{self.gcs_bucket}/{webm_path}"
+                            )
 
                         # Add transcription text if available
                         if transcription_text_for_firestore:
-                            attendee_payload[
-                                "transcription"
-                            ] = transcription_text_for_firestore
+                            attendee_payload["transcription"] = (
+                                transcription_text_for_firestore
+                            )
 
                         attendee_meeting_ref.set(attendee_payload, merge=True)
                         logger.info(
