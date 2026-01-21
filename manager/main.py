@@ -1228,6 +1228,7 @@ class MeetingManager:
                 # Update this attendee's Firestore meeting document
                 if attendee_result["success"] and self.team_id:
                     try:
+                        from datetime import datetime as dt, timezone as tz
                         from google.cloud import firestore as fs_lib
 
                         db = fs_lib.Client(database=self.firestore_database)
@@ -1238,7 +1239,7 @@ class MeetingManager:
                             .document(str(attendee_meeting_id))
                         )
 
-                        now = datetime.now(timezone.utc)
+                        now = dt.now(tz.utc)
                         attendee_payload: dict = {
                             "bot_status": "complete",
                             "bot_completed_at": now,
@@ -1258,6 +1259,24 @@ class MeetingManager:
                             attendee_payload["transcription"] = (
                                 transcription_text_for_firestore
                             )
+                            logger.debug(
+                                "    Transcription text available (%d chars)",
+                                len(transcription_text_for_firestore),
+                            )
+                        else:
+                            logger.warning(
+                                "    ⚠️ No transcription text available for meeting %s",
+                                attendee_meeting_id,
+                            )
+
+                        logger.debug(
+                            "    Firestore payload: bot_status=%s, artifacts=%s, "
+                            "has_transcription=%s, has_recording_url=%s",
+                            attendee_payload.get("bot_status"),
+                            list(attendee_payload.get("artifacts", {}).keys()),
+                            "transcription" in attendee_payload,
+                            "recording_url" in attendee_payload,
+                        )
 
                         attendee_meeting_ref.set(attendee_payload, merge=True)
                         logger.info(
@@ -1270,6 +1289,18 @@ class MeetingManager:
                             "    ⚠️ FIRESTORE: Failed to update meeting %s: %s",
                             attendee_meeting_id,
                             fs_err,
+                        )
+                else:
+                    # Log why we skipped the Firestore update
+                    if not attendee_result["success"]:
+                        logger.warning(
+                            "    ⚠️ FIRESTORE_SKIP: meeting %s - file upload failed",
+                            attendee_meeting_id,
+                        )
+                    elif not self.team_id:
+                        logger.warning(
+                            "    ⚠️ FIRESTORE_SKIP: meeting %s - no team_id available",
+                            attendee_meeting_id,
                         )
 
                 fanout_results.append(attendee_result)
