@@ -972,7 +972,34 @@ class MeetingManager:
                 "Total files to upload per attendee: %d", len(local_files_to_upload)
             )
 
-            # Discover all attendee meetings (same URL, same day)
+            # Read transcription text for storing in each attendee's Firestore doc
+            transcription_text_for_firestore = None
+            if transcript_md_path and os.path.exists(transcript_md_path):
+                try:
+                    with open(transcript_md_path, "r", encoding="utf-8") as f:
+                        transcription_text_for_firestore = f.read()
+                    logger.debug(
+                        "Read transcription text from MD file (%d chars)",
+                        len(transcription_text_for_firestore),
+                    )
+                except Exception as read_err:
+                    logger.warning(
+                        "Failed to read transcript MD for Firestore: %s", read_err
+                    )
+            elif transcript_txt_path and os.path.exists(transcript_txt_path):
+                try:
+                    with open(transcript_txt_path, "r", encoding="utf-8") as f:
+                        transcription_text_for_firestore = f.read()
+                    logger.debug(
+                        "Read transcription text from TXT file (%d chars)",
+                        len(transcription_text_for_firestore),
+                    )
+                except Exception as read_err:
+                    logger.warning(
+                        "Failed to read transcript TXT for Firestore: %s", read_err
+                    )
+
+            # Discover all attendee meetings (same URL, same time)
             attendee_meetings = []
             if self.team_id and self.meeting_url:
                 # Get the meeting start and end times from Firestore
@@ -1176,6 +1203,74 @@ class MeetingManager:
                         )
                         if required:
                             attendee_result["success"] = False
+
+                # Build artifacts manifest for THIS attendee (using their GCS paths)
+                attendee_artifacts = {}
+                for file_info in local_files_to_upload:
+                    filename = file_info["filename"]
+                    gcs_dest_path = f"{attendee_gcs_path}/{filename}"
+                    # Normalize artifact keys
+                    if filename == "recording.webm":
+                        attendee_artifacts["recording_webm"] = gcs_dest_path
+                    elif filename == "recording.mp4":
+                        attendee_artifacts["recording_mp4"] = gcs_dest_path
+                    elif filename == "recording.m4a":
+                        attendee_artifacts["recording_m4a"] = gcs_dest_path
+                    elif filename == "transcript.txt":
+                        attendee_artifacts["transcript_txt"] = gcs_dest_path
+                    elif filename == "transcript.json":
+                        attendee_artifacts["transcript_json"] = gcs_dest_path
+                    elif filename == "transcript.md":
+                        attendee_artifacts["transcript_md"] = gcs_dest_path
+                    elif filename == "transcript.vtt":
+                        attendee_artifacts["transcript_vtt"] = gcs_dest_path
+
+                # Update this attendee's Firestore meeting document
+                if attendee_result["success"] and self.team_id:
+                    try:
+                        from google.cloud import firestore as fs_lib
+
+                        db = fs_lib.Client(database=self.firestore_database)
+                        attendee_meeting_ref = (
+                            db.collection("organizations")
+                            .document(str(self.team_id))
+                            .collection("meetings")
+                            .document(str(attendee_meeting_id))
+                        )
+
+                        now = datetime.now(timezone.utc)
+                        attendee_payload: dict = {
+                            "bot_status": "complete",
+                            "bot_completed_at": now,
+                            "updated_at": now,
+                            "artifacts": attendee_artifacts,
+                        }
+
+                        # Set recording_url from webm path if available
+                        webm_path = attendee_artifacts.get("recording_webm")
+                        if webm_path:
+                            attendee_payload[
+                                "recording_url"
+                            ] = f"gs://{self.gcs_bucket}/{webm_path}"
+
+                        # Add transcription text if available
+                        if transcription_text_for_firestore:
+                            attendee_payload[
+                                "transcription"
+                            ] = transcription_text_for_firestore
+
+                        attendee_meeting_ref.set(attendee_payload, merge=True)
+                        logger.info(
+                            "    📝 FIRESTORE: Updated meeting %s with "
+                            "transcription and artifacts",
+                            attendee_meeting_id,
+                        )
+                    except Exception as fs_err:
+                        logger.warning(
+                            "    ⚠️ FIRESTORE: Failed to update meeting %s: %s",
+                            attendee_meeting_id,
+                            fs_err,
+                        )
 
                 fanout_results.append(attendee_result)
 
