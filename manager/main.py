@@ -479,7 +479,9 @@ class MeetingManager:
                             # CRITICAL: Update gcs_path to use the new meeting ID
                             # so all subsequent uploads go to the correct location
                             old_gcs_path = self.gcs_path
-                            self.gcs_path = f"recordings/{self.user_id}/{new_meeting_id}"
+                            self.gcs_path = (
+                                f"recordings/{self.user_id}/{new_meeting_id}"
+                            )
                             logger.info(
                                 f"✅ Created ad-hoc meeting {new_meeting_id}"
                                 f" (was {old_meeting_id})"
@@ -551,8 +553,7 @@ class MeetingManager:
                         f"start={meeting_data.get('start')}"
                     )
 
-            # Step 3: Upload original WEBM file to GCS (required)
-            logger.info("Step 3: Uploading original WEBM file to GCS...")
+            # Validate recording file exists before proceeding to transcription
             logger.debug("POST-MEETING: Verifying recording file exists")
             if not os.path.exists(recording_path):
                 logger.error(f"Recording file not found: {recording_path}")
@@ -570,69 +571,13 @@ class MeetingManager:
             logger.debug("POST-MEETING: Validating file size")
             if webm_size < 1000:
                 logger.error(
-                    "❌ WEBM file too small (%s bytes) - file is " "empty or corrupted",
+                    "❌ WEBM file too small (%s bytes) - file is empty or corrupted",
                     webm_size,
                 )
                 logger.debug("POST-MEETING DECISION: File too small, likely corrupted")
                 return False
 
-            logger.debug("POST-MEETING: Uploading to GCS path: %s", self.gcs_path)
-            webm_gcs_path = f"{self.gcs_path}/recording.webm"
-            webm_uploaded = self.storage_client.upload_file(
-                recording_path, webm_gcs_path
-            )
-            if not webm_uploaded:
-                logger.error("Failed to upload original WEBM file")
-                logger.debug(
-                    "POST-MEETING DECISION: Upload failed - storage issue or permissions"
-                )
-                return False
-
-            logger.info(
-                "✅ Original WEBM uploaded to gs://%s/%s",
-                self.gcs_bucket,
-                webm_gcs_path,
-            )
-            logger.debug("POST-MEETING: WEBM upload successful")
-
-            # Step 3.25: Upload MP4 (optional) for browser fallback.
-            if mp4_path and os.path.exists(mp4_path):
-                logger.info("Step 3.25: Uploading MP4 fallback to GCS...")
-                mp4_gcs_path = f"{self.gcs_path}/recording.mp4"
-                mp4_uploaded = self.storage_client.upload_file(
-                    mp4_path,
-                    mp4_gcs_path,
-                    content_type="video/mp4",
-                )
-                if mp4_uploaded:
-                    logger.info(
-                        "✅ MP4 uploaded to gs://%s/%s",
-                        self.gcs_bucket,
-                        mp4_gcs_path,
-                    )
-                else:
-                    logger.warning("Failed to upload MP4 fallback; will ignore")
-
-            # Step 3.5: Upload extracted audio (optional but preferred)
-            audio_gcs_path = None
-            if audio_path and os.path.exists(audio_path):
-                logger.info("Step 3.5: Uploading extracted audio-only to GCS...")
-                audio_gcs_path = f"{self.gcs_path}/recording.m4a"
-                audio_uploaded = self.storage_client.upload_file(
-                    audio_path,
-                    audio_gcs_path,
-                    content_type="audio/mp4",
-                )
-                if audio_uploaded:
-                    logger.info(
-                        "✅ Audio-only uploaded to "
-                        f"gs://{self.gcs_bucket}/{audio_gcs_path}"
-                    )
-                else:
-                    logger.warning("Failed to upload extracted audio; will ignore")
-                    audio_gcs_path = None
-
-            # Step 4: Transcribe (optional, non-fatal)
+            # Step 3: Transcribe (optional, non-fatal)
             # Prefer audio-only if available; fall back to WEBM.
             transcript_txt_path = None
             transcript_json_path = None
@@ -642,11 +587,11 @@ class MeetingManager:
             logger.debug("Transcription mode: %s", self.transcription_mode)
 
             if self.transcription_mode == "none":
-                logger.info("Step 4: Transcription skipped (TRANSCRIPTION_MODE=none)")
+                logger.info("Step 3: Transcription skipped (TRANSCRIPTION_MODE=none)")
                 logger.debug("POST-MEETING DECISION: Skipping transcription")
             elif self.transcription_mode == "offline":
                 logger.info(
-                    "Step 4: Transcribing offline with whisper.cpp + " "diarization..."
+                    "Step 3: Transcribing offline with whisper.cpp + " "diarization..."
                 )
                 logger.debug("POST-MEETING: Using offline transcription (whisper.cpp)")
                 try:
@@ -733,27 +678,56 @@ class MeetingManager:
                     )
             else:
                 logger.info(
-                    "Step 4: Transcribing with Gemini " "(audio-only preferred)..."
+                    "Step 3: Transcribing with Gemini (audio-only preferred)..."
                 )
                 logger.debug("POST-MEETING: Using Gemini transcription")
 
             if self.transcription_mode == "gemini":
+                # Gemini requires files in GCS to generate signed URLs
+                # Upload a temp copy for transcription, then clean up after
                 try:
                     if not self.transcription_client:
                         raise RuntimeError(
                             "TRANSCRIPTION_MODE=gemini but Gemini client "
                             "was not initialized"
                         )
-                    target_gcs_path = audio_gcs_path or webm_gcs_path
+
+                    # Upload audio (preferred) or recording to a temp location in GCS
+                    temp_gcs_prefix = f"temp_transcription/{self.meeting_id}"
+                    local_file_for_gemini = (
+                        audio_path
+                        if audio_path and os.path.exists(audio_path)
+                        else recording_path
+                    )
+                    temp_gcs_path = (
+                        f"{temp_gcs_prefix}/audio.m4a"
+                        if audio_path
+                        else f"{temp_gcs_prefix}/recording.webm"
+                    )
+
+                    logger.debug(
+                        "Uploading temp file for Gemini transcription: %s",
+                        temp_gcs_path,
+                    )
+                    temp_uploaded = self.storage_client.upload_file(
+                        local_file_for_gemini,
+                        temp_gcs_path,
+                    )
+
+                    if not temp_uploaded:
+                        raise RuntimeError(
+                            "Failed to upload temp file for Gemini transcription"
+                        )
+
                     logger.info(
                         "Transcription target: gs://%s/%s",
                         self.gcs_bucket,
-                        target_gcs_path,
+                        temp_gcs_path,
                     )
 
                     # Generate signed URL for Gemini to access the file.
                     recording_url = self.storage_client.get_signed_url(
-                        target_gcs_path,
+                        temp_gcs_path,
                         expiration_minutes=360,
                     )
 
@@ -866,19 +840,22 @@ class MeetingManager:
                                     "Transcription completed but no results " "returned"
                                 )
                         finally:
-                            for revoke_path in [target_gcs_path]:
-                                try:
-                                    self.storage_client.revoke_public_access(
-                                        revoke_path
-                                    )
-                                except Exception as revoke_err:
-                                    logger.debug(
-                                        "Could not revoke public access "
-                                        "(may not be public): %s",
-                                        revoke_err,
-                                    )
+                            # Clean up temp GCS file
+                            try:
+                                self.storage_client.delete_file(temp_gcs_path)
+                                logger.debug(
+                                    "Cleaned up temp transcription file: %s",
+                                    temp_gcs_path,
+                                )
+                            except Exception as cleanup_err:
+                                logger.debug(
+                                    "Could not delete temp transcription file: %s",
+                                    cleanup_err,
+                                )
                     else:
-                        logger.warning("Failed to generate signed URL for WEBM")
+                        logger.warning(
+                            "Failed to generate signed URL for transcription"
+                        )
 
                 except Exception as e:
                     logger.exception(f"Transcription failed (non-fatal): {e}")
@@ -886,75 +863,361 @@ class MeetingManager:
                         "Continuing with upload despite transcription failure"
                     )
 
-            # Step 5: Upload transcripts if available
-            logger.info("Step 5: Uploading transcripts to GCS (if available)...")
-            logger.debug("POST-MEETING: Checking for transcript files to upload")
-            logger.debug("  transcript_txt_path: %s", transcript_txt_path)
-            logger.debug("  transcript_json_path: %s", transcript_json_path)
-            logger.debug("  transcript_md_path: %s", transcript_md_path)
+            # Step 4: Upload all files to ALL attendees (fanout from container)
+            # Find all meetings with the same URL on the same day = attendees
+            logger.info("Step 4: Discovering attendees and uploading files to all...")
+            logger.debug("=" * 80)
+            logger.debug(
+                "ATTENDEE FANOUT - Upload files from container to all attendees"
+            )
+            logger.debug("=" * 80)
 
-            transcript_txt_uploaded = False
-            transcript_json_uploaded = False
-            transcript_md_uploaded = False
-            transcript_vtt_uploaded = False
+            # Prepare list of local files to upload
+            local_files_to_upload = []
 
-            if transcript_txt_path and os.path.exists(transcript_txt_path):
-                logger.debug("Uploading transcript.txt...")
-                transcript_txt_uploaded = self.storage_client.upload_file(
-                    transcript_txt_path, f"{self.gcs_path}/transcript.txt"
+            # WEBM recording (required)
+            if os.path.exists(recording_path):
+                local_files_to_upload.append(
+                    {
+                        "local_path": recording_path,
+                        "filename": "recording.webm",
+                        "content_type": "video/webm",
+                        "required": True,
+                    }
                 )
-                logger.debug("  transcript.txt uploaded: %s", transcript_txt_uploaded)
+                logger.debug(
+                    "  📦 WEBM: %s (%.2f MB)", recording_path, webm_size / (1024 * 1024)
+                )
+
+            # MP4 fallback (optional)
+            if mp4_path and os.path.exists(mp4_path):
+                mp4_size = os.path.getsize(mp4_path)
+                local_files_to_upload.append(
+                    {
+                        "local_path": mp4_path,
+                        "filename": "recording.mp4",
+                        "content_type": "video/mp4",
+                        "required": False,
+                    }
+                )
+                logger.debug(
+                    "  📦 MP4: %s (%.2f MB)", mp4_path, mp4_size / (1024 * 1024)
+                )
+
+            # M4A audio (optional)
+            if audio_path and os.path.exists(audio_path):
+                audio_size = os.path.getsize(audio_path)
+                local_files_to_upload.append(
+                    {
+                        "local_path": audio_path,
+                        "filename": "recording.m4a",
+                        "content_type": "audio/mp4",
+                        "required": False,
+                    }
+                )
+                logger.debug(
+                    "  📦 M4A: %s (%.2f MB)", audio_path, audio_size / (1024 * 1024)
+                )
+
+            # Transcripts (optional)
+            if transcript_txt_path and os.path.exists(transcript_txt_path):
+                local_files_to_upload.append(
+                    {
+                        "local_path": transcript_txt_path,
+                        "filename": "transcript.txt",
+                        "content_type": "text/plain",
+                        "required": False,
+                    }
+                )
+                logger.debug("  📦 TXT: %s", transcript_txt_path)
 
             if transcript_json_path and os.path.exists(transcript_json_path):
-                logger.debug("Uploading transcript.json...")
-                transcript_json_uploaded = self.storage_client.upload_file(
-                    transcript_json_path, f"{self.gcs_path}/transcript.json"
+                local_files_to_upload.append(
+                    {
+                        "local_path": transcript_json_path,
+                        "filename": "transcript.json",
+                        "content_type": "application/json",
+                        "required": False,
+                    }
                 )
-                logger.debug("  transcript.json uploaded: %s", transcript_json_uploaded)
+                logger.debug("  📦 JSON: %s", transcript_json_path)
 
             if transcript_md_path and os.path.exists(transcript_md_path):
-                logger.debug("Uploading transcript.md...")
-                transcript_md_uploaded = self.storage_client.upload_file(
-                    transcript_md_path,
-                    f"{self.gcs_path}/transcript.md",
-                    content_type="text/markdown",
+                local_files_to_upload.append(
+                    {
+                        "local_path": transcript_md_path,
+                        "filename": "transcript.md",
+                        "content_type": "text/markdown",
+                        "required": False,
+                    }
                 )
-                logger.debug("  transcript.md uploaded: %s", transcript_md_uploaded)
+                logger.debug("  📦 MD: %s", transcript_md_path)
 
-            # offline_pipeline writes a .vtt file next to the txt/json outputs.
+            # VTT subtitles (optional)
+            transcript_vtt_path = None
             if transcript_txt_path:
                 transcript_vtt_path = os.path.splitext(transcript_txt_path)[0] + ".vtt"
                 if os.path.exists(transcript_vtt_path):
-                    logger.debug("Uploading transcript.vtt...")
-                    transcript_vtt_uploaded = self.storage_client.upload_file(
-                        transcript_vtt_path,
-                        f"{self.gcs_path}/transcript.vtt",
-                        content_type="text/vtt",
+                    local_files_to_upload.append(
+                        {
+                            "local_path": transcript_vtt_path,
+                            "filename": "transcript.vtt",
+                            "content_type": "text/vtt",
+                            "required": False,
+                        }
                     )
-                    logger.debug(
-                        "  transcript.vtt uploaded: %s", transcript_vtt_uploaded
-                    )
-
-            logger.debug("POST-MEETING: Transcript upload summary:")
-            logger.debug(
-                "  TXT: %s, JSON: %s, MD: %s, VTT: %s",
-                transcript_txt_uploaded,
-                transcript_json_uploaded,
-                transcript_md_uploaded,
-                transcript_vtt_uploaded,
-            )
+                    logger.debug("  📦 VTT: %s", transcript_vtt_path)
 
             logger.info(
-                "Successfully uploaded recording to gs://%s/%s/",
-                self.gcs_bucket,
-                self.gcs_path,
+                "Total files to upload per attendee: %d", len(local_files_to_upload)
             )
-            if transcript_txt_uploaded and transcript_json_uploaded:
-                logger.info("✅ Transcripts also uploaded successfully")
-            if transcript_md_uploaded:
-                logger.info("✅ Markdown transcript uploaded successfully")
-            if transcript_vtt_uploaded:
-                logger.info("✅ WebVTT subtitles uploaded successfully")
+
+            # Discover all attendee meetings (same URL, same day)
+            attendee_meetings = []
+            if self.team_id and self.meeting_url:
+                # Get the meeting start and end times from Firestore
+                meeting_start_time = None
+                meeting_end_time = None
+                if self.fs_meeting_id:
+                    meeting_data = self.firestore_client.get_meeting(
+                        organization_id=self.team_id,
+                        meeting_id=self.fs_meeting_id,
+                    )
+                    if meeting_data:
+                        start_val = meeting_data.get("start")
+                        end_val = meeting_data.get("end")
+                        if hasattr(start_val, "date"):
+                            meeting_start_time = start_val
+                            if meeting_start_time.tzinfo is None:
+                                meeting_start_time = meeting_start_time.replace(
+                                    tzinfo=timezone.utc
+                                )
+                        if hasattr(end_val, "date"):
+                            meeting_end_time = end_val
+                            if meeting_end_time.tzinfo is None:
+                                meeting_end_time = meeting_end_time.replace(
+                                    tzinfo=timezone.utc
+                                )
+
+                if meeting_start_time and meeting_end_time:
+                    logger.debug(
+                        "Using meeting times for attendee lookup: start=%s, end=%s",
+                        meeting_start_time,
+                        meeting_end_time,
+                    )
+
+                    attendee_meetings = (
+                        self.firestore_client.find_attendee_meetings_by_url_and_time(
+                            organization_id=self.team_id,
+                            meeting_url=self.meeting_url,
+                            start_time=meeting_start_time,
+                            end_time=meeting_end_time,
+                        )
+                    )
+                else:
+                    logger.warning(
+                        "Cannot discover attendees: missing start or end time in meeting data"
+                    )
+                    logger.debug("  start_time: %s", meeting_start_time)
+                    logger.debug("  end_time: %s", meeting_end_time)
+            else:
+                logger.warning(
+                    "Cannot discover attendees: missing team_id or meeting_url"
+                )
+                logger.debug("  team_id: %s", self.team_id)
+                logger.debug(
+                    "  meeting_url: %s",
+                    self.meeting_url[:50] if self.meeting_url else "N/A",
+                )
+
+            # If no attendee meetings found, fall back to just the current meeting
+            if not attendee_meetings:
+                logger.info(
+                    "No attendee meetings found via URL matching, using current meeting only"
+                )
+                attendee_meetings = [
+                    {
+                        "id": self.fs_meeting_id or self.meeting_id,
+                        "user_id": self.user_id,
+                        "start": None,
+                        "title": "",
+                        "join_url": self.meeting_url,
+                        "status": "",
+                    }
+                ]
+
+            logger.info("=" * 80)
+            logger.info(
+                "FANOUT: Uploading files to %d attendee(s)", len(attendee_meetings)
+            )
+            logger.info("=" * 80)
+
+            # Log all attendees for debugging
+            for idx, attendee in enumerate(attendee_meetings):
+                logger.debug(
+                    "  ATTENDEE [%d/%d]: meeting_id=%s, user_id=%s, title=%s",
+                    idx + 1,
+                    len(attendee_meetings),
+                    attendee["id"],
+                    attendee["user_id"],
+                    attendee.get("title", "N/A")[:30],
+                )
+
+            # Track upload results for each attendee
+            fanout_results = []
+            artifacts_manifest = {}  # Will be set from first successful upload
+
+            for attendee_idx, attendee in enumerate(attendee_meetings):
+                attendee_meeting_id = attendee["id"]
+                attendee_user_id = attendee["user_id"]
+
+                if not attendee_user_id:
+                    logger.warning(
+                        "FANOUT_SKIP: meeting_id=%s has no user_id, skipping",
+                        attendee_meeting_id,
+                    )
+                    continue
+
+                # Construct GCS path for this attendee
+                attendee_gcs_path = (
+                    f"recordings/{attendee_user_id}/{attendee_meeting_id}"
+                )
+
+                logger.info("=" * 60)
+                logger.info(
+                    "FANOUT [%d/%d]: user_id=%s, meeting_id=%s",
+                    attendee_idx + 1,
+                    len(attendee_meetings),
+                    attendee_user_id,
+                    attendee_meeting_id,
+                )
+                logger.info(
+                    "  Target GCS path: gs://%s/%s/", self.gcs_bucket, attendee_gcs_path
+                )
+
+                attendee_result = {
+                    "user_id": attendee_user_id,
+                    "meeting_id": attendee_meeting_id,
+                    "gcs_path": attendee_gcs_path,
+                    "files_uploaded": 0,
+                    "files_failed": 0,
+                    "success": True,
+                }
+
+                # Upload each file to this attendee's GCS path
+                for file_info in local_files_to_upload:
+                    local_path = file_info["local_path"]
+                    filename = file_info["filename"]
+                    content_type = file_info["content_type"]
+                    required = file_info["required"]
+
+                    gcs_dest_path = f"{attendee_gcs_path}/{filename}"
+
+                    logger.info(
+                        "  COPY: %s -> gs://%s/%s",
+                        filename,
+                        self.gcs_bucket,
+                        gcs_dest_path,
+                    )
+
+                    try:
+                        upload_success = self.storage_client.upload_file(
+                            local_path,
+                            gcs_dest_path,
+                            content_type=content_type,
+                        )
+
+                        if upload_success:
+                            attendee_result["files_uploaded"] += 1
+                            logger.info(
+                                "    ✅ SUCCESS: %s uploaded to user %s",
+                                filename,
+                                attendee_user_id,
+                            )
+
+                            # Build artifacts manifest from first attendee
+                            if attendee_idx == 0:
+                                artifact_key = filename.replace(".", "_").replace(
+                                    "recording_", "recording_"
+                                )
+                                # Normalize artifact keys
+                                if filename == "recording.webm":
+                                    artifact_key = "recording_webm"
+                                elif filename == "recording.mp4":
+                                    artifact_key = "recording_mp4"
+                                elif filename == "recording.m4a":
+                                    artifact_key = "recording_m4a"
+                                elif filename == "transcript.txt":
+                                    artifact_key = "transcript_txt"
+                                elif filename == "transcript.json":
+                                    artifact_key = "transcript_json"
+                                elif filename == "transcript.md":
+                                    artifact_key = "transcript_md"
+                                elif filename == "transcript.vtt":
+                                    artifact_key = "transcript_vtt"
+                                artifacts_manifest[artifact_key] = gcs_dest_path
+                        else:
+                            attendee_result["files_failed"] += 1
+                            logger.error(
+                                "    ❌ FAILED: %s upload to user %s failed",
+                                filename,
+                                attendee_user_id,
+                            )
+                            if required:
+                                attendee_result["success"] = False
+
+                    except Exception as upload_err:
+                        attendee_result["files_failed"] += 1
+                        logger.error(
+                            "    ❌ ERROR: %s upload to user %s: %s",
+                            filename,
+                            attendee_user_id,
+                            upload_err,
+                        )
+                        if required:
+                            attendee_result["success"] = False
+
+                fanout_results.append(attendee_result)
+
+                logger.info(
+                    "  FANOUT RESULT: user_id=%s, uploaded=%d, failed=%d, success=%s",
+                    attendee_user_id,
+                    attendee_result["files_uploaded"],
+                    attendee_result["files_failed"],
+                    attendee_result["success"],
+                )
+
+            # Summary logging
+            logger.info("=" * 80)
+            logger.info("FANOUT COMPLETE SUMMARY")
+            logger.info("=" * 80)
+            total_success = sum(1 for r in fanout_results if r["success"])
+            total_failed = len(fanout_results) - total_success
+            total_files = sum(r["files_uploaded"] for r in fanout_results)
+            logger.info("  Total attendees: %d", len(fanout_results))
+            logger.info("  Successful: %d", total_success)
+            logger.info("  Failed: %d", total_failed)
+            logger.info("  Total files copied: %d", total_files)
+
+            for result in fanout_results:
+                logger.debug(
+                    "  ATTENDEE RESULT: user=%s, meeting=%s, files=%d/%d, success=%s",
+                    result["user_id"],
+                    result["meeting_id"],
+                    result["files_uploaded"],
+                    result["files_uploaded"] + result["files_failed"],
+                    result["success"],
+                )
+
+            # Check if at least one attendee was successful (for the primary meeting)
+            primary_success = any(r["success"] for r in fanout_results)
+            if not primary_success:
+                logger.error("FANOUT FAILED: No attendees received files successfully")
+                return False
+
+            logger.info(
+                "✅ Fanout complete: %d attendees received files", total_success
+            )
 
             # Cleanup local files (recording + transcripts)
             try:
@@ -1013,40 +1276,17 @@ class MeetingManager:
 
             # Session-dedupe support: mark the meeting session complete and
             # publish an artifact manifest so the controller can fan-out copies.
+            # NOTE: With attendee-based fanout, files are already copied to all attendees
+            # but we still mark the session complete for status tracking.
             logger.debug("=" * 80)
             logger.debug("POST-MEETING: Marking session complete")
             logger.debug("=" * 80)
 
-            artifacts_manifest = {
-                "recording_webm": webm_gcs_path,
-                "recording_mp4": (
-                    f"{self.gcs_path}/recording.mp4" if mp4_path else None
-                ),
-                "recording_m4a": audio_gcs_path,
-                "transcript_txt": (
-                    f"{self.gcs_path}/transcript.txt"
-                    if transcript_txt_uploaded
-                    else None
-                ),
-                "transcript_json": (
-                    f"{self.gcs_path}/transcript.json"
-                    if transcript_json_uploaded
-                    else None
-                ),
-                "transcript_md": (
-                    f"{self.gcs_path}/transcript.md" if transcript_md_uploaded else None
-                ),
-                "transcript_vtt": (
-                    f"{self.gcs_path}/transcript.vtt"
-                    if transcript_vtt_uploaded
-                    else None
-                ),
-            }
-
+            # artifacts_manifest was already built during the fanout loop above
             logger.debug("Artifacts manifest:")
             logger.debug(json.dumps(artifacts_manifest, indent=2, default=str))
             logger.debug(
-                "FANOUT: These artifacts will be copied to all session subscribers"
+                "FANOUT: Artifacts already copied to %d attendees", len(fanout_results)
             )
 
             # Update meeting document with bot_status and artifacts (for K8s dedup fanout)

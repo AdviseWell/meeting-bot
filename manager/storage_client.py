@@ -5,7 +5,7 @@ Google Cloud Storage Client for uploading processed files
 import logging
 import os
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from google.cloud import storage, firestore
 
@@ -515,3 +515,161 @@ class FirestoreClient:
         except Exception as e:
             logger.exception(f"Failed to update ad-hoc meeting times: {e}")
             return False
+
+    def find_attendee_meetings_by_url_and_time(
+        self,
+        organization_id: str,
+        meeting_url: str,
+        start_time: datetime,
+        end_time: datetime,
+    ) -> List[Dict[str, Any]]:
+        """
+        Find all meetings in the org with the same meeting URL and same start/end time.
+
+        This is used for fanout - to copy recordings to all attendees who have
+        the same meeting (same URL, same start and end time) on their calendar.
+
+        Args:
+            organization_id: Organization ID to search in
+            meeting_url: The Teams/Zoom/Meet join URL to match
+            start_time: The start time of the meeting to match
+            end_time: The end time of the meeting to match
+
+        Returns:
+            List of meeting dicts with 'id', 'user_id', and other meeting data
+        """
+        results: List[Dict[str, Any]] = []
+
+        try:
+            logger.debug("=" * 80)
+            logger.debug("ATTENDEE DISCOVERY - Finding meetings with same URL and time")
+            logger.debug("=" * 80)
+            logger.debug("  Organization ID: %s", organization_id)
+            logger.debug(
+                "  Meeting URL: %s", meeting_url[:80] if meeting_url else "N/A"
+            )
+            logger.debug("  Start time: %s", start_time)
+            logger.debug("  End time: %s", end_time)
+
+            # Query meetings collection for this org
+            meetings_ref = self.client.collection(
+                f"organizations/{organization_id}/meetings"
+            )
+
+            # Query for meetings with matching join_url
+            # Note: Firestore requires an index for compound queries
+            query = meetings_ref.where(
+                filter=firestore.FieldFilter("join_url", "==", meeting_url)
+            )
+
+            matching_docs = list(query.stream())
+            logger.debug("  Found %d meetings with matching URL", len(matching_docs))
+
+            # Filter by matching start and end time in memory
+            for doc in matching_docs:
+                data = doc.to_dict() or {}
+                meeting_start = data.get("start")
+                meeting_end = data.get("end")
+
+                # Check if meeting has matching start and end time
+                if meeting_start and meeting_end:
+                    try:
+                        # Handle both datetime objects and timestamps
+                        if hasattr(meeting_start, "date"):
+                            start_dt = meeting_start
+                        else:
+                            start_dt = meeting_start
+
+                        if hasattr(meeting_end, "date"):
+                            end_dt = meeting_end
+                        else:
+                            end_dt = meeting_end
+
+                        # Make timezone-aware if needed
+                        if start_dt.tzinfo is None:
+                            from datetime import timezone
+
+                            start_dt = start_dt.replace(tzinfo=timezone.utc)
+                        if end_dt.tzinfo is None:
+                            from datetime import timezone
+
+                            end_dt = end_dt.replace(tzinfo=timezone.utc)
+
+                        # Check if start and end times match exactly
+                        start_matches = start_dt == start_time
+                        end_matches = end_dt == end_time
+
+                        if start_matches and end_matches:
+                            # Get user_id from the meeting document
+                            user_id = (
+                                data.get("user_id")
+                                or data.get("synced_by_user_id")
+                                or data.get("userId")
+                            )
+
+                            meeting_info = {
+                                "id": doc.id,
+                                "user_id": user_id,
+                                "start": meeting_start,
+                                "end": meeting_end,
+                                "title": data.get("title", ""),
+                                "join_url": data.get("join_url", ""),
+                                "status": data.get("status", ""),
+                            }
+                            results.append(meeting_info)
+
+                            logger.debug(
+                                "  ✓ Time match: meeting_id=%s, user_id=%s, start=%s, end=%s",
+                                doc.id,
+                                user_id,
+                                meeting_start,
+                                meeting_end,
+                            )
+                        else:
+                            logger.debug(
+                                "  ✗ Time mismatch: meeting_id=%s, start=%s (match=%s), end=%s (match=%s)",
+                                doc.id,
+                                meeting_start,
+                                start_matches,
+                                meeting_end,
+                                end_matches,
+                            )
+                    except Exception as e:
+                        logger.debug(
+                            "  ⚠ Could not parse times for meeting_id=%s: %s",
+                            doc.id,
+                            e,
+                        )
+                else:
+                    logger.debug(
+                        "  ⚠ Missing start/end time for meeting_id=%s (start=%s, end=%s), skipping",
+                        doc.id,
+                        meeting_start,
+                        meeting_end,
+                    )
+
+            logger.debug("=" * 80)
+            logger.debug(
+                "ATTENDEE DISCOVERY COMPLETE: Found %d attendee meetings with matching URL and time",
+                len(results),
+            )
+            for idx, m in enumerate(results):
+                logger.debug(
+                    "  [%d] meeting_id=%s, user_id=%s, start=%s, end=%s",
+                    idx + 1,
+                    m["id"],
+                    m["user_id"],
+                    m.get("start"),
+                    m.get("end"),
+                )
+            logger.debug("=" * 80)
+
+            return results
+
+        except Exception as e:
+            logger.exception(
+                "Failed to find attendee meetings for URL %s: %s",
+                meeting_url[:50] if meeting_url else "N/A",
+                e,
+            )
+            return results
