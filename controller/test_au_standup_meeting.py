@@ -207,7 +207,7 @@ class MeetingDiagnostics:
             )
 
     def _check_time_window(self, data: dict):
-        """Check if meeting is within scan window (2 minutes from now ± 30 seconds)."""
+        """Check if meeting is within scan window (8 minutes from now ± 30 seconds)."""
         start = parse_start_time(data.get("start"))
         if start is None:
             return  # Already caught in start time check
@@ -227,7 +227,7 @@ class MeetingDiagnostics:
             if time_until > 0:
                 minutes = int(time_until // 60)
                 self.warnings.append(
-                    f"Meeting starts in {minutes} minutes - will be scanned ~{minutes - 2} min before start"
+                    f"Meeting starts in {minutes} minutes - will be scanned ~{minutes - 8} min before start"
                 )
             else:
                 self.warnings.append(

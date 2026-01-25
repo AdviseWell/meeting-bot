@@ -3639,7 +3639,7 @@ class MeetingController:
         for the 'start' field, as calendar sync systems may use either format.
         """
         now = datetime.now(timezone.utc)
-        target_time = now + timedelta(minutes=2)
+        target_time = now + timedelta(minutes=8)
         window_start = target_time - timedelta(seconds=30)
         window_end = target_time + timedelta(seconds=30)
 
