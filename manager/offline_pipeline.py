@@ -389,6 +389,8 @@ def run_whisper_cpp(
         str(wav_path),
         "-l",
         language,
+        "-ng",  # Disable GPU - use CPU only (avoids SIGILL on containers without GPU)
+        "-fa",  # Disable flash attention (requires GPU)
         "-osrt",
         "-of",
         str(out_prefix),

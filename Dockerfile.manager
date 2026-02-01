@@ -93,8 +93,10 @@ RUN mkdir -p /app/tools/whisper.cpp/build/bin /app/tools/whisper.cpp/models \
         /app/tools/whisper.cpp/build/src /app/tools/whisper.cpp/build/ggml/src
 
 # Build whisper-cli + shared libs inside the image so multi-arch builds work.
-# IMPORTANT: Disable AVX/AVX2/FMA/F16C to ensure binary runs on older CPUs
-# that lack these instruction sets (prevents SIGILL crashes at runtime).
+# IMPORTANT: Build with portable CPU-only settings to prevent SIGILL crashes:
+#   - Disable AVX/AVX2/FMA/F16C/SSE3 for maximum x86_64 compatibility
+#   - Disable GPU backends (CUDA/Metal/Vulkan) since K8s pods typically lack GPU
+#   - Disable native CPU detection to ensure portable baseline build
 RUN apt-get update && apt-get install -y --no-install-recommends \
             build-essential \
             cmake \
@@ -103,7 +105,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         && rm -rf /var/lib/apt/lists/* \
         && git clone --depth 1 https://github.com/ggerganov/whisper.cpp /tmp/whisper.cpp \
         && cmake -S /tmp/whisper.cpp -B /tmp/whisper.cpp/build -DCMAKE_BUILD_TYPE=Release \
-            -DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_FMA=OFF -DGGML_F16C=OFF \
+            -DGGML_NATIVE=OFF \
+            -DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_AVX512=OFF \
+            -DGGML_FMA=OFF -DGGML_F16C=OFF \
+            -DGGML_CUDA=OFF -DGGML_METAL=OFF -DGGML_VULKAN=OFF -DGGML_SYCL=OFF \
+            -DWHISPER_NO_AVX=ON -DWHISPER_NO_AVX2=ON -DWHISPER_NO_FMA=ON -DWHISPER_NO_F16C=ON \
         && cmake --build /tmp/whisper.cpp/build --target whisper-cli -j"$(nproc)" \
         && cp /tmp/whisper.cpp/build/bin/whisper-cli /app/tools/whisper.cpp/build/bin/ \
         && if ls /tmp/whisper.cpp/build/src/libwhisper.so* >/dev/null 2>&1; then cp /tmp/whisper.cpp/build/src/libwhisper.so* /app/tools/whisper.cpp/build/src/; fi \
