@@ -77,6 +77,59 @@ def test_normalize_meeting_url_strips_tracking_params():
     assert norm == "https://teams.microsoft.com/l/meeting-join/abc?foo=bar"
 
 
+def test_normalize_meeting_url_case_insensitive():
+    """Regression: URLs with different cases should normalize to the same value."""
+    MeetingController = _import_controller()
+    c = MeetingController.__new__(MeetingController)
+
+    url_lower = "https://teams.microsoft.com/meet/42182741156751?p=pnMnKprqU3VYnabSiu"
+    url_upper = "HTTPS://TEAMS.MICROSOFT.COM/MEET/42182741156751?P=PNMNKPRQU3VYNABSIU"
+
+    norm_lower = c._normalize_meeting_url(url_lower)  # noqa: SLF001
+    norm_upper = c._normalize_meeting_url(url_upper)  # noqa: SLF001
+
+    assert norm_lower == norm_upper, (
+        f"Case-insensitive URLs should normalize to the same value: "
+        f"{norm_lower!r} != {norm_upper!r}"
+    )
+
+
+def test_normalize_meeting_url_with_fragment_and_trailing_slash():
+    """Regression: URLs with fragments like /#fragment should normalize properly."""
+    MeetingController = _import_controller()
+    c = MeetingController.__new__(MeetingController)
+
+    url_normal = "https://teams.microsoft.com/meet/42182741156751?p=pnMnKprqU3VYnabSiu"
+    url_fragment = (
+        "https://teams.microsoft.com/meet/42182741156751?p=pnMnKprqU3VYnabSiu/#fragment"
+    )
+
+    norm_normal = c._normalize_meeting_url(url_normal)  # noqa: SLF001
+    norm_fragment = c._normalize_meeting_url(url_fragment)  # noqa: SLF001
+
+    assert norm_normal == norm_fragment, (
+        f"URLs with fragments should normalize to the same value: "
+        f"{norm_normal!r} != {norm_fragment!r}"
+    )
+
+
+def test_meeting_url_hash_case_insensitive():
+    """Regression: URL hashes must be the same for case-insensitive equivalent URLs."""
+    MeetingController = _import_controller()
+    c = MeetingController.__new__(MeetingController)
+
+    url_lower = "https://teams.microsoft.com/meet/42182741156751?p=pnMnKprqU3VYnabSiu"
+    url_upper = "HTTPS://TEAMS.MICROSOFT.COM/MEET/42182741156751?P=PNMNKPRQU3VYNABSIU"
+
+    hash_lower = c._meeting_url_hash(url_lower)  # noqa: SLF001
+    hash_upper = c._meeting_url_hash(url_upper)  # noqa: SLF001
+
+    assert hash_lower == hash_upper, (
+        f"URL hashes should be the same for case-insensitive URLs: "
+        f"{hash_lower!r} != {hash_upper!r}"
+    )
+
+
 def test_session_id_deterministic_for_equivalent_urls():
     MeetingController = _import_controller()
     c = MeetingController.__new__(MeetingController)

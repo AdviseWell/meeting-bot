@@ -1006,25 +1006,35 @@ class MeetingController:
 
         Keep this intentionally conservative: strip whitespace, drop fragments,
         and remove common tracking query params.
+
+        IMPORTANT: Meeting URLs are case-insensitive. Teams, Zoom, and Google Meet
+        all treat URLs as case-insensitive, so we lowercase the entire URL
+        (scheme, netloc, path, and query) to ensure equivalent URLs hash the same.
         """
 
         raw = (url or "").strip()
         if not raw:
             return ""
 
-        parts = urlsplit(raw)
+        # Lowercase the entire URL before parsing to ensure case-insensitive matching.
+        # Meeting providers (Teams, Zoom, Meet) treat URLs as case-insensitive.
+        raw_lower = raw.lower()
 
-        # Drop fragment.
-        scheme = (parts.scheme or "https").lower()
-        netloc = parts.netloc.lower()
+        parts = urlsplit(raw_lower)
+
+        # Drop fragment and normalize components.
+        scheme = parts.scheme or "https"
+        netloc = parts.netloc
         path = parts.path.rstrip("/")
 
         # Filter query params (Teams/Zoom links often have tracking params).
         # Keep provider-specific critical params if any are needed later.
+        # Also strip trailing slashes from query param values (can happen with
+        # malformed URLs like "?p=abc/#fragment" where "/" ends up in the value).
         filtered_query_items: List[str] = []
         if parts.query:
             for kv in parts.query.split("&"):
-                k = kv.split("=", 1)[0].lower()
+                k = kv.split("=", 1)[0]
                 if k in {
                     "utm_source",
                     "utm_medium",
@@ -1035,7 +1045,8 @@ class MeetingController:
                     continue
                 if k in {"fbclid", "gclid"}:
                     continue
-                filtered_query_items.append(kv)
+                # Strip trailing slashes from the param value
+                filtered_query_items.append(kv.rstrip("/"))
 
         normalized_query = "&".join(filtered_query_items)
         return urlunsplit((scheme, netloc, path, normalized_query, ""))
