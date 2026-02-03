@@ -3756,6 +3756,15 @@ class MeetingController:
                         user_data = user_doc.to_dict()
                         auto_join = user_data.get("auto_join_meetings", False)
 
+                        # ADV-648: Calendar Disconnect Protection (FR-002)
+                        # If user has disconnected their calendar, skip their meetings
+                        calendar_connected = user_data.get("calendar_connected", False)
+                        if not calendar_connected:
+                            logger.debug(
+                                f"Skipping {doc.id}: user {user_id} calendar disconnected"
+                            )
+                            continue
+
                 logger.debug(
                     f"Meeting {doc.id}: ai_enabled={ai_enabled}, "
                     f"auto_join={auto_join}"
