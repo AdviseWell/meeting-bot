@@ -334,11 +334,16 @@ class MeetingController:
             else ""
         )
 
+        # Extract occurrence_start_utc for recurring meetings (FR-003)
+        occurrence_start_utc = message_data.get("occurrence_start_utc") or ""
+
         # Generate consistent meeting_id based on org_id + meeting_url
         # This ensures job names are consistent for deduplication
         if meeting_url and org_id:
             meeting_id = self._meeting_session_id(
-                org_id=org_id, meeting_url=meeting_url
+                org_id=org_id,
+                meeting_url=meeting_url,
+                occurrence_start_utc=occurrence_start_utc,
             )
         else:
             # Fallback for legacy payloads or incomplete data
@@ -470,6 +475,9 @@ class MeetingController:
                 client.V1EnvVar(
                     name="MEETING_SESSION_ID", value=meeting_session_id
                 ),  # Explicit session_id for fanout marking
+                client.V1EnvVar(
+                    name="OCCURRENCE_START_UTC", value=occurrence_start_utc
+                ),  # Recurring meeting instance identifier
                 client.V1EnvVar(name="FS_MEETING_ID", value=str(meeting_doc_id)),
                 client.V1EnvVar(name="USER_ID", value=str(user_doc_id)),
                 client.V1EnvVar(name="GCS_PATH", value=gcs_path),
@@ -503,6 +511,7 @@ class MeetingController:
                         "team_id",
                         "gcs_path",
                         "meeting_session_id",
+                        "occurrence_start_utc",
                     ]:
                         # Add original case (e.g., bearerToken, teamId, userId)
                         env_vars.append(client.V1EnvVar(name=key, value=str(value)))
@@ -1051,9 +1060,20 @@ class MeetingController:
         normalized_query = "&".join(filtered_query_items)
         return urlunsplit((scheme, netloc, path, normalized_query, ""))
 
-    def _meeting_session_id(self, *, org_id: str, meeting_url: str) -> str:
+    def _meeting_session_id(
+        self, *, org_id: str, meeting_url: str, occurrence_start_utc: str = ""
+    ) -> str:
+        """
+        Generate deterministic session ID.
+
+        For recurring meetings (with occurrence_start_utc):
+          hash(org_id:normalized_url:occurrence_start_utc)
+
+        For single meetings or backward compatibility:
+          hash(org_id:normalized_url:)  # Empty string appended
+        """
         normalized = self._normalize_meeting_url(meeting_url)
-        base = f"{(org_id or '').strip()}:{normalized}".encode("utf-8")
+        base = f"{(org_id or '').strip()}:{normalized}:{occurrence_start_utc}".encode("utf-8")
         return hashlib.sha256(base).hexdigest()
 
     def _meeting_url_hash(self, meeting_url: str) -> str:
@@ -1264,8 +1284,15 @@ class MeetingController:
         data = meeting_doc.to_dict() or {}
         meeting_ref = meeting_doc.reference
 
+        # Extract occurrence_start_utc from meeting document for recurring meetings
+        occurrence_start_utc = data.get("occurrence_start_utc") or ""
+
         # Compute meeting_id (same as session_id for consistency)
-        meeting_id = self._meeting_session_id(org_id=org_id, meeting_url=meeting_url)
+        meeting_id = self._meeting_session_id(
+            org_id=org_id,
+            meeting_url=meeting_url,
+            occurrence_start_utc=occurrence_start_utc,
+        )
 
         # Build job payload
         payload = {
@@ -1414,6 +1441,7 @@ class MeetingController:
             or ""
         )
         user_id = meeting_data.get("user_id") or meeting_data.get("userId") or ""
+        occurrence_start_utc = meeting_data.get("occurrence_start_utc") or ""
 
         logger.debug("Organization ID: %s", org_id)
         logger.debug("User ID: %s", user_id)
@@ -1430,7 +1458,7 @@ class MeetingController:
             return None
 
         session_id = self._meeting_session_id(
-            org_id=org_id, meeting_url=str(meeting_url)
+            org_id=org_id, meeting_url=str(meeting_url), occurrence_start_utc=occurrence_start_utc
         )
 
         logger.debug("Computed session ID (SHA256 of org+URL): %s", session_id)
@@ -1484,6 +1512,7 @@ class MeetingController:
                         "status": "queued",
                         "org_id": org_id,
                         "meeting_url": str(fresh_meeting_url),
+                        "occurrence_start_utc": occurrence_start_utc,
                         "created_at": now,
                         "updated_at": now,
                     },
@@ -3152,6 +3181,7 @@ class MeetingController:
             raise ValueError("meeting_session missing meeting_url")
 
         org_id = (data.get("org_id") or "").strip()
+        occurrence_start_utc = data.get("occurrence_start_utc") or ""
 
         # Get the first subscriber to determine where to write files
         session_ref = session_doc.reference
@@ -3179,7 +3209,7 @@ class MeetingController:
             "meeting_url": meeting_url,
             # meeting_id should be consistent hash for deduplication
             "meeting_id": self._meeting_session_id(
-                org_id=org_id, meeting_url=meeting_url
+                org_id=org_id, meeting_url=meeting_url, occurrence_start_utc=occurrence_start_utc
             ),
             "gcs_path": gcs_path,
             "fs_meeting_id": fs_meeting_id,
@@ -3191,6 +3221,7 @@ class MeetingController:
             or (now.isoformat().replace("+00:00", "Z")),
             "auto_joined": True,
             "meeting_session_id": session_doc.id,
+            "occurrence_start_utc": occurrence_start_utc,
         }
 
         # Determine bot display name from org doc (same behavior as bot_instances path).
@@ -3833,9 +3864,10 @@ class MeetingController:
 
             # Compute meeting_session_id for fanout marking if not already present
             meeting_url = data.get("meeting_url") or data.get("meetingUrl") or ""
+            occurrence_start_utc = data.get("occurrence_start_utc") or ""
             if not data.get("meeting_session_id") and org_id and meeting_url:
                 data["meeting_session_id"] = self._meeting_session_id(
-                    org_id=org_id, meeting_url=meeting_url
+                    org_id=org_id, meeting_url=meeting_url, occurrence_start_utc=occurrence_start_utc
                 )
 
             logger.debug("=" * 80)

@@ -65,4 +65,14 @@ def load_meeting_metadata(
 
     metadata["bearer_token"] = bearer_token
     metadata["user_id"] = user_id
+
+    # Recurring meeting instance identifier (FR-003)
+    occurrence_start_utc = (
+        os.environ.get("OCCURRENCE_START_UTC")
+        or os.environ.get("occurrence_start_utc")
+        or ""
+    )
+    metadata["occurrence_start_utc"] = occurrence_start_utc
+    metadata["occurrenceStartUtc"] = occurrence_start_utc
+
     return metadata

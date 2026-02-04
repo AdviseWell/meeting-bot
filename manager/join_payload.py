@@ -40,6 +40,11 @@ def build_join_payload(*, meeting_url: str, metadata: Dict) -> Dict:
             metadata.get("userId") or metadata.get("user_id") or "AUTO-GENERATED"
         ),
         "botId": (metadata.get("botId") or metadata.get("bot_id") or "AUTO-GENERATED"),
+        "occurrenceStartUtc": (
+            metadata.get("occurrenceStartUtc")
+            or metadata.get("occurrence_start_utc")
+            or ""
+        ),
     }
 
     return payload
