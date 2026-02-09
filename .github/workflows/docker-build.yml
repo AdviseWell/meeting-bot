@@ -76,19 +76,22 @@ jobs:
           echo "TAG=$TAG" >> $GITHUB_ENV
           echo "tag=$TAG" >> $GITHUB_OUTPUT
 
-      # Fail if tag exists already (only on main push)
-      - name: Fail if tag exists
+      # Check if tag exists already (only on main push)
+      - name: Check if tag exists
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         id: check_tag
         run: |
           if git ls-remote --tags origin "refs/tags/${{ env.TAG }}" | grep .; then
-            echo "Tag ${{ env.TAG }} already exists!"
-            exit 1
+            echo "Tag ${{ env.TAG }} already exists — skipping tag creation."
+            echo "tag_exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "Tag ${{ env.TAG }} does not exist — will create."
+            echo "tag_exists=false" >> $GITHUB_OUTPUT
           fi
 
       # Create and push git tag if it doesn't exist (only on main push)
       - name: Create and push tag
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.check_tag.outputs.tag_exists != 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
