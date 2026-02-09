@@ -1245,6 +1245,8 @@ class MeetingManager:
                             "bot_completed_at": now,
                             "updated_at": now,
                             "artifacts": attendee_artifacts,
+                            "recording_available": True,
+                            "recording_status": "complete",
                         }
 
                         # Set recording_url from webm path if available
@@ -1532,6 +1534,8 @@ class MeetingManager:
             "bot_status": new_status,
             "bot_completed_at": now,
             "updated_at": now,
+            "recording_available": ok,
+            "recording_status": "complete" if ok else "failed",
         }
 
         # Add artifacts and recording_url for fanout

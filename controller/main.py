@@ -1073,7 +1073,9 @@ class MeetingController:
           hash(org_id:normalized_url:)  # Empty string appended
         """
         normalized = self._normalize_meeting_url(meeting_url)
-        base = f"{(org_id or '').strip()}:{normalized}:{occurrence_start_utc}".encode("utf-8")
+        base = f"{(org_id or '').strip()}:{normalized}:{occurrence_start_utc}".encode(
+            "utf-8"
+        )
         return hashlib.sha256(base).hexdigest()
 
     def _meeting_url_hash(self, meeting_url: str) -> str:
@@ -1458,7 +1460,9 @@ class MeetingController:
             return None
 
         session_id = self._meeting_session_id(
-            org_id=org_id, meeting_url=str(meeting_url), occurrence_start_utc=occurrence_start_utc
+            org_id=org_id,
+            meeting_url=str(meeting_url),
+            occurrence_start_utc=occurrence_start_utc,
         )
 
         logger.debug("Computed session ID (SHA256 of org+URL): %s", session_id)
@@ -2509,6 +2513,8 @@ class MeetingController:
                     first_meeting_update = {
                         "recording_url": f"gs://{self.gcs_bucket}/{source_prefix}/recording.webm",
                         "updated_at": datetime.now(timezone.utc),
+                        "recording_available": True,
+                        "recording_status": "complete",
                     }
 
                     # Add transcription if available
@@ -2659,6 +2665,8 @@ class MeetingController:
                         meeting_update = {
                             "updated_at": datetime.now(timezone.utc),
                             "recording_url": f"gs://{self.gcs_bucket}/{dst_prefix}/recording.webm",
+                            "recording_available": True,
+                            "recording_status": "complete",
                         }
 
                         # Add transcription if available
@@ -3123,6 +3131,8 @@ class MeetingController:
                     "fanout_source": source_meeting_id,
                     "fanout_at": datetime.now(timezone.utc),
                     "updated_at": datetime.now(timezone.utc),
+                    "recording_available": True,
+                    "recording_status": "complete",
                 }
 
                 if source_transcription:
@@ -3209,7 +3219,9 @@ class MeetingController:
             "meeting_url": meeting_url,
             # meeting_id should be consistent hash for deduplication
             "meeting_id": self._meeting_session_id(
-                org_id=org_id, meeting_url=meeting_url, occurrence_start_utc=occurrence_start_utc
+                org_id=org_id,
+                meeting_url=meeting_url,
+                occurrence_start_utc=occurrence_start_utc,
             ),
             "gcs_path": gcs_path,
             "fs_meeting_id": fs_meeting_id,
@@ -3867,7 +3879,9 @@ class MeetingController:
             occurrence_start_utc = data.get("occurrence_start_utc") or ""
             if not data.get("meeting_session_id") and org_id and meeting_url:
                 data["meeting_session_id"] = self._meeting_session_id(
-                    org_id=org_id, meeting_url=meeting_url, occurrence_start_utc=occurrence_start_utc
+                    org_id=org_id,
+                    meeting_url=meeting_url,
+                    occurrence_start_utc=occurrence_start_utc,
                 )
 
             logger.debug("=" * 80)
