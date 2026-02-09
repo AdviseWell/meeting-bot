@@ -297,7 +297,7 @@ export class GoogleMeetBot extends MeetBotBase {
 
         this._logger.error('Cant finish wait at the lobby check', { userDenied, waitingAtLobbySuccess, bodyText });
 
-        throw new WaitingAtLobbyRetryError('Google Meet bot could not enter the meeting...', bodyText ?? '', !userDenied, 2);
+        throw new WaitingAtLobbyRetryError('Google Meet bot could not enter the meeting...', bodyText ?? '', false, 0);
       }
     } catch (lobbyError) {
       this._logger.info('Closing the browser on error...', lobbyError);

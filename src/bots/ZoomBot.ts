@@ -355,7 +355,7 @@ export class ZoomBot extends BotBase {
 
         this._logger.error('Cant finish wait at the lobby check', { userDenied, waitingAtLobbySuccess: joined, bodyText });
 
-        throw new WaitingAtLobbyRetryError('Zoom bot could not enter the meeting...', bodyText ?? '', !userDenied, 2);
+        throw new WaitingAtLobbyRetryError('Zoom bot could not enter the meeting...', bodyText ?? '', false, 0);
       }
 
       this._logger.info('Bot is entering the meeting after wait room...');

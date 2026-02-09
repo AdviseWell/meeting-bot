@@ -172,7 +172,7 @@ export class MicrosoftTeamsBot extends MeetBotBase {
       this._logger.error('Closing the browser on error...', error);
       await this.page.context().browser()?.close();
 
-      throw new WaitingAtLobbyRetryError('Microsoft Teams Meeting bot could not enter the meeting...', bodyText ?? '', !userDenied, 2);
+      throw new WaitingAtLobbyRetryError('Microsoft Teams Meeting bot could not enter the meeting...', bodyText ?? '', false, 0);
     }
 
     pushState('joined');
