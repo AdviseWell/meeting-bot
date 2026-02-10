@@ -3,6 +3,15 @@ import app, { redisConsumerService, setGracefulShutdown } from './app';
 import { globalJobStore } from './lib/globalJobStore';
 import messageBroker from './connect/messageBroker';
 import config from './config';
+import { initialiseSentry, captureErrorSafe, flushSentry } from './services/sentry';
+
+// Initialise Sentry BEFORE anything else
+initialiseSentry({
+  dsn: config.sentry.dsn,
+  environment: config.sentry.environment,
+  release: config.sentry.release,
+  tracesSampleRate: config.sentry.tracesSampleRate,
+});
 
 const port = 3000;
 
@@ -46,10 +55,14 @@ const initiateGracefulShutdown = async () => {
 
 process.on('uncaughtException', (err) => {
   console.error('Uncaught Exception:', err);
+  captureErrorSafe(err, { component: 'bot', feature: 'process', action: 'uncaughtException' });
 });
 
 process.on('unhandledRejection', (reason, promise) => {
   console.error('Unhandled Rejection:', reason);
+  if (reason instanceof Error) {
+    captureErrorSafe(reason, { component: 'bot', feature: 'process', action: 'unhandledRejection' });
+  }
 });
 
 process.on('SIGTERM', () => {
@@ -79,6 +92,9 @@ export const gracefulShutdownApp = () => {
     } else {
       console.log('Redis services not running - skipping Redis shutdown');
     }
+
+    // Flush pending Sentry events before exit
+    await flushSentry();
     
     console.log('Exiting.....');
     process.exit(0);
