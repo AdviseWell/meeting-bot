@@ -15,7 +15,8 @@
  */
 
 import * as Sentry from '@sentry/node';
-import type { Event, EventHint, TransactionEvent } from '@sentry/node';
+import type { Event, EventHint, ErrorEvent } from '@sentry/node';
+import type { TransactionEvent, Contexts } from '@sentry/core';
 import { scrubPII, scrubString, parameteriseName } from './pii-scrubber';
 import { ALLOWED_TAGS, ALLOWED_HEADERS } from './types';
 import type { SentryConfig, SentrySafeContext } from './types';
@@ -135,12 +136,12 @@ function beforeSend(event: Event, _hint: EventHint): Event | null {
 
   // 7. Only keep safe contexts: runtime, os, device (limited)
   if (event.contexts) {
-    const safeContexts: Record<string, unknown> = {};
+    const safeContexts: Contexts = {};
     if (event.contexts.runtime) safeContexts.runtime = event.contexts.runtime;
     if (event.contexts.os) safeContexts.os = event.contexts.os;
     if (event.contexts.device) {
       const { family, model, brand } = event.contexts.device as Record<string, unknown>;
-      safeContexts.device = { family, model, brand };
+      safeContexts.device = { family: family as string, model: model as string, brand: brand as string };
     }
     event.contexts = safeContexts;
   }
@@ -164,7 +165,7 @@ function beforeSendTransaction(
   if (event.spans) {
     for (const span of event.spans) {
       if (span.data) {
-        span.data = scrubPII(span.data) as Record<string, unknown>;
+        span.data = scrubPII(span.data) as Record<string, string>;
       }
       if (span.description) {
         span.description = parameteriseName(span.description);
@@ -209,7 +210,7 @@ export function initialiseSentry(config?: SentryConfig): void {
     release,
 
     // PII scrubbing hooks
-    beforeSend: beforeSend as (event: Event, hint: EventHint) => Event | null,
+    beforeSend: beforeSend as unknown as (event: ErrorEvent, hint: EventHint) => ErrorEvent | null,
     beforeSendTransaction: beforeSendTransaction as unknown as (event: TransactionEvent, hint: EventHint) => TransactionEvent | null,
 
     // Sampling
@@ -226,9 +227,7 @@ export function initialiseSentry(config?: SentryConfig): void {
 
     // Integrations for Node.js/Express
     integrations: [
-      Sentry.httpIntegration({
-        tracing: true,
-      }),
+      Sentry.httpIntegration(),
       Sentry.expressIntegration(),
     ],
   });
