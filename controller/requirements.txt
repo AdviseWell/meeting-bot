@@ -6,5 +6,8 @@ google-cloud-storage==2.19.0
 # Kubernetes Python Client
 kubernetes==34.1.0
 
+# Error monitoring
+sentry-sdk>=2.35.0,<3.0.0
+
 # Optional: Better logging
 python-json-logger==4.0.0

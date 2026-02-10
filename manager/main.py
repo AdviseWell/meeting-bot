@@ -38,6 +38,10 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
+# Initialise Sentry early (before any other work)
+from sentry_integration import initialise_sentry, capture_error_safe, flush_sentry
+initialise_sentry(component="manager")
+
 
 def _scratch_root() -> str:
     """Prefer a PVC-backed scratch directory if mounted."""
@@ -1699,6 +1703,7 @@ def main():
         exit_code = manager.run()
     except Exception as e:
         logger.exception(f"Fatal error during initialization: {e}")
+        capture_error_safe(e, component="manager", feature="main", action="fatal_error")
         exit_code = 1
 
         # Try to shutdown even if initialization failed partway through
@@ -1712,6 +1717,7 @@ def main():
                     shutdown_error,
                 )
 
+    flush_sentry()
     sys.exit(exit_code)
 
 

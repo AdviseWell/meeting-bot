@@ -1,4 +1,5 @@
 import express from 'express';
+import * as Sentry from '@sentry/node';
 import client from 'prom-client';
 import config, { NODE_ENV } from '../config';
 import mainDebug from '../test/debug';
@@ -86,6 +87,9 @@ app.get('/debug', async (req, res, next) => {
 app.use('/google', googleRouter);
 app.use('/microsoft', microsoftRouter);
 app.use('/zoom', zoomRouter);
+
+// Sentry error handler — MUST be after all routes and before other error handlers
+Sentry.setupExpressErrorHandler(app);
 
 export const setGracefulShutdown = (val: number) =>
   gracefulShutdown = val;

@@ -51,6 +51,10 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
+# Initialise Sentry early (before any other work)
+from sentry_integration import initialise_sentry, capture_error_safe, flush_sentry
+initialise_sentry(component="controller")
+
 # Reduce noise from some verbose libraries (unless DEBUG is explicitly set)
 if log_level > logging.DEBUG:
     logging.getLogger("google.auth").setLevel(logging.WARNING)
@@ -180,6 +184,7 @@ class MeetingController:
 
         # Optional configuration
         self.node_env = os.getenv("NODE_ENV", "development")
+        self.sentry_dsn = os.getenv("SENTRY_DSN", "")
         self.max_recording_duration = int(
             os.getenv("MAX_RECORDING_DURATION_MINUTES", "600")
         )
@@ -592,6 +597,9 @@ class MeetingController:
                         name="GCP_DEFAULT_REGION",
                         value=os.getenv("GCP_DEFAULT_REGION", "us-central1"),
                     ),
+                    # Sentry error monitoring
+                    client.V1EnvVar(name="SENTRY_DSN", value=self.sentry_dsn),
+                    client.V1EnvVar(name="SENTRY_ENVIRONMENT", value=self.node_env),
                 ],
                 volume_mounts=[
                     client.V1VolumeMount(
@@ -631,6 +639,9 @@ class MeetingController:
                     client.V1EnvVar(name="TMPDIR", value="/scratch/tmp"),
                     client.V1EnvVar(name="TMP", value="/scratch/tmp"),
                     client.V1EnvVar(name="TEMP", value="/scratch/tmp"),
+                    # Sentry error monitoring
+                    client.V1EnvVar(name="SENTRY_DSN", value=self.sentry_dsn),
+                    client.V1EnvVar(name="SENTRY_ENVIRONMENT", value=self.node_env),
                 ],
                 volume_mounts=[
                     client.V1VolumeMount(name="recordings", mount_path="/recordings"),
@@ -4258,9 +4269,12 @@ def main():
         controller.run()
     except KeyboardInterrupt:
         logger.info("👋 Shutting down controller")
+        flush_sentry()
         sys.exit(0)
     except Exception as e:
         logger.error(f"💥 Fatal error: {e}", exc_info=True)
+        capture_error_safe(e, component="controller", feature="main", action="fatal_error")
+        flush_sentry()
         sys.exit(1)
 
 

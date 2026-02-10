@@ -79,4 +79,12 @@ export default {
     forcePathStyle: process.env.S3_USE_MINIO_COMPATIBILITY === 'true',
   },
   uploaderType: process.env.UPLOADER_TYPE ? (process.env.UPLOADER_TYPE as UploaderType) : 's3' as UploaderType,
+  sentry: {
+    dsn: process.env.SENTRY_DSN || '',
+    environment: process.env.SENTRY_ENVIRONMENT || process.env.NODE_ENV || 'development',
+    release: process.env.SENTRY_RELEASE || undefined,
+    tracesSampleRate: process.env.SENTRY_TRACES_SAMPLE_RATE
+      ? Number(process.env.SENTRY_TRACES_SAMPLE_RATE)
+      : undefined,
+  },
 };
