@@ -6,13 +6,13 @@
 # Usage:
 #   pip install -r manager/requirements-offline-diarization.txt
 
-torch>=2.2.0,<2.5.0
-torchaudio>=2.2.0,<2.5.0
+torch>=2.6.0,<2.11.0
+torchaudio>=2.6.0,<2.11.0
 packaging>=20.9
 speechbrain==1.0.3
-scikit-learn>=1.3.0,<1.4.0
+scikit-learn>=1.5.0,<1.9.0
 
 # SpeechBrain 1.0.3 uses huggingface_hub.hf_hub_download(use_auth_token=...).
-# Newer huggingface_hub removed that argument in favor of `token=...`.
-# Pin to a compatible series.
-huggingface_hub>=0.19,<0.24
+# Newer huggingface_hub removed that argument in favour of `token=...`.
+# Compatibility is handled by the patch in scripts/whisper_diarize.py.
+huggingface_hub>=0.19

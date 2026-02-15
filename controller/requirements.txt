@@ -1,10 +1,14 @@
 # Google Cloud Platform
-google-cloud-firestore==2.22.0
-google-cloud-pubsub==2.34.0
+google-cloud-firestore==2.23.0
+google-cloud-pubsub==2.35.0
 google-cloud-storage==2.19.0
 
 # Kubernetes Python Client
-kubernetes==34.1.0
+kubernetes==35.0.0
+
+# HTTP / networking
+# Pin urllib3 to fix CVE-2025-50182, CVE-2025-50181, CVE-2025-66418, CVE-2025-66471, CVE-2026-21441
+urllib3>=2.6.3
 
 # Error monitoring
 sentry-sdk>=2.35.0,<3.0.0
