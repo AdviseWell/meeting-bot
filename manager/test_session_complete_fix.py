@@ -17,8 +17,8 @@ class TestSessionModeDetection(unittest.TestCase):
     def setUp(self):
         """Clear any cached modules and set up clean environment."""
         # Remove cached module if present
-        if "manager.main" in sys.modules:
-            del sys.modules["manager.main"]
+        if "main" in sys.modules:
+            del sys.modules["main"]
         if "__main__" in sys.modules:
             # Can't delete __main__, but we'll import fresh
             pass
@@ -39,7 +39,7 @@ class TestSessionModeDetection(unittest.TestCase):
             if key in os.environ:
                 del os.environ[key]
 
-    @patch("manager.main.load_meeting_metadata")
+    @patch("main.load_meeting_metadata")
     def test_session_mode_detected_with_meeting_session_id(self, mock_metadata):
         """Manager should detect session mode when MEETING_SESSION_ID is set."""
         mock_metadata.return_value = {}
@@ -52,13 +52,13 @@ class TestSessionModeDetection(unittest.TestCase):
         os.environ["MEETING_SESSION_ID"] = "abc123session"
         os.environ["teamId"] = "advisewell"
 
-        from manager.main import MeetingManager
+        from main import MeetingManager
 
         mgr = MeetingManager()
 
         self.assertEqual(mgr.meeting_session_id, "abc123session")
 
-    @patch("manager.main.load_meeting_metadata")
+    @patch("main.load_meeting_metadata")
     def test_session_mode_not_detected_without_meeting_session_id(self, mock_metadata):
         """Manager should NOT detect session mode without MEETING_SESSION_ID."""
         mock_metadata.return_value = {}
@@ -70,13 +70,13 @@ class TestSessionModeDetection(unittest.TestCase):
         os.environ["GCS_PATH"] = "recordings/test-user-id/test-meeting-id"
         os.environ["teamId"] = "advisewell"
 
-        from manager.main import MeetingManager
+        from main import MeetingManager
 
         mgr = MeetingManager()
 
         self.assertEqual(mgr.meeting_session_id, "")
 
-    @patch("manager.main.load_meeting_metadata")
+    @patch("main.load_meeting_metadata")
     def test_mark_session_complete_called_when_session_mode(self, mock_metadata):
         """_mark_session_complete should update Firestore when session_id is set."""
         mock_metadata.return_value = {}
@@ -89,14 +89,14 @@ class TestSessionModeDetection(unittest.TestCase):
         os.environ["MEETING_SESSION_ID"] = "abc123session"
         os.environ["teamId"] = "advisewell"
 
-        from manager.main import MeetingManager
+        from main import MeetingManager
 
         mgr = MeetingManager()
 
-        # Mock the Firestore client
-        with patch("manager.main.firestore") as mock_firestore:
+        # Mock the Firestore client (imported locally: from google.cloud import firestore)
+        with patch("google.cloud.firestore.Client") as mock_client_cls:
             mock_db = MagicMock()
-            mock_firestore.Client.return_value = mock_db
+            mock_client_cls.return_value = mock_db
             mock_ref = MagicMock()
             mock_db.collection.return_value.document.return_value.collection.return_value.document.return_value = (
                 mock_ref
@@ -117,7 +117,7 @@ class TestSessionModeDetection(unittest.TestCase):
             self.assertIn("artifacts", payload)
             self.assertEqual(payload["artifacts"]["video"], "test.mp4")
 
-    @patch("manager.main.load_meeting_metadata")
+    @patch("main.load_meeting_metadata")
     def test_mark_session_complete_skipped_without_session_mode(self, mock_metadata):
         """_mark_session_complete should do nothing without session_id."""
         mock_metadata.return_value = {}
@@ -129,22 +129,22 @@ class TestSessionModeDetection(unittest.TestCase):
         os.environ["GCS_PATH"] = "recordings/test-user-id/test-meeting-id"
         os.environ["teamId"] = "advisewell"
 
-        from manager.main import MeetingManager
+        from main import MeetingManager
 
         mgr = MeetingManager()
 
         # Mock the Firestore client - should NOT be called
-        with patch("manager.main.firestore") as mock_firestore:
+        with patch("google.cloud.firestore.Client") as mock_client_cls:
             mock_db = MagicMock()
-            mock_firestore.Client.return_value = mock_db
+            mock_client_cls.return_value = mock_db
 
             # Call _mark_session_complete
             mgr._mark_session_complete(ok=True, artifacts={"video": "test.mp4"})
 
             # Verify Firestore was NOT called
-            mock_firestore.Client.assert_not_called()
+            mock_client_cls.assert_not_called()
 
-    @patch("manager.main.load_meeting_metadata")
+    @patch("main.load_meeting_metadata")
     def test_mark_session_complete_skipped_without_org_id(self, mock_metadata):
         """_mark_session_complete should warn and skip without org_id."""
         mock_metadata.return_value = {}
@@ -157,20 +157,20 @@ class TestSessionModeDetection(unittest.TestCase):
         os.environ["MEETING_SESSION_ID"] = "abc123session"
         # NO teamId set!
 
-        from manager.main import MeetingManager
+        from main import MeetingManager
 
         mgr = MeetingManager()
 
         # Mock the Firestore client - should NOT be called
-        with patch("manager.main.firestore") as mock_firestore:
+        with patch("google.cloud.firestore.Client") as mock_client_cls:
             mock_db = MagicMock()
-            mock_firestore.Client.return_value = mock_db
+            mock_client_cls.return_value = mock_db
 
             # Call _mark_session_complete
             mgr._mark_session_complete(ok=True, artifacts={"video": "test.mp4"})
 
             # Verify Firestore was NOT called (no org_id)
-            mock_firestore.Client.assert_not_called()
+            mock_client_cls.assert_not_called()
 
 
 class TestSessionModeDetectionRegression(unittest.TestCase):
@@ -190,7 +190,7 @@ class TestSessionModeDetectionRegression(unittest.TestCase):
             if key in os.environ:
                 del os.environ[key]
 
-    @patch("manager.main.load_meeting_metadata")
+    @patch("main.load_meeting_metadata")
     def test_gcs_path_does_not_control_session_mode(self, mock_metadata):
         """
         Regression test: GCS path starting with 'recordings/sessions/' should NOT
@@ -206,7 +206,7 @@ class TestSessionModeDetectionRegression(unittest.TestCase):
         os.environ["GCS_PATH"] = "recordings/sessions/abc123"
         os.environ["teamId"] = "advisewell"
 
-        from manager.main import MeetingManager
+        from main import MeetingManager
 
         mgr = MeetingManager()
 
@@ -214,9 +214,9 @@ class TestSessionModeDetectionRegression(unittest.TestCase):
         self.assertEqual(mgr.meeting_session_id, "")
 
         # _mark_session_complete should do nothing
-        with patch("manager.main.firestore") as mock_firestore:
+        with patch("google.cloud.firestore.Client") as mock_client_cls:
             mgr._mark_session_complete(ok=True, artifacts={"video": "test.mp4"})
-            mock_firestore.Client.assert_not_called()
+            mock_client_cls.assert_not_called()
 
 
 if __name__ == "__main__":
