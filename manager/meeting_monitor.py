@@ -307,11 +307,17 @@ class MeetingMonitor:
 
             # Check if job is complete
             if state in ["completed", "finished", "done"]:
-                if elapsed < 30:
+                # Track whether the job ended suspiciously fast — this strongly
+                # suggests the bot was denied entry (lobby timeout / user denied)
+                # or crashed before recording could start.
+                quick_finish = elapsed < 30
+                if quick_finish:
                     logger.warning(
-                        f"⚠️ Job finished very quickly ({elapsed:.1f}s). "
-                        "This usually indicates the bot failed to join or crashed immediately. "
-                        "Check meeting-bot container logs for errors."
+                        "⚠️ Job finished very quickly ({elapsed:.1f}s). "
+                        "This usually indicates the bot was not admitted to the "
+                        "meeting (lobby timeout or denied) or crashed immediately. "
+                        "Check meeting-bot container logs for WaitingAtLobbyRetryError.",
+                        extra={"elapsed_seconds": round(elapsed, 1)},
                     )
 
                 # --- Recording discovery ---
@@ -482,10 +488,21 @@ class MeetingMonitor:
                         break
 
                 if not recording_files:
-                    logger.error(
-                        "❌ No recording directory/files found. Checked: %s",
-                        ", ".join(searched_dirs),
-                    )
+                    if quick_finish:
+                        # Bot was almost certainly not admitted to the meeting
+                        # (lobby timeout / denied). No recording is expected.
+                        logger.warning(
+                            "No recording found after quick finish (%.1fs) — "
+                            "bot was likely not admitted to the meeting. "
+                            "Checked: %s",
+                            elapsed,
+                            ", ".join(searched_dirs),
+                        )
+                    else:
+                        logger.error(
+                            "❌ No recording directory/files found. Checked: %s",
+                            ", ".join(searched_dirs),
+                        )
                     return None
 
                 # We break out of the loop on first match, so reaching here

@@ -873,7 +873,9 @@ export class GoogleMeetBot extends MeetBotBase {
 
     // Initialize PulseAudio backup recorder
     let pulseRecorder: PulseAudioRecorder | null = null;
-    const tempFolder = path.join(process.cwd(), 'dist', '_tempvideo');
+    const tempFolder = process.env.TEMPVIDEO_DIR
+      ? process.env.TEMPVIDEO_DIR
+      : path.join(process.cwd(), 'dist', '_tempvideo');
     const tempFileId = this.slightlySecretId;
 
     try {
