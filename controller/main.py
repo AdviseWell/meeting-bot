@@ -39,15 +39,30 @@ from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 import json
 
-# Configure logging
-log_level_name = os.getenv("LOG_LEVEL", "DEBUG").upper()
-log_level = getattr(logging, log_level_name, logging.DEBUG)
+# Configure logging ────────────────────────────────────────────────────────────
+# Default to JSON for production (better Sentry / GCP Logging integration).
+# Set LOG_FORMAT=text for human-readable output during local development.
+_log_level_name = os.getenv("LOG_LEVEL", "DEBUG").upper()
+_log_level = getattr(logging, _log_level_name, logging.DEBUG)
 
-logging.basicConfig(
-    level=log_level,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)],
-)
+_handler = logging.StreamHandler(sys.stdout)
+
+if os.getenv("LOG_FORMAT", "json").lower() == "text":
+    _handler.setFormatter(
+        logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    )
+else:
+    from pythonjsonlogger.json import JsonFormatter
+
+    _handler.setFormatter(
+        JsonFormatter(
+            fmt="%(asctime)s %(name)s %(levelname)s %(message)s",
+            rename_fields={"asctime": "timestamp", "levelname": "level", "name": "logger"},
+            static_fields={"component": "controller"},
+        )
+    )
+
+logging.basicConfig(level=_log_level, handlers=[_handler])
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +71,7 @@ from sentry_integration import initialise_sentry, capture_error_safe, flush_sent
 initialise_sentry(component="controller")
 
 # Reduce noise from some verbose libraries (unless DEBUG is explicitly set)
-if log_level > logging.DEBUG:
+if _log_level > logging.DEBUG:
     logging.getLogger("google.auth").setLevel(logging.WARNING)
     logging.getLogger("urllib3").setLevel(logging.WARNING)
     logging.getLogger("google.cloud").setLevel(logging.INFO)

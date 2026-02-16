@@ -29,17 +29,40 @@ from datetime import datetime, timezone
 from meeting_monitor import MeetingMonitor
 from metadata import load_meeting_metadata
 
-# Configure logging
-logging.basicConfig(
-    level=logging.DEBUG,  # Changed to DEBUG for more detailed logs
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)],
-)
+# Configure logging ────────────────────────────────────────────────────────────
+# Default to JSON for production (better Sentry / GCP Logging integration).
+# Set LOG_FORMAT=text for human-readable output during local development.
+_log_level_name = os.getenv("LOG_LEVEL", "DEBUG").upper()
+_log_level = getattr(logging, _log_level_name, logging.DEBUG)
+
+_handler = logging.StreamHandler(sys.stdout)
+
+if os.getenv("LOG_FORMAT", "json").lower() == "text":
+    _handler.setFormatter(
+        logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    )
+else:
+    from pythonjsonlogger.json import JsonFormatter
+
+    _handler.setFormatter(
+        JsonFormatter(
+            fmt="%(asctime)s %(name)s %(levelname)s %(message)s",
+            rename_fields={
+                "asctime": "timestamp",
+                "levelname": "level",
+                "name": "logger",
+            },
+            static_fields={"component": "manager"},
+        )
+    )
+
+logging.basicConfig(level=_log_level, handlers=[_handler])
 
 logger = logging.getLogger(__name__)
 
 # Initialise Sentry early (before any other work)
 from sentry_integration import initialise_sentry, capture_error_safe, flush_sentry
+
 initialise_sentry(component="manager")
 
 
@@ -324,7 +347,12 @@ class MeetingManager:
                 job_id, self.metadata, check_interval=10
             )
             if not recording_path:
-                logger.error("Meeting monitoring failed or no recording generated")
+                logger.warning(
+                    "Meeting monitoring ended without a recording. "
+                    "This may indicate the bot was not admitted to the meeting "
+                    "(lobby timeout or access denied), the meeting ended before "
+                    "recording started, or a recording failure occurred."
+                )
                 logger.debug(
                     "POST-MEETING DECISION: No recording file - meeting may have ended prematurely or recording failed"
                 )
@@ -1621,9 +1649,9 @@ class MeetingManager:
                 logger.info("=" * 50)
                 exit_code = 0
             else:
-                logger.error("=" * 50)
+                logger.info("=" * 50)
                 logger.error("Processing failed")
-                logger.error("=" * 50)
+                logger.info("=" * 50)
                 exit_code = 1
 
         finally:
