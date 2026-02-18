@@ -11,10 +11,6 @@ on:
       - main
       - develop
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 env:
   GAR_LOCATION: australia-southeast1
   GAR_REPOSITORY: meeting-bot  # Consolidated repository for all images
@@ -449,38 +445,12 @@ jobs:
     name: Build Summary
     runs-on: ubuntu-latest
     needs: [build, build-controller, build-manager]
-    if: ${{ always() }}
-    permissions:
-      actions: write
-      contents: read
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
     steps:
-      - name: Cancel workflow if any build failed
-        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
-        uses: actions/github-script@v7
-        with:
-          script: |
-            console.log('One or more build jobs failed or were cancelled — cancelling workflow run.');
-            await github.rest.actions.cancelWorkflowRun({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              run_id: context.runId,
-            });
-
-      - name: Fail if any build did not succeed
-        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
-        run: |
-          echo "One or more build jobs failed:"
-          echo "  build:            ${{ needs.build.result }}"
-          echo "  build-manager:    ${{ needs.build-manager.result }}"
-          echo "  build-controller: ${{ needs.build-controller.result }}"
-          exit 1
-
       - name: Checkout repository
-        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
         uses: actions/checkout@v4
       
       - name: Display Build Summary
-        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
         run: |
           echo ""
           echo "╔═══════════════════════════════════════════════════════════════════════════╗"
