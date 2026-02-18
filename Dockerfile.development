@@ -3,7 +3,9 @@ FROM node:22
 WORKDIR /usr/src/app
 
 # Install system dependencies, including WebGL support
+# apt-get upgrade patches OS-level CVEs (openssl, etc.)
 RUN apt-get update && \
+  apt-get upgrade -y && \
   apt-get install -y \
   ffmpeg \
   libnss3 \

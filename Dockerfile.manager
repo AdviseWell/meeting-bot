@@ -4,8 +4,8 @@
 
 FROM python:3.11-slim
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
+# Install system dependencies and upgrade existing packages to fix OS-level CVEs (openssl)
+RUN apt-get update && apt-get upgrade -y && apt-get install -y \
     ffmpeg \
     curl \
     procps \
@@ -14,6 +14,12 @@ RUN apt-get update && apt-get install -y \
 
 # Set working directory
 WORKDIR /app
+
+# Upgrade pip and pin transitive deps to fix CVEs:
+#   CVE-2025-8869  -> pip>=25.3
+#   CVE-2026-24049 -> wheel>=0.46.2
+#   CVE-2026-23949 -> jaraco-context>=6.1
+RUN pip install --no-cache-dir --upgrade "pip>=25.3" "wheel>=0.46.2" "jaraco-context>=6.1"
 
 # Copy requirements first for better caching
 COPY manager/requirements.txt .
