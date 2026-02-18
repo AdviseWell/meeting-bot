@@ -3,7 +3,7 @@ google-cloud-storage==3.9.0
 google-cloud-firestore==2.23.0
 
 # Google GenAI for Gemini transcription
-google-genai==1.48.0
+google-genai==1.63.0
 
 # Audio processing
 pydub==0.25.1
@@ -15,6 +15,16 @@ requests==2.32.5
 # HTTP / networking
 # Pin urllib3 to fix CVE-2025-50182, CVE-2025-50181, CVE-2025-66418, CVE-2025-66471, CVE-2026-21441
 urllib3>=2.6.3
+
+# Pin pyasn1 to fix CVE-2026-23490
+pyasn1>=0.6.2
+
+# Pin protobuf to fix CVE-2025-68121
+protobuf>=5.29.6,<6.0.0
+
+# Pin starlette/python-multipart for CVE fixes
+starlette>=0.52.1
+python-multipart>=0.0.22
 
 # Error monitoring
 sentry-sdk>=2.35.0,<3.0.0

@@ -48,5 +48,8 @@
     "ts-node": "^10.9.2",
     "uuid": "^11.1.0",
     "winston": "^3.17.0"
+  },
+  "overrides": {
+    "fast-xml-parser": ">=5.3.6"
   }
 }
